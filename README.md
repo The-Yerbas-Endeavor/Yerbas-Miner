@@ -64,4 +64,4 @@ The first configure requires network access so CMake can fetch the pinned Yerbas
 
 ## Next milestone
 
-Add deterministic real Yerbas block-header/PoW test vectors and verify the CPU adapter byte-for-byte against Core. Once those vectors pass, the same vectors become the correctness gate for the CUDA implementation before nonce scanning or share submission is enabled.
+Add deterministic real Yerbas block-header/PoW test vectors and verify the CPU adapter byte-for-byte against Core. Once those vectors pass, the same vectors become the correctness gate for the CUDA implementation before nonce scanning or share submission is enabled..
