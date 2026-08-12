@@ -1,17 +1,10 @@
 #ifdef _WIN32
 
+#include <winsock2.h>
 #include <windows.h>
 #include <stdint.h>
 
 struct timezone;
-
-#ifndef _TIMEVAL_DEFINED
-#define _TIMEVAL_DEFINED
-struct timeval {
-    long tv_sec;
-    long tv_usec;
-};
-#endif
 
 int gettimeofday(struct timeval* tv, struct timezone* tz)
 {
