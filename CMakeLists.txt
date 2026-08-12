@@ -16,9 +16,9 @@ endif()
 
 include(FetchContent)
 
-# Pin the CPU reference implementation to the Yerbas Core master commit that
-# contains release 3.2.0.15. Do not track a moving branch here: CPU/GPU hash
-# equality must always be reproducible.
+# Pin the CPU reference implementation to the exact Yerbas Core commit used as
+# the source of truth for GhostRider. Do not track a moving branch: CPU/GPU hash
+# equality must remain reproducible.
 FetchContent_Declare(
     yerbas_core
     GIT_REPOSITORY https://github.com/The-Yerbas-Endeavor/yerbas.git
@@ -32,25 +32,30 @@ endif()
 
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 
+# This list mirrors the GhostRider/SPHlib/CryptoNight sources used by Yerbas
+# Core's crypto library and hash_selection.cpp.
 set(YERBAS_GR_CORE_SOURCES
     ${YERBAS_CORE_SRC}/hash_selection.cpp
 
+    ${YERBAS_CORE_SRC}/crypto/aes_helper.c
     ${YERBAS_CORE_SRC}/crypto/blake.c
     ${YERBAS_CORE_SRC}/crypto/bmw.c
     ${YERBAS_CORE_SRC}/crypto/cubehash.c
     ${YERBAS_CORE_SRC}/crypto/echo.c
-    ${YERBAS_CORE_SRC}/crypto/fugue.c
     ${YERBAS_CORE_SRC}/crypto/groestl.c
-    ${YERBAS_CORE_SRC}/crypto/hamsi.c
     ${YERBAS_CORE_SRC}/crypto/jh.c
     ${YERBAS_CORE_SRC}/crypto/keccak.c
     ${YERBAS_CORE_SRC}/crypto/luffa.c
-    ${YERBAS_CORE_SRC}/crypto/sha2.c
-    ${YERBAS_CORE_SRC}/crypto/shabal.c
     ${YERBAS_CORE_SRC}/crypto/shavite.c
     ${YERBAS_CORE_SRC}/crypto/simd.c
     ${YERBAS_CORE_SRC}/crypto/skein.c
-    ${YERBAS_CORE_SRC}/crypto/whirlpool.c
+    ${YERBAS_CORE_SRC}/crypto/sph_hamsi.c
+    ${YERBAS_CORE_SRC}/crypto/sph_hamsi_helper.c
+    ${YERBAS_CORE_SRC}/crypto/sph_fugue.c
+    ${YERBAS_CORE_SRC}/crypto/sph_shabal.c
+    ${YERBAS_CORE_SRC}/crypto/sph_whirlpool.c
+    ${YERBAS_CORE_SRC}/crypto/sph_sha2.c
+    ${YERBAS_CORE_SRC}/crypto/sph_sha512.c
 
     ${YERBAS_CORE_SRC}/cryptonote/aesb.c
     ${YERBAS_CORE_SRC}/cryptonote/c_blake256.c
