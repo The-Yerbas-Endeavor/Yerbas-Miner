@@ -1,4 +1,5 @@
 #include "cuda/cuda_backend.h"
+#include "cuda/core/keccak512.cuh"
 
 #include <cuda_runtime.h>
 
@@ -13,6 +14,8 @@ namespace yerbas::cuda {
 namespace {
 
 constexpr std::size_t kMaxCandidates = 64;
+constexpr std::size_t kStateBytes = 64;
+constexpr std::uint8_t kKeccakCoreIndex = 4;
 
 struct DeviceJob {
     std::uint8_t header[80];
@@ -52,12 +55,56 @@ __global__ void initialize_nonce_batch(std::uint32_t start_nonce,
     }
 }
 
-// This kernel is intentionally separated from the future GhostRider stage
-// kernels. Once a batch of final 256-bit hashes exists in d_hashes, target
-// comparison happens entirely on-device and only successful candidates cross
-// PCIe back to the host.
+// First real GhostRider core stage: Keccak-512 (Yerbas coreHash index 4).
+// stage_index == 0 hashes the 80-byte block header with the per-thread nonce.
+// Later stages hash the previous 64-byte state in-place.
+__global__ void keccak512_stage(const DeviceJob* job,
+                                const std::uint32_t* nonces,
+                                std::uint8_t* states,
+                                std::size_t count,
+                                int stage_index)
+{
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    std::uint8_t digest[64];
+
+    if (stage_index == 0) {
+        std::uint8_t header[80];
+        #pragma unroll
+        for (int i = 0; i < 80; ++i) header[i] = job->header[i];
+
+        const std::uint32_t nonce = nonces[index];
+        header[76] = static_cast<std::uint8_t>(nonce);
+        header[77] = static_cast<std::uint8_t>(nonce >> 8);
+        header[78] = static_cast<std::uint8_t>(nonce >> 16);
+        header[79] = static_cast<std::uint8_t>(nonce >> 24);
+        core::keccak512(header, 80, digest);
+    } else {
+        const std::uint8_t* input = states + index * kStateBytes;
+        core::keccak512(input, kStateBytes, digest);
+    }
+
+    std::uint8_t* output = states + index * kStateBytes;
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) output[i] = digest[i];
+}
+
+__global__ void keccak512_validation_kernel(const std::uint8_t* input,
+                                            std::size_t length,
+                                            std::uint8_t* output)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    std::uint8_t digest[64];
+    core::keccak512(input, length, digest);
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) output[i] = digest[i];
+}
+
+// Once the final 512-bit GhostRider state exists, only its low 256 bits are
+// compared with the share target, matching Yerbas Core's trim256().
 __global__ void collect_candidates(const std::uint32_t* nonces,
-                                   const std::uint8_t* hashes,
+                                   const std::uint8_t* states,
                                    std::size_t count,
                                    const DeviceJob* job,
                                    DeviceCandidate* candidates,
@@ -66,7 +113,7 @@ __global__ void collect_candidates(const std::uint32_t* nonces,
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
 
-    const std::uint8_t* hash = hashes + index * 32;
+    const std::uint8_t* hash = states + index * kStateBytes;
     if (!hash_meets_target(hash, job->target_le)) return;
 
     const unsigned int slot = atomicAdd(candidate_count, 1U);
@@ -86,7 +133,7 @@ struct BatchEngine::Impl {
     cudaStream_t stream{};
     DeviceJob* d_job{nullptr};
     std::uint32_t* d_nonces{nullptr};
-    std::uint8_t* d_hashes{nullptr};
+    std::uint8_t* d_states{nullptr};
     DeviceCandidate* d_candidates{nullptr};
     unsigned int* d_candidate_count{nullptr};
     bool job_loaded{false};
@@ -105,8 +152,8 @@ struct BatchEngine::Impl {
                    "cudaMalloc job failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_size * sizeof(std::uint32_t)),
                    "cudaMalloc nonce batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_hashes), batch_size * 32),
-                   "cudaMalloc hash batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_size * kStateBytes),
+                   "cudaMalloc 512-bit state batch failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)),
                    "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)),
@@ -118,7 +165,7 @@ struct BatchEngine::Impl {
         cudaSetDevice(device_id);
         if (d_candidate_count) cudaFree(d_candidate_count);
         if (d_candidates) cudaFree(d_candidates);
-        if (d_hashes) cudaFree(d_hashes);
+        if (d_states) cudaFree(d_states);
         if (d_nonces) cudaFree(d_nonces);
         if (d_job) cudaFree(d_job);
         if (stream) cudaStreamDestroy(stream);
@@ -156,9 +203,9 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     }
 
     if (!hash_pipeline_ready()) {
-        // The persistent batch engine is live, but the GhostRider stage kernels
-        // are not yet installed. Returning no candidates is safer than treating
-        // uninitialized d_hashes as valid PoW results.
+        // One core kernel is now implemented and independently testable, but a
+        // complete GhostRider share requires all 15 core hashes plus the three
+        // selected CryptoNight stages. Never submit partial-pipeline results.
         return {};
     }
 
@@ -173,13 +220,12 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                   impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Future implementation point:
-    //   dispatch the 18 job-selected GhostRider stages here. The selector is
-    //   already resident in d_job->stages, so kernels never need to recompute
-    //   selection per nonce. d_hashes remains resident for the whole batch.
+    // Dispatcher will be enabled only after every possible job-selected stage
+    // has a validated CUDA implementation. Keccak-512 is implemented today as
+    // the first core stage and exercised through keccak512_reference_stage().
 
     collect_candidates<<<blocks, threads, 0, impl_->stream>>>(impl_->d_nonces,
-                                                               impl_->d_hashes,
+                                                               impl_->d_states,
                                                                impl_->batch_size,
                                                                impl_->d_job,
                                                                impl_->d_candidates,
@@ -214,6 +260,43 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
 bool BatchEngine::hash_pipeline_ready() const noexcept { return false; }
+
+Hash512 keccak512_reference_stage(int device_id,
+                                  const std::uint8_t* input,
+                                  std::size_t length)
+{
+    if (input == nullptr || length == 0) {
+        throw std::invalid_argument("CUDA Keccak validation input must not be empty");
+    }
+
+    check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
+
+    std::uint8_t* d_input = nullptr;
+    std::uint8_t* d_output = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_input), length),
+               "cudaMalloc validation input failed");
+    try {
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_output), 64),
+                   "cudaMalloc validation output failed");
+        check_cuda(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice),
+                   "cudaMemcpy validation input failed");
+
+        keccak512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
+        check_cuda(cudaGetLastError(), "keccak512 validation launch failed");
+        check_cuda(cudaDeviceSynchronize(), "keccak512 validation synchronize failed");
+
+        Hash512 out{};
+        check_cuda(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost),
+                   "cudaMemcpy validation output failed");
+        cudaFree(d_output);
+        cudaFree(d_input);
+        return out;
+    } catch (...) {
+        if (d_output) cudaFree(d_output);
+        if (d_input) cudaFree(d_input);
+        throw;
+    }
+}
 
 int device_count()
 {
