@@ -35,7 +35,7 @@ jobs:
         run: |
           mkdir -p dist/yerbas-miner-linux-x86_64
           cp build/yerbas-miner dist/yerbas-miner-linux-x86_64/
-          cp README.md dist/yerbas-miner-linux-x86_64/
+          cp README.md config.example.json dist/yerbas-miner-linux-x86_64/
           tar -C dist -czf dist/yerbas-miner-linux-x86_64.tar.gz yerbas-miner-linux-x86_64
 
       - name: Upload binary
@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p dist/yerbas-miner-linux-arm64
           cp build/yerbas-miner dist/yerbas-miner-linux-arm64/
-          cp README.md dist/yerbas-miner-linux-arm64/
+          cp README.md config.example.json dist/yerbas-miner-linux-arm64/
           tar -C dist -czf dist/yerbas-miner-linux-arm64.tar.gz yerbas-miner-linux-arm64
 
       - name: Upload binary
@@ -107,6 +107,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/yerbas-miner-windows-x86_64 | Out-Null
           Copy-Item build/Release/yerbas-miner.exe dist/yerbas-miner-windows-x86_64/
           Copy-Item README.md dist/yerbas-miner-windows-x86_64/
+          Copy-Item config.example.json dist/yerbas-miner-windows-x86_64/
           Compress-Archive -Path dist/yerbas-miner-windows-x86_64/* -DestinationPath dist/yerbas-miner-windows-x86_64.zip
 
       - name: Upload binary
