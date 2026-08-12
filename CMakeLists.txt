@@ -16,6 +16,16 @@ endif()
 
 include(FetchContent)
 
+# Header-only JSON parser used by config.json. It is linked into the binary and
+# does not add a runtime DLL/shared-library dependency.
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # Pin the CPU reference implementation to the exact Yerbas Core commit used as
 # the source of truth for GhostRider. Do not track a moving branch: CPU/GPU hash
 # equality must remain reproducible.
@@ -33,9 +43,8 @@ endif()
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 
 # Yerbas Core's CryptoNight code uses _malloca() under MSVC but releases that
-# buffer with free(). That is invalid and causes Windows heap corruption during
-# the GhostRider smoke test. Patch only the fetched build-tree copy so the
-# pinned upstream repository remains unchanged.
+# buffer with free(). Patch only the fetched build-tree copy so the pinned
+# upstream repository remains unchanged.
 if(WIN32)
     set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
     file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
@@ -101,18 +110,12 @@ target_include_directories(yerbas-ghostrider-reference
     PRIVATE ${YERBAS_CORE_SRC}
 )
 
-# Modern glibc defines endian helpers as macros; the pinned Core compatibility
-# header declares functions with the same names. Force-include a Linux-only shim
-# that removes those macros before any Core headers are parsed.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(yerbas-ghostrider-reference PRIVATE
         -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
     )
 endif()
 
-# The imported CryptoNight/OpenAES C sources include POSIX sys/time.h and
-# unistd.h. Provide compatibility headers plus a gettimeofday implementation
-# when building on Windows, leaving the pinned Core checkout unchanged.
 if(WIN32)
     target_include_directories(yerbas-ghostrider-reference BEFORE PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/compat/windows"
@@ -125,9 +128,14 @@ endif()
 add_executable(yerbas-miner
     src/main.cpp
     src/miner.cpp
+    src/config.cpp
+    src/stratum/stratum.cpp
 )
 target_include_directories(yerbas-miner PRIVATE src)
-target_link_libraries(yerbas-miner PRIVATE yerbas-ghostrider-reference)
+target_link_libraries(yerbas-miner PRIVATE
+    yerbas-ghostrider-reference
+    nlohmann_json::nlohmann_json
+)
 
 if(YERBAS_ENABLE_CUDA)
     include(CheckLanguage)
