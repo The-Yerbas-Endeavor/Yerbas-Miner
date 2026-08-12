@@ -20,13 +20,71 @@ HashGR(serialized block header, hashPrevBlock)
 
 The miner adapter accepts the serialized block header and derives `hashPrevBlock` directly from header bytes 4-35, matching Core's serialized `CBlockHeader` layout and avoiding display-endian mistakes.
 
-GhostRider then runs 18 stages:
+## Configuration
 
-```text
-5 core hashes -> CryptoNight -> 5 core hashes -> CryptoNight -> 5 core hashes -> CryptoNight
+Copy the example configuration before running the miner:
+
+```bash
+cp config.example.json config.json
 ```
 
-The 15 core hashes and three CryptoNight selections are determined from the previous block hash using Yerbas Core's exact `HashSelection` logic.
+On Windows, copy `config.example.json` to `config.json` in the same directory as `yerbas-miner.exe`.
+
+Example:
+
+```json
+{
+  "pool": {
+    "url": "stratum+tcp://pool.example.com:3032",
+    "user": "YOUR_YERB_ADDRESS",
+    "password": "x"
+  },
+  "miner": {
+    "worker": "rig1",
+    "threads": 0
+  },
+  "gpu": {
+    "enabled": true,
+    "devices": [0],
+    "intensity": 0
+  },
+  "logging": {
+    "level": "info"
+  }
+}
+```
+
+`config.json` is ignored by Git so local wallet/pool information is not accidentally committed. `config.example.json` is included in release artifacts.
+
+Command-line options override values from the configuration file:
+
+```bash
+./yerbas-miner --pool stratum+tcp://pool.example.com:3032 --user YOUR_YERB_ADDRESS --worker rig1
+```
+
+Use a different config file with:
+
+```bash
+./yerbas-miner --config myrig.json
+```
+
+Common options:
+
+```text
+--config FILE
+--pool URL
+--user USER
+--password PASS
+--worker NAME
+--threads N
+--devices 0,1
+--intensity N
+--no-gpu
+--log-level LEVEL
+--help
+```
+
+Priority is command line, then JSON config, then built-in defaults.
 
 ## Current status
 
@@ -35,10 +93,15 @@ The 15 core hashes and three CryptoNight selections are determined from the prev
 - Yerbas Core source revision pinned for reproducibility
 - 15 SPHlib core hashes wired in
 - 6 selectable CryptoNight variants wired in
+- Real Yerbas mainnet genesis header test fixture
 - Optional NVIDIA CUDA backend
 - CUDA GPU discovery and device reporting
-- CPU GhostRider smoke test
-- Mining loop still disabled until deterministic known-good block vectors are added and CPU results are verified against Yerbas Core RPC/block data
+- JSON config file support
+- command-line configuration overrides
+- pool URL/user/password/worker settings
+- GPU device/intensity settings
+- Stratum endpoint parsing and configuration plumbing
+- Stratum socket/session protocol and share submission not implemented yet
 
 ## Build
 
@@ -60,8 +123,8 @@ ctest --test-dir build --output-on-failure
 ./build/yerbas-miner
 ```
 
-The first configure requires network access so CMake can fetch the pinned Yerbas Core source tree.
+The first configure requires network access so CMake can fetch the pinned Yerbas Core source tree and the header-only JSON dependency.
 
 ## Next milestone
 
-Add deterministic real Yerbas block-header/PoW test vectors and verify the CPU adapter byte-for-byte against Core. Once those vectors pass, the same vectors become the correctness gate for the CUDA implementation before nonce scanning or share submission is enabled..
+Complete the Stratum TCP session: connect, subscribe, authorize, receive jobs, construct Yerbas block headers, scan nonces, validate shares with the CPU reference, and submit accepted shares. The same real block-header vectors remain the correctness gate for the CUDA implementation.
