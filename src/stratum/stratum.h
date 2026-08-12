@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -54,6 +55,7 @@ private:
 
     void set_target_hex(const std::string& target_hex);
     void set_difficulty(double difficulty);
+    void report_stats(bool force = false);
 
     AppConfig config_;
     Endpoint endpoint_;
@@ -73,6 +75,10 @@ private:
     std::array<std::uint8_t, 32> target_le_{};
     bool target_ready_{false};
     double difficulty_{0.0};
+
+    std::chrono::steady_clock::time_point mining_started_{};
+    std::chrono::steady_clock::time_point last_report_{};
+    std::uint64_t hashes_at_last_report_{0};
 };
 
 } // namespace yerbas::stratum
