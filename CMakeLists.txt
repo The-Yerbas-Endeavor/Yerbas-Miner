@@ -91,12 +91,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 # The imported CryptoNight/OpenAES C sources include POSIX sys/time.h and
-# unistd.h even though the code path needed by Yerbas does not depend on POSIX
-# APIs. Provide minimal compatibility headers ahead of the Core include tree
-# when building with MSVC/Windows, leaving the pinned Core checkout unchanged.
+# unistd.h. Provide compatibility headers plus a gettimeofday implementation
+# when building on Windows, leaving the pinned Core checkout unchanged.
 if(WIN32)
     target_include_directories(yerbas-ghostrider-reference BEFORE PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/compat/windows"
+    )
+    target_sources(yerbas-ghostrider-reference PRIVATE
+        compat/windows/gettimeofday.c
     )
 endif()
 
