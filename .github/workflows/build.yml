@@ -103,20 +103,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install CUDA Toolkit
-        shell: pwsh
-        run: |
-          choco install cuda --version=12.8.1 --no-progress -y
-          $cuda = Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory |
-            Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $cuda) { throw 'CUDA Toolkit installation was not found' }
-          "CUDA_PATH=$($cuda.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$($cuda.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          Write-Host "CUDA_PATH=$($cuda.FullName)"
+      - name: Install CUDA Toolkit 12.8.1
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.8.1'
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
       - name: Verify CUDA compiler
         shell: pwsh
-        run: nvcc --version
+        run: |
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          nvcc --version
 
       - name: Configure CUDA build
         shell: pwsh
