@@ -4,10 +4,15 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "config.h"
+
+#ifdef YERBAS_HAS_CUDA
+#include "cuda/cuda_backend.h"
+#endif
 
 namespace yerbas::stratum {
 
@@ -49,6 +54,11 @@ private:
                       std::string& extranonce2_hex,
                       std::uint32_t nonce) const;
     bool mine_one(std::intptr_t socket_value);
+#ifdef YERBAS_HAS_CUDA
+    bool mine_gpu_batch(std::intptr_t socket_value);
+    void initialize_gpu_engines();
+    void upload_gpu_job();
+#endif
     bool submit_share(std::intptr_t socket_value,
                       const std::string& extranonce2_hex,
                       std::uint32_t nonce);
@@ -79,6 +89,17 @@ private:
     std::chrono::steady_clock::time_point mining_started_{};
     std::chrono::steady_clock::time_point last_report_{};
     std::uint64_t hashes_at_last_report_{0};
+
+#ifdef YERBAS_HAS_CUDA
+    struct GpuWorker {
+        int device_id{-1};
+        std::unique_ptr<cuda::BatchEngine> engine;
+        std::uint32_t next_nonce{0};
+        std::uint64_t hashes_done{0};
+    };
+    std::vector<GpuWorker> gpu_workers_;
+    bool gpu_job_loaded_{false};
+#endif
 };
 
 } // namespace yerbas::stratum
