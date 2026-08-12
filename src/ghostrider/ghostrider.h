@@ -7,6 +7,7 @@
 namespace yerbas::ghostrider {
 
 using Hash256 = std::array<std::uint8_t, 32>;
+using Hash512 = std::array<std::uint8_t, 64>;
 using StageSchedule = std::array<std::uint8_t, 18>;
 
 // Stage encoding used by the GPU scheduler:
@@ -23,6 +24,10 @@ struct Work {
 // hash-selection logic from Yerbas Core. For normal mining input, data is the
 // serialized 80-byte Yerbas block header (nVersion through nNonce).
 Hash256 hash_reference(const Work& work);
+
+// Exposes one of the 15 512-bit core hashes for GPU validation. algorithm must
+// be in the same 0..14 index space used by Yerbas Core's coreHash().
+Hash512 core_hash_reference(const Work& work, int algorithm);
 
 // GhostRider selection depends only on hashPrevBlock, so one schedule can be
 // computed once per Stratum job and reused for every nonce in the GPU batch.
