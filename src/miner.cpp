@@ -20,6 +20,14 @@ void handle_signal(int)
 {
     g_stop_requested.store(true);
 }
+
+#ifdef _WIN32
+void pause_before_exit()
+{
+    std::cout << "\nPress Enter to close..." << std::flush;
+    std::cin.get();
+}
+#endif
 }
 
 Miner::Miner(AppConfig config)
@@ -34,7 +42,7 @@ int Miner::run()
     std::signal(SIGTERM, handle_signal);
 #endif
 
-    std::cout << "Yerbas Miner 0.3.0\n";
+    std::cout << "Yerbas Miner 0.4.1\n";
     std::cout << "Config: " << config_.config_path << "\n";
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
@@ -63,8 +71,15 @@ int Miner::run()
     std::cout << "\nGPU intensity: " << config_.gpu.intensity << " (0 = auto)\n";
 
     if (!stratum_client.ready()) {
-        std::cout << "Pool configuration is incomplete. Edit config.json or use --pool and --user.\n";
-        std::cout << "Example: yerbas-miner.exe --pool stratum+tcp://pool.example.com:3032 --user YOUR_YERB_ADDRESS\n";
+        std::cout << "\nPool configuration is incomplete.\n";
+        std::cout << "Edit config.json in the same folder as yerbas-miner.exe and set:\n"
+                     "  pool.url\n"
+                     "  pool.user\n\n";
+        std::cout << "Or run:\n"
+                     "  yerbas-miner.exe --pool stratum+tcp://POOL:PORT --user YOUR_YERB_ADDRESS\n";
+#ifdef _WIN32
+        pause_before_exit();
+#endif
         return 2;
     }
 
