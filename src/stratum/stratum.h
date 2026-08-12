@@ -54,8 +54,10 @@ private:
                       std::string& extranonce2_hex,
                       std::uint32_t nonce) const;
     bool mine_one(std::intptr_t socket_value);
+    bool mine_cpu_batch(std::intptr_t socket_value);
 #ifdef YERBAS_HAS_CUDA
     bool mine_gpu_batch(std::intptr_t socket_value);
+    bool mine_hybrid_round(std::intptr_t socket_value);
     void initialize_gpu_engines();
     void upload_gpu_job();
 #endif
@@ -81,7 +83,7 @@ private:
     std::string extranonce1_;
     std::size_t extranonce2_size_{4};
     std::uint64_t extranonce2_counter_{0};
-    std::uint32_t nonce_{0};
+    std::uint32_t nonce_{0x80000000U};
     MiningJob job_;
     std::array<std::uint8_t, 32> target_le_{};
     bool target_ready_{false};
