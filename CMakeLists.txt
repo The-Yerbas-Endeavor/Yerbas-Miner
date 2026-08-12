@@ -32,6 +32,26 @@ endif()
 
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 
+# Yerbas Core's CryptoNight code uses _malloca() under MSVC but releases that
+# buffer with free(). That is invalid and causes Windows heap corruption during
+# the GhostRider smoke test. Patch only the fetched build-tree copy so the
+# pinned upstream repository remains unchanged.
+if(WIN32)
+    set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
+    file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
+    string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "  free(long_state);" YERBAS_FREE_POS)
+    if(YERBAS_FREE_POS EQUAL -1)
+        message(FATAL_ERROR "Could not locate CryptoNight long_state cleanup in pinned slow-hash.c")
+    endif()
+    string(REPLACE
+        "  free(long_state);"
+        "#if defined(_MSC_VER)\n  _freea(long_state);\n#else\n  free(long_state);\n#endif"
+        YERBAS_SLOW_HASH_CONTENT
+        "${YERBAS_SLOW_HASH_CONTENT}"
+    )
+    file(WRITE "${YERBAS_SLOW_HASH}" "${YERBAS_SLOW_HASH_CONTENT}")
+endif()
+
 set(YERBAS_GR_CORE_SOURCES
     ${YERBAS_CORE_SRC}/hash_selection.cpp
 
