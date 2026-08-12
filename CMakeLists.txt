@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(YerbasMiner VERSION 0.3.0 LANGUAGES C CXX)
+project(YerbasMiner VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -119,6 +119,7 @@ add_executable(yerbas-miner
     src/main.cpp
     src/miner.cpp
     src/config.cpp
+    src/crypto/sha256.cpp
     src/stratum/stratum.cpp
 )
 target_include_directories(yerbas-miner PRIVATE src)
