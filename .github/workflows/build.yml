@@ -18,26 +18,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git libboost-dev
-
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
-
       - name: Build
         run: cmake --build build --parallel
-
       - name: Test
         run: ctest --test-dir build --output-on-failure
-
       - name: Package
         run: |
           mkdir -p dist/yerbas-miner-linux-x86_64
           cp build/yerbas-miner dist/yerbas-miner-linux-x86_64/
           cp README.md config.example.json dist/yerbas-miner-linux-x86_64/
           tar -C dist -czf dist/yerbas-miner-linux-x86_64.tar.gz yerbas-miner-linux-x86_64
-
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -51,26 +45,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git libboost-dev
-
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
-
       - name: Build
         run: cmake --build build --parallel
-
       - name: Test
         run: ctest --test-dir build --output-on-failure
-
       - name: Package
         run: |
           mkdir -p dist/yerbas-miner-linux-arm64
           cp build/yerbas-miner dist/yerbas-miner-linux-arm64/
           cp README.md config.example.json dist/yerbas-miner-linux-arm64/
           tar -C dist -czf dist/yerbas-miner-linux-arm64.tar.gz yerbas-miner-linux-arm64
-
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -84,34 +72,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Boost
-        shell: pwsh
-        run: |
-          choco install boost-msvc-14.3 --no-progress -y
-          $header = Get-ChildItem -Path C:\local -Filter cpp_int.hpp -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match 'boost\\multiprecision\\cpp_int.hpp$' } |
-            Select-Object -First 1
-          if (-not $header) {
-            throw 'Could not locate boost/multiprecision/cpp_int.hpp after Chocolatey install'
-          }
-          $boostDir = Split-Path (Split-Path (Split-Path $header.FullName -Parent) -Parent) -Parent
-          Write-Host "Boost include root: $boostDir"
-          "BOOST_INCLUDEDIR=$boostDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "INCLUDE=$boostDir;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON -DBOOST_INCLUDEDIR="$env:BOOST_INCLUDEDIR"
-
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
       - name: Build
         shell: pwsh
         run: cmake --build build --config Release --parallel
-
       - name: Test
         shell: pwsh
         run: ctest --test-dir build -C Release --output-on-failure
-
       - name: Package
         shell: pwsh
         run: |
@@ -120,10 +89,69 @@ jobs:
           Copy-Item README.md dist/yerbas-miner-windows-x86_64/
           Copy-Item config.example.json dist/yerbas-miner-windows-x86_64/
           Compress-Archive -Path dist/yerbas-miner-windows-x86_64/* -DestinationPath dist/yerbas-miner-windows-x86_64.zip
-
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: yerbas-miner-windows-x86_64
           path: dist/yerbas-miner-windows-x86_64.zip
+          if-no-files-found: error
+
+  windows-cuda-x86_64:
+    name: Windows CUDA x86_64
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        shell: pwsh
+        run: |
+          choco install cuda --version=12.8.1 --no-progress -y
+          $cuda = Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $cuda) { throw 'CUDA Toolkit installation was not found' }
+          "CUDA_PATH=$($cuda.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$($cuda.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "CUDA_PATH=$($cuda.FullName)"
+
+      - name: Verify CUDA compiler
+        shell: pwsh
+        run: nvcc --version
+
+      - name: Configure CUDA build
+        shell: pwsh
+        run: cmake -S . -B build-cuda -A x64 -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=ON -DBUILD_TESTING=ON
+
+      - name: Build CUDA miner
+        shell: pwsh
+        run: cmake --build build-cuda --config Release --parallel
+
+      - name: Test CPU reference
+        shell: pwsh
+        run: ctest --test-dir build-cuda -C Release --output-on-failure
+
+      - name: Verify CUDA linkage
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build-cuda/Release/yerbas-miner.exe)) { throw 'CUDA miner executable not produced' }
+
+      - name: Package CUDA miner
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/yerbas-miner-windows-cuda-x86_64 | Out-Null
+          Copy-Item build-cuda/Release/yerbas-miner.exe dist/yerbas-miner-windows-cuda-x86_64/
+          Copy-Item README.md dist/yerbas-miner-windows-cuda-x86_64/
+          Copy-Item config.example.json dist/yerbas-miner-windows-cuda-x86_64/
+          @'
+          This is the NVIDIA CUDA build of Yerbas-Miner.
+          Requires a supported NVIDIA GPU and driver.
+          The miner will not silently fall back to CPU when CUDA mining is requested.
+          '@ | Set-Content dist/yerbas-miner-windows-cuda-x86_64/CUDA-BUILD.txt
+          Compress-Archive -Path dist/yerbas-miner-windows-cuda-x86_64/* -DestinationPath dist/yerbas-miner-windows-cuda-x86_64.zip
+
+      - name: Upload CUDA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-windows-cuda-x86_64
+          path: dist/yerbas-miner-windows-cuda-x86_64.zip
           if-no-files-found: error
