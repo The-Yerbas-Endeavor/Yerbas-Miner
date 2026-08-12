@@ -30,11 +30,18 @@ int main()
         return 2;
     }
 
+    const auto cpu_skein_header = yerbas::ghostrider::core_hash_reference(header_work, 5);
+    const auto gpu_skein_header = yerbas::cuda::skein512_reference_stage(0, header.data(), header.size());
+    if (cpu_skein_header != gpu_skein_header) {
+        std::cerr << "CUDA Skein-512 mismatch for 80-byte Yerbas header\n";
+        return 3;
+    }
+
     const auto cpu_cube_header = yerbas::ghostrider::core_hash_reference(header_work, 7);
     const auto gpu_cube_header = yerbas::cuda::cubehash512_reference_stage(0, header.data(), header.size());
     if (cpu_cube_header != gpu_cube_header) {
         std::cerr << "CUDA CubeHash-512 mismatch for 80-byte Yerbas header\n";
-        return 3;
+        return 4;
     }
 
     std::array<std::uint8_t, 64> stage_input{};
@@ -47,23 +54,30 @@ int main()
     const auto gpu_blake_stage = yerbas::cuda::blake512_reference_stage(0, stage_input.data(), stage_input.size());
     if (cpu_blake_stage != gpu_blake_stage) {
         std::cerr << "CUDA BLAKE-512 mismatch for 64-byte intermediate state\n";
-        return 4;
+        return 5;
     }
 
     const auto cpu_keccak_stage = yerbas::ghostrider::core_hash_reference(stage_work, 4);
     const auto gpu_keccak_stage = yerbas::cuda::keccak512_reference_stage(0, stage_input.data(), stage_input.size());
     if (cpu_keccak_stage != gpu_keccak_stage) {
         std::cerr << "CUDA Keccak-512 mismatch for 64-byte intermediate state\n";
-        return 5;
+        return 6;
+    }
+
+    const auto cpu_skein_stage = yerbas::ghostrider::core_hash_reference(stage_work, 5);
+    const auto gpu_skein_stage = yerbas::cuda::skein512_reference_stage(0, stage_input.data(), stage_input.size());
+    if (cpu_skein_stage != gpu_skein_stage) {
+        std::cerr << "CUDA Skein-512 mismatch for 64-byte intermediate state\n";
+        return 7;
     }
 
     const auto cpu_cube_stage = yerbas::ghostrider::core_hash_reference(stage_work, 7);
     const auto gpu_cube_stage = yerbas::cuda::cubehash512_reference_stage(0, stage_input.data(), stage_input.size());
     if (cpu_cube_stage != gpu_cube_stage) {
         std::cerr << "CUDA CubeHash-512 mismatch for 64-byte intermediate state\n";
-        return 6;
+        return 8;
     }
 
-    std::cout << "CUDA BLAKE-512, Keccak-512 and CubeHash-512 match Yerbas Core for 80-byte and 64-byte inputs\n";
+    std::cout << "CUDA BLAKE-512, Keccak-512, Skein-512 and CubeHash-512 match Yerbas Core for 80-byte and 64-byte inputs\n";
     return 0;
 }
