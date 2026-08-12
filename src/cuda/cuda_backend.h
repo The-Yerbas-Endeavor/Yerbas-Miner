@@ -56,12 +56,15 @@ int device_count();
 std::vector<DeviceInfo> enumerate_devices();
 void print_devices();
 
-// Standalone validation hook for the clean-room CUDA Keccak-512 stage. This is
-// deliberately separate from BatchEngine until all 18 GhostRider stages are
-// implemented and validated.
+// Standalone validation hooks for clean-room CUDA core stages. These remain
+// separate from BatchEngine until all job-selectable GhostRider stages are
+// implemented and validated against Yerbas Core.
 Hash512 keccak512_reference_stage(int device_id,
                                   const std::uint8_t* input,
                                   std::size_t length);
+Hash512 cubehash512_reference_stage(int device_id,
+                                    const std::uint8_t* input,
+                                    std::size_t length);
 
 } // namespace yerbas::cuda
 
