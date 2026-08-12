@@ -142,15 +142,15 @@ if(YERBAS_ENABLE_CUDA)
     enable_language(CUDA)
     set(YERBAS_CUDA_AVAILABLE ON)
 
-    # Build one portable CUDA binary covering the NVIDIA generations we want to
-    # support.  The CI runner has no physical GPU, so architectures must be
-    # explicit rather than inferred from local hardware.
     set(YERBAS_CUDA_ARCHITECTURES "52;60;61;70;75;80;86;89;90" CACHE STRING
         "CUDA compute capabilities built into Yerbas-Miner")
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
-    target_sources(yerbas-miner PRIVATE src/cuda/cuda_backend.cu)
+    target_sources(yerbas-miner PRIVATE
+        src/cuda/cuda_backend.cu
+        src/cuda/blake_validation.cu
+    )
     target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
     set_target_properties(yerbas-miner PROPERTIES
         CUDA_STANDARD 17
@@ -170,6 +170,7 @@ if(BUILD_TESTING)
         add_executable(cuda-keccak-validation
             tests/cuda_keccak_validation.cpp
             src/cuda/cuda_backend.cu
+            src/cuda/blake_validation.cu
         )
         target_include_directories(cuda-keccak-validation PRIVATE src tests)
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
