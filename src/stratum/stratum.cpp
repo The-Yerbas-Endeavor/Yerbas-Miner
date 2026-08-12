@@ -1,13 +1,21 @@
 #include "stratum/stratum.h"
 
-#include <nlohmann/json.hpp>
+#include "crypto/sha256.h"
+#include "ghostrider/ghostrider.h"
 
+#include <nlohmann/json.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -28,11 +36,11 @@ constexpr SocketHandle kInvalidSocket = -1;
 namespace yerbas::stratum {
 namespace {
 
+using boost::multiprecision::cpp_int;
+
 void close_socket(SocketHandle socket)
 {
-    if (socket == kInvalidSocket) {
-        return;
-    }
+    if (socket == kInvalidSocket) return;
 #ifdef _WIN32
     closesocket(socket);
 #else
@@ -59,9 +67,7 @@ bool send_all(SocketHandle socket, const std::string& data)
 #else
         const ssize_t n = send(socket, data.data() + sent, data.size() - sent, 0);
 #endif
-        if (n <= 0) {
-            return false;
-        }
+        if (n <= 0) return false;
         sent += static_cast<std::size_t>(n);
     }
     return true;
@@ -72,9 +78,7 @@ SocketHandle connect_tcp(const Endpoint& endpoint)
 #ifdef _WIN32
     WSADATA data{};
     const int startup = WSAStartup(MAKEWORD(2, 2), &data);
-    if (startup != 0) {
-        throw std::runtime_error("WSAStartup failed: " + std::to_string(startup));
-    }
+    if (startup != 0) throw std::runtime_error("WSAStartup failed: " + std::to_string(startup));
 #endif
 
     addrinfo hints{};
@@ -87,49 +91,39 @@ SocketHandle connect_tcp(const Endpoint& endpoint)
     const int rc = getaddrinfo(endpoint.host.c_str(), port.c_str(), &hints, &result);
     if (rc != 0) {
 #ifdef _WIN32
-        throw std::runtime_error("DNS lookup failed for " + endpoint.host + ": " +
-                                 std::to_string(rc));
+        throw std::runtime_error("DNS lookup failed for " + endpoint.host + ": " + std::to_string(rc));
 #else
-        throw std::runtime_error("DNS lookup failed for " + endpoint.host + ": " +
-                                 gai_strerror(rc));
+        throw std::runtime_error("DNS lookup failed for " + endpoint.host + ": " + gai_strerror(rc));
 #endif
     }
 
     SocketHandle connected = kInvalidSocket;
     for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        SocketHandle socket_handle = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (socket_handle == kInvalidSocket) {
-            continue;
-        }
-
-        if (connect(socket_handle, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
-            connected = socket_handle;
+        SocketHandle s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == kInvalidSocket) continue;
+        if (connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
+            connected = s;
             break;
         }
-
-        close_socket(socket_handle);
+        close_socket(s);
     }
-
     freeaddrinfo(result);
 
     if (connected == kInvalidSocket) {
         throw std::runtime_error("Could not connect to " + endpoint.host + ':' +
-                                 std::to_string(endpoint.port) + " (" +
-                                 socket_error_string() + ')');
+                                 std::to_string(endpoint.port) + " (" + socket_error_string() + ')');
     }
     return connected;
 }
 
-bool socket_readable(SocketHandle socket, int seconds)
+bool socket_readable(SocketHandle socket, int milliseconds)
 {
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(socket, &readfds);
-
     timeval tv{};
-    tv.tv_sec = seconds;
-    tv.tv_usec = 0;
-
+    tv.tv_sec = milliseconds / 1000;
+    tv.tv_usec = (milliseconds % 1000) * 1000;
 #ifdef _WIN32
     const int result = select(0, &readfds, nullptr, nullptr, &tv);
 #else
@@ -138,9 +132,109 @@ bool socket_readable(SocketHandle socket, int seconds)
     return result > 0 && FD_ISSET(socket, &readfds);
 }
 
-std::string json_line(const nlohmann::json& message)
+std::string json_line(const nlohmann::json& message) { return message.dump() + "\n"; }
+
+int hex_value(char c)
 {
-    return message.dump() + "\n";
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+    return -1;
+}
+
+std::vector<std::uint8_t> hex_to_bytes(const std::string& hex)
+{
+    if ((hex.size() & 1U) != 0) throw std::runtime_error("Odd-length hex field in Stratum job");
+    std::vector<std::uint8_t> out(hex.size() / 2);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const int hi = hex_value(hex[i * 2]);
+        const int lo = hex_value(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) throw std::runtime_error("Invalid hex field in Stratum job");
+        out[i] = static_cast<std::uint8_t>((hi << 4) | lo);
+    }
+    return out;
+}
+
+std::string hex_fixed(std::uint64_t value, std::size_t bytes)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(static_cast<int>(bytes * 2)) << value;
+    std::string out = ss.str();
+    if (out.size() > bytes * 2) out = out.substr(out.size() - bytes * 2);
+    return out;
+}
+
+std::string nonce_hex(std::uint32_t nonce)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(8) << nonce;
+    return ss.str();
+}
+
+void append(std::vector<std::uint8_t>& dst, const std::vector<std::uint8_t>& src)
+{
+    dst.insert(dst.end(), src.begin(), src.end());
+}
+
+std::array<std::uint8_t, 32> merkle_root(const MiningJob& job,
+                                         const std::string& extranonce1,
+                                         const std::string& extranonce2)
+{
+    std::vector<std::uint8_t> coinbase = hex_to_bytes(job.coinb1 + extranonce1 + extranonce2 + job.coinb2);
+    auto hash = crypto::double_sha256(coinbase);
+    for (const auto& branch_hex : job.merkle_branch) {
+        const auto branch = hex_to_bytes(branch_hex);
+        if (branch.size() != 32) throw std::runtime_error("Invalid merkle branch length");
+        std::vector<std::uint8_t> pair;
+        pair.reserve(64);
+        pair.insert(pair.end(), hash.begin(), hash.end());
+        pair.insert(pair.end(), branch.begin(), branch.end());
+        hash = crypto::double_sha256(pair);
+    }
+    return hash;
+}
+
+std::vector<std::uint8_t> stratum_prevhash_bytes(const std::string& hex)
+{
+    auto bytes = hex_to_bytes(hex);
+    if (bytes.size() != 32) throw std::runtime_error("Stratum prevhash must be 32 bytes");
+    // Conventional Bitcoin Stratum transports prevhash as eight 32-bit words;
+    // each word is byte-swapped when placed into the serialized block header.
+    for (std::size_t i = 0; i < 32; i += 4) {
+        std::reverse(bytes.begin() + static_cast<std::ptrdiff_t>(i),
+                     bytes.begin() + static_cast<std::ptrdiff_t>(i + 4));
+    }
+    return bytes;
+}
+
+std::vector<std::uint8_t> reversed_4byte_field(const std::string& hex)
+{
+    auto bytes = hex_to_bytes(hex);
+    if (bytes.size() != 4) throw std::runtime_error("Expected 4-byte Stratum header field");
+    std::reverse(bytes.begin(), bytes.end());
+    return bytes;
+}
+
+bool hash_meets_target(const ghostrider::Hash256& hash,
+                       const std::array<std::uint8_t, 32>& target_le)
+{
+    for (int i = 31; i >= 0; --i) {
+        if (hash[static_cast<std::size_t>(i)] < target_le[static_cast<std::size_t>(i)]) return true;
+        if (hash[static_cast<std::size_t>(i)] > target_le[static_cast<std::size_t>(i)]) return false;
+    }
+    return true;
+}
+
+cpp_int parse_hex_int(const std::string& hex)
+{
+    cpp_int value = 0;
+    for (char c : hex) {
+        const int v = hex_value(c);
+        if (v < 0) throw std::runtime_error("Invalid target hex");
+        value <<= 4;
+        value += v;
+    }
+    return value;
 }
 
 } // namespace
@@ -148,96 +242,61 @@ std::string json_line(const nlohmann::json& message)
 Endpoint parse_endpoint(const std::string& url)
 {
     const auto scheme_end = url.find("://");
-    if (scheme_end == std::string::npos) {
-        throw std::runtime_error("Pool URL must include a scheme, e.g. stratum+tcp://host:port");
-    }
-
+    if (scheme_end == std::string::npos) throw std::runtime_error("Pool URL must include a scheme, e.g. stratum+tcp://host:port");
     Endpoint endpoint;
     endpoint.scheme = url.substr(0, scheme_end);
     const std::string authority = url.substr(scheme_end + 3);
-
     const auto colon = authority.rfind(':');
-    if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size()) {
-        throw std::runtime_error("Pool URL must include host and port");
-    }
-
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size()) throw std::runtime_error("Pool URL must include host and port");
     endpoint.host = authority.substr(0, colon);
     const unsigned long port = std::stoul(authority.substr(colon + 1));
-    if (port == 0 || port > 65535) {
-        throw std::runtime_error("Pool port is out of range");
-    }
+    if (port == 0 || port > 65535) throw std::runtime_error("Pool port is out of range");
     endpoint.port = static_cast<unsigned short>(port);
-
-    if (endpoint.scheme != "stratum+tcp" && endpoint.scheme != "stratum") {
-        throw std::runtime_error("Unsupported pool scheme: " + endpoint.scheme);
-    }
-
+    if (endpoint.scheme != "stratum+tcp" && endpoint.scheme != "stratum") throw std::runtime_error("Unsupported pool scheme: " + endpoint.scheme);
     return endpoint;
 }
 
-Client::Client(const AppConfig& config)
-    : config_(config)
+Client::Client(const AppConfig& config) : config_(config)
 {
-    if (!config_.pool.url.empty()) {
-        endpoint_ = parse_endpoint(config_.pool.url);
-    }
+    if (!config_.pool.url.empty()) endpoint_ = parse_endpoint(config_.pool.url);
 }
 
 void Client::print_connection_plan() const
 {
-    if (config_.pool.url.empty()) {
-        std::cout << "Pool: not configured\n";
-        return;
-    }
-
+    if (config_.pool.url.empty()) { std::cout << "Pool: not configured\n"; return; }
     std::cout << "Pool: " << endpoint_.host << ':' << endpoint_.port << '\n';
     std::cout << "Worker: " << config_.miner.worker << '\n';
     std::cout << "User: " << (config_.pool.user.empty() ? "not configured" : config_.pool.user) << '\n';
-    std::cout << "Stratum transport: TCP enabled\n";
+    std::cout << "Stratum transport: TCP + CPU share pipeline enabled\n";
 }
 
-bool Client::ready() const noexcept
-{
-    return !config_.pool.url.empty() && !config_.pool.user.empty();
-}
+bool Client::ready() const noexcept { return !config_.pool.url.empty() && !config_.pool.user.empty(); }
 
 std::string Client::login_user() const
 {
-    if (config_.miner.worker.empty()) {
-        return config_.pool.user;
-    }
+    if (config_.miner.worker.empty()) return config_.pool.user;
     return config_.pool.user + "." + config_.miner.worker;
 }
 
 int Client::run(std::atomic_bool& stop_requested)
 {
-    if (!ready()) {
-        std::cerr << "Pool configuration is incomplete. Set pool.url and pool.user.\n";
-        return 2;
-    }
-
-    std::cout << "Starting Stratum client. Press Ctrl+C to stop.\n";
+    if (!ready()) { std::cerr << "Pool configuration is incomplete. Set pool.url and pool.user.\n"; return 2; }
+    std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
-        try {
-            if (run_session(stop_requested)) {
-                break;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[stratum] " << e.what() << '\n';
-        }
-
+        try { if (run_session(stop_requested)) break; }
+        catch (const std::exception& e) { std::cerr << "[stratum] " << e.what() << '\n'; }
         if (!stop_requested.load()) {
             std::cout << "[stratum] Reconnecting in 5 seconds...\n";
-            for (int i = 0; i < 50 && !stop_requested.load(); ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            for (int i = 0; i < 50 && !stop_requested.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
-
 #ifdef _WIN32
     WSACleanup();
 #endif
-    std::cout << "Stratum client stopped.\n";
+    std::cout << "Stratum miner stopped. Hashes=" << hashes_done_
+              << " submitted=" << shares_submitted_
+              << " accepted=" << shares_accepted_
+              << " rejected=" << shares_rejected_ << '\n';
     return 0;
 }
 
@@ -245,64 +304,49 @@ bool Client::run_session(std::atomic_bool& stop_requested)
 {
     subscribed_ = false;
     authorized_ = false;
+    job_.valid = false;
 
     std::cout << "[stratum] Connecting to " << endpoint_.host << ':' << endpoint_.port << "...\n";
     SocketHandle socket_handle = connect_tcp(endpoint_);
     std::cout << "[stratum] Connected\n";
 
-    const nlohmann::json subscribe = {
-        {"id", 1},
-        {"method", "mining.subscribe"},
-        {"params", nlohmann::json::array({"Yerbas-Miner/0.3.0"})}
-    };
-    const nlohmann::json authorize = {
-        {"id", 2},
-        {"method", "mining.authorize"},
-        {"params", nlohmann::json::array({login_user(), config_.pool.password})}
-    };
-
-    if (!send_all(socket_handle, json_line(subscribe)) ||
-        !send_all(socket_handle, json_line(authorize))) {
+    const nlohmann::json subscribe = {{"id",1},{"method","mining.subscribe"},{"params",nlohmann::json::array({"Yerbas-Miner/0.4.0"})}};
+    const nlohmann::json authorize = {{"id",2},{"method","mining.authorize"},{"params",nlohmann::json::array({login_user(),config_.pool.password})}};
+    if (!send_all(socket_handle, json_line(subscribe)) || !send_all(socket_handle, json_line(authorize))) {
         close_socket(socket_handle);
         throw std::runtime_error("Failed to send Stratum subscribe/authorize requests");
     }
 
     std::string pending;
     char buffer[8192];
-
     while (!stop_requested.load()) {
-        if (!socket_readable(socket_handle, 1)) {
-            continue;
-        }
-
+        if (socket_readable(socket_handle, job_.valid ? 0 : 250)) {
 #ifdef _WIN32
-        const int n = recv(socket_handle, buffer, static_cast<int>(sizeof(buffer)), 0);
+            const int n = recv(socket_handle, buffer, static_cast<int>(sizeof(buffer)), 0);
 #else
-        const ssize_t n = recv(socket_handle, buffer, sizeof(buffer), 0);
+            const ssize_t n = recv(socket_handle, buffer, sizeof(buffer), 0);
 #endif
-        if (n <= 0) {
-            close_socket(socket_handle);
-            std::cout << "[stratum] Connection closed by pool\n";
-            return false;
+            if (n <= 0) { close_socket(socket_handle); std::cout << "[stratum] Connection closed by pool\n"; return false; }
+            pending.append(buffer, static_cast<std::size_t>(n));
+            for (;;) {
+                const auto newline = pending.find('\n');
+                if (newline == std::string::npos) break;
+                std::string line = pending.substr(0, newline);
+                pending.erase(0, newline + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty()) handle_message(line);
+            }
         }
 
-        pending.append(buffer, static_cast<std::size_t>(n));
-        for (;;) {
-            const auto newline = pending.find('\n');
-            if (newline == std::string::npos) {
-                break;
+        if (authorized_ && job_.valid && target_ready_) {
+            if (!mine_one(static_cast<std::intptr_t>(socket_handle))) {
+                close_socket(socket_handle);
+                return false;
             }
-            std::string line = pending.substr(0, newline);
-            pending.erase(0, newline + 1);
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back();
-            }
-            if (!line.empty()) {
-                handle_message(line);
-            }
+        } else if (!socket_readable(socket_handle, 0)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
-
     close_socket(socket_handle);
     return true;
 }
@@ -310,59 +354,177 @@ bool Client::run_session(std::atomic_bool& stop_requested)
 void Client::handle_message(const std::string& line)
 {
     nlohmann::json message;
-    try {
-        message = nlohmann::json::parse(line);
-    } catch (const std::exception&) {
-        std::cerr << "[stratum] Non-JSON message: " << line << '\n';
-        return;
-    }
+    try { message = nlohmann::json::parse(line); }
+    catch (const std::exception&) { std::cerr << "[stratum] Non-JSON message: " << line << '\n'; return; }
 
     if (message.contains("id") && !message["id"].is_null()) {
         const int id = message["id"].is_number_integer() ? message["id"].get<int>() : -1;
+        const auto error = message.value("error", nlohmann::json(nullptr));
         if (id == 1) {
-            if (message.value("error", nlohmann::json(nullptr)).is_null()) {
+            if (error.is_null()) {
                 subscribed_ = true;
-                std::cout << "[stratum] Subscription accepted\n";
-            } else {
-                std::cerr << "[stratum] Subscription rejected: " << message.dump() << '\n';
-            }
+                const auto result = message.value("result", nlohmann::json::array());
+                if (result.is_array() && result.size() >= 3) {
+                    if (result[1].is_string()) extranonce1_ = result[1].get<std::string>();
+                    if (result[2].is_number_unsigned() || result[2].is_number_integer()) extranonce2_size_ = result[2].get<std::size_t>();
+                }
+                std::cout << "[stratum] Subscription accepted; extranonce1=" << extranonce1_
+                          << " extranonce2_size=" << extranonce2_size_ << '\n';
+            } else std::cerr << "[stratum] Subscription rejected: " << message.dump() << '\n';
         } else if (id == 2) {
-            const bool ok = message.contains("result") &&
-                            ((message["result"].is_boolean() && message["result"].get<bool>()) ||
-                             !message["result"].is_null());
-            if (ok && message.value("error", nlohmann::json(nullptr)).is_null()) {
-                authorized_ = true;
-                std::cout << "[stratum] Authorization accepted as " << login_user() << '\n';
-            } else {
-                std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
-            }
+            const bool ok = message.contains("result") && message["result"].is_boolean() && message["result"].get<bool>();
+            if (ok && error.is_null()) { authorized_ = true; std::cout << "[stratum] Authorization accepted as " << login_user() << '\n'; }
+            else std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
+        } else if (id >= 1000) {
+            const bool accepted = error.is_null() && message.contains("result") &&
+                                  ((message["result"].is_boolean() && message["result"].get<bool>()) || !message["result"].is_null());
+            if (accepted) { ++shares_accepted_; std::cout << "[share] ACCEPTED (" << shares_accepted_ << '/' << shares_rejected_ << ")\n"; }
+            else { ++shares_rejected_; std::cout << "[share] REJECTED (" << shares_accepted_ << '/' << shares_rejected_ << "): " << message.dump() << '\n'; }
         }
         return;
     }
 
     const std::string method = message.value("method", "");
+    const auto params = message.value("params", nlohmann::json::array());
     if (method == "mining.notify") {
-        ++received_jobs_;
-        std::cout << "[stratum] Mining job #" << received_jobs_ << " received";
-        if (message.contains("params") && message["params"].is_array() && !message["params"].empty()) {
-            std::cout << " (job id " << message["params"][0].dump() << ')';
+        if (!params.is_array() || params.size() < 9) { std::cerr << "[stratum] Unsupported mining.notify shape: " << message.dump() << '\n'; return; }
+        try {
+            MiningJob next;
+            next.job_id = params[0].get<std::string>();
+            next.prevhash = params[1].get<std::string>();
+            next.coinb1 = params[2].get<std::string>();
+            next.coinb2 = params[3].get<std::string>();
+            for (const auto& branch : params[4]) next.merkle_branch.push_back(branch.get<std::string>());
+            next.version = params[5].get<std::string>();
+            next.nbits = params[6].get<std::string>();
+            next.ntime = params[7].get<std::string>();
+            next.clean_jobs = params[8].get<bool>();
+            next.valid = true;
+            job_ = std::move(next);
+            nonce_ = 0;
+            if (job_.clean_jobs) ++extranonce2_counter_;
+            ++received_jobs_;
+            std::cout << "[stratum] New job #" << received_jobs_ << " id=" << job_.job_id
+                      << " branches=" << job_.merkle_branch.size()
+                      << " clean=" << (job_.clean_jobs ? "yes" : "no") << '\n';
+        } catch (const std::exception& e) {
+            job_.valid = false;
+            std::cerr << "[stratum] Failed to decode mining.notify: " << e.what() << '\n';
         }
-        std::cout << '\n';
-        std::cout << "[miner] Job is queued for GhostRider header decoding; share submission remains gated until the pool job format is verified.\n";
         return;
     }
-
     if (method == "mining.set_difficulty") {
-        std::cout << "[stratum] Difficulty update: " << message.value("params", nlohmann::json::array()).dump() << '\n';
+        if (params.is_array() && !params.empty() && params[0].is_number()) set_difficulty(params[0].get<double>());
         return;
     }
-
     if (method == "mining.set_target") {
-        std::cout << "[stratum] Target update received\n";
+        if (params.is_array() && !params.empty() && params[0].is_string()) set_target_hex(params[0].get<std::string>());
         return;
     }
-
     std::cout << "[stratum] Message: " << message.dump() << '\n';
+}
+
+void Client::set_target_hex(const std::string& target_hex)
+{
+    std::string hex = target_hex;
+    if (hex.size() < 64) hex.insert(hex.begin(), 64 - hex.size(), '0');
+    if (hex.size() != 64) throw std::runtime_error("Pool target must be 256 bits or shorter");
+    const auto be = hex_to_bytes(hex);
+    for (std::size_t i = 0; i < 32; ++i) target_le_[i] = be[31 - i];
+    target_ready_ = true;
+    std::cout << "[stratum] Explicit share target installed\n";
+}
+
+void Client::set_difficulty(double difficulty)
+{
+    if (!(difficulty > 0.0)) return;
+    difficulty_ = difficulty;
+    // Conventional Stratum diff-1 target. Scale via integer micro-difficulty to
+    // avoid floating-point conversion of a full 256-bit target.
+    static const cpp_int diff1 = parse_hex_int("00000000ffff0000000000000000000000000000000000000000000000000000");
+    const std::uint64_t scaled = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(difficulty * 1000000.0));
+    cpp_int target = (diff1 * 1000000) / scaled;
+    for (std::size_t i = 0; i < 32; ++i) {
+        target_le_[i] = static_cast<std::uint8_t>(target & 0xff);
+        target >>= 8;
+    }
+    target_ready_ = true;
+    std::cout << "[stratum] Difficulty set to " << difficulty_ << '\n';
+}
+
+bool Client::build_header(std::array<std::uint8_t, 80>& header,
+                          std::string& extranonce2_hex,
+                          std::uint32_t nonce) const
+{
+    if (!job_.valid || extranonce1_.empty()) return false;
+    try {
+        extranonce2_hex = hex_fixed(extranonce2_counter_, extranonce2_size_);
+        const auto version = reversed_4byte_field(job_.version);
+        const auto prev = stratum_prevhash_bytes(job_.prevhash);
+        const auto merkle = merkle_root(job_, extranonce1_, extranonce2_hex);
+        const auto ntime = reversed_4byte_field(job_.ntime);
+        const auto nbits = reversed_4byte_field(job_.nbits);
+
+        std::copy(version.begin(), version.end(), header.begin());
+        std::copy(prev.begin(), prev.end(), header.begin() + 4);
+        // SHA256 digest text is big-endian; uint256 serialization is little-endian.
+        for (std::size_t i = 0; i < 32; ++i) header[36 + i] = merkle[31 - i];
+        std::copy(ntime.begin(), ntime.end(), header.begin() + 68);
+        std::copy(nbits.begin(), nbits.end(), header.begin() + 72);
+        header[76] = static_cast<std::uint8_t>(nonce);
+        header[77] = static_cast<std::uint8_t>(nonce >> 8);
+        header[78] = static_cast<std::uint8_t>(nonce >> 16);
+        header[79] = static_cast<std::uint8_t>(nonce >> 24);
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[miner] Header construction failed: " << e.what() << '\n';
+        return false;
+    }
+}
+
+bool Client::mine_one(std::intptr_t socket_value)
+{
+    std::array<std::uint8_t, 80> header{};
+    std::string extranonce2;
+    const std::uint32_t nonce = nonce_++;
+    if (!build_header(header, extranonce2, nonce)) return true;
+
+    const ghostrider::Work work{header.data(), header.size()};
+    const auto hash = ghostrider::hash_reference(work);
+    ++hashes_done_;
+
+    if ((hashes_done_ % 100) == 0) {
+        std::cout << "[miner] " << hashes_done_ << " hashes | shares "
+                  << shares_accepted_ << '/' << shares_rejected_ << '\n';
+    }
+
+    if (hash_meets_target(hash, target_le_)) {
+        std::cout << "[share] Candidate found job=" << job_.job_id << " nonce=" << nonce_hex(nonce) << '\n';
+        return submit_share(socket_value, extranonce2, nonce);
+    }
+
+    if (nonce_ == 0) ++extranonce2_counter_;
+    return true;
+}
+
+bool Client::submit_share(std::intptr_t socket_value,
+                          const std::string& extranonce2_hex,
+                          std::uint32_t nonce)
+{
+    const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
+    const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
+    const nlohmann::json submit = {
+        {"id", request_id},
+        {"method", "mining.submit"},
+        {"params", nlohmann::json::array({login_user(), job_.job_id, extranonce2_hex, job_.ntime, nonce_hex(nonce)})}
+    };
+    if (!send_all(socket_handle, json_line(submit))) {
+        std::cerr << "[share] Failed to send candidate share\n";
+        return false;
+    }
+    ++shares_submitted_;
+    std::cout << "[share] Submitted #" << shares_submitted_ << '\n';
+    return true;
 }
 
 } // namespace yerbas::stratum
