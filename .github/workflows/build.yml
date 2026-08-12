@@ -1,0 +1,113 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          mkdir -p dist/yerbas-miner-linux-x86_64
+          cp build/yerbas-miner dist/yerbas-miner-linux-x86_64/
+          cp README.md dist/yerbas-miner-linux-x86_64/
+          tar -C dist -czf dist/yerbas-miner-linux-x86_64.tar.gz yerbas-miner-linux-x86_64
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-linux-x86_64
+          path: dist/yerbas-miner-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          mkdir -p dist/yerbas-miner-linux-arm64
+          cp build/yerbas-miner dist/yerbas-miner-linux-arm64/
+          cp README.md dist/yerbas-miner-linux-arm64/
+          tar -C dist -czf dist/yerbas-miner-linux-arm64.tar.gz yerbas-miner-linux-arm64
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-linux-arm64
+          path: dist/yerbas-miner-linux-arm64.tar.gz
+          if-no-files-found: error
+
+  windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/yerbas-miner-windows-x86_64 | Out-Null
+          Copy-Item build/Release/yerbas-miner.exe dist/yerbas-miner-windows-x86_64/
+          Copy-Item README.md dist/yerbas-miner-windows-x86_64/
+          Compress-Archive -Path dist/yerbas-miner-windows-x86_64/* -DestinationPath dist/yerbas-miner-windows-x86_64.zip
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-windows-x86_64
+          path: dist/yerbas-miner-windows-x86_64.zip
+          if-no-files-found: error
