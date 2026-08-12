@@ -2,6 +2,8 @@
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
 
+#include <atomic>
+#include <csignal>
 #include <iostream>
 #include <utility>
 
@@ -11,6 +13,14 @@ void yerbas_cuda_print_devices();
 #endif
 
 namespace yerbas {
+namespace {
+std::atomic_bool g_stop_requested{false};
+
+void handle_signal(int)
+{
+    g_stop_requested.store(true);
+}
+}
 
 Miner::Miner(AppConfig config)
     : config_(std::move(config))
@@ -19,7 +29,12 @@ Miner::Miner(AppConfig config)
 
 int Miner::run()
 {
-    std::cout << "Yerbas Miner 0.2.0\n";
+    std::signal(SIGINT, handle_signal);
+#ifdef SIGTERM
+    std::signal(SIGTERM, handle_signal);
+#endif
+
+    std::cout << "Yerbas Miner 0.3.0\n";
     std::cout << "Config: " << config_.config_path << "\n";
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
@@ -38,7 +53,7 @@ int Miner::run()
         std::cout << "CUDA backend: disabled by configuration\n";
     }
 #else
-    std::cout << "CUDA backend: not built\n";
+    std::cout << "CUDA backend: not built in this portable binary\n";
 #endif
 
     std::cout << "Configured GPU device ids:";
@@ -48,13 +63,12 @@ int Miner::run()
     std::cout << "\nGPU intensity: " << config_.gpu.intensity << " (0 = auto)\n";
 
     if (!stratum_client.ready()) {
-        std::cout << "Mining is not started: configure pool.url and pool.user first.\n";
-        return 0;
+        std::cout << "Pool configuration is incomplete. Edit config.json or use --pool and --user.\n";
+        std::cout << "Example: yerbas-miner.exe --pool stratum+tcp://pool.example.com:3032 --user YOUR_YERB_ADDRESS\n";
+        return 2;
     }
 
-    std::cout << "Stratum socket/session and share submission are the next implementation stage; "
-                 "no shares are submitted by this scaffold yet.\n";
-    return 0;
+    return stratum_client.run(g_stop_requested);
 }
 
 } // namespace yerbas
