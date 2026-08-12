@@ -8,8 +8,7 @@
 #include <utility>
 
 #ifdef YERBAS_HAS_CUDA
-int yerbas_cuda_device_count();
-void yerbas_cuda_print_devices();
+#include "cuda/cuda_backend.h"
 #endif
 
 namespace yerbas {
@@ -42,7 +41,7 @@ int Miner::run()
     std::signal(SIGTERM, handle_signal);
 #endif
 
-    std::cout << "Yerbas Miner 0.4.1\n";
+    std::cout << "Yerbas Miner 0.5.0\n";
     std::cout << "Config: " << config_.config_path << "\n";
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
@@ -52,10 +51,20 @@ int Miner::run()
 
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled) {
-        const int devices = yerbas_cuda_device_count();
-        std::cout << "CUDA devices detected: " << devices << "\n";
-        if (devices > 0) {
-            yerbas_cuda_print_devices();
+        const auto devices = cuda::enumerate_devices();
+        std::cout << "CUDA GPUs detected: " << devices.size() << "\n";
+
+        if (devices.empty()) {
+            std::cout << "CUDA status: no compatible NVIDIA GPUs detected\n";
+        } else {
+            cuda::print_devices();
+            if (devices.size() == 1) {
+                std::cout << "GPU mode: single GPU\n";
+            } else {
+                std::cout << "GPU mode: multi-GPU (" << devices.size()
+                          << " GPUs available)\n";
+                std::cout << "Each GPU can run an independent GhostRider nonce range.\n";
+            }
         }
     } else {
         std::cout << "CUDA backend: disabled by configuration\n";
