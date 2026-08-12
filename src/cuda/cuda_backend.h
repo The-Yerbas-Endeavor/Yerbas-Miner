@@ -8,6 +8,8 @@
 
 namespace yerbas::cuda {
 
+using Hash512 = std::array<std::uint8_t, 64>;
+
 struct DeviceInfo {
     int id{-1};
     int compute_major{0};
@@ -53,6 +55,13 @@ private:
 int device_count();
 std::vector<DeviceInfo> enumerate_devices();
 void print_devices();
+
+// Standalone validation hook for the clean-room CUDA Keccak-512 stage. This is
+// deliberately separate from BatchEngine until all 18 GhostRider stages are
+// implemented and validated.
+Hash512 keccak512_reference_stage(int device_id,
+                                  const std::uint8_t* input,
+                                  std::size_t length);
 
 } // namespace yerbas::cuda
 
