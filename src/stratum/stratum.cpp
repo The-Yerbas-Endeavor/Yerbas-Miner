@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -18,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -41,6 +43,13 @@ namespace {
 
 using boost::multiprecision::cpp_int;
 constexpr double kStratumDiffOneHashes = 4294967296.0;
+constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
+constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
+
+struct CpuCandidate {
+    std::uint32_t nonce{0};
+    std::string extranonce2;
+};
 
 void close_socket(SocketHandle socket)
 {
@@ -175,6 +184,14 @@ std::string nonce_hex(std::uint32_t nonce)
     return ss.str();
 }
 
+void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
+{
+    header[76] = static_cast<std::uint8_t>(nonce);
+    header[77] = static_cast<std::uint8_t>(nonce >> 8);
+    header[78] = static_cast<std::uint8_t>(nonce >> 16);
+    header[79] = static_cast<std::uint8_t>(nonce >> 24);
+}
+
 std::array<std::uint8_t, 32> merkle_root(const MiningJob& job,
                                          const std::string& extranonce1,
                                          const std::string& extranonce2)
@@ -295,12 +312,14 @@ void Client::print_connection_plan() const
     std::cout << "Worker: " << config_.miner.worker << '\n';
     std::cout << "User: " << (config_.pool.user.empty() ? "not configured" : config_.pool.user) << '\n';
 #ifdef YERBAS_HAS_CUDA
-    if (config_.gpu.enabled && !gpu_workers_.empty())
-        std::cout << "Stratum transport: TCP + CUDA GhostRider batch pipeline\n";
+    if (config_.miner.cpu_enabled && config_.gpu.enabled && !gpu_workers_.empty())
+        std::cout << "Stratum transport: TCP + hybrid CPU/CUDA GhostRider scheduler\n";
+    else if (config_.gpu.enabled && !gpu_workers_.empty())
+        std::cout << "Stratum transport: TCP + CUDA GhostRider batch scheduler\n";
     else
-        std::cout << "Stratum transport: TCP + CPU reference fallback\n";
+        std::cout << "Stratum transport: TCP + CPU GhostRider scheduler\n";
 #else
-    std::cout << "Stratum transport: TCP + CPU reference fallback\n";
+    std::cout << "Stratum transport: TCP + CPU GhostRider scheduler\n";
 #endif
 }
 
@@ -318,18 +337,27 @@ int Client::run(std::atomic_bool& stop_requested)
     mining_started_ = std::chrono::steady_clock::now();
     last_report_ = mining_started_;
     hashes_at_last_report_ = hashes_done_;
+    cpu_hashes_at_last_report_ = cpu_hashes_done_;
 
 #ifdef YERBAS_HAS_CUDA
-    if (config_.gpu.enabled && !gpu_workers_.empty()) {
-        bool all_ready = true;
-        for (const auto& worker : gpu_workers_) all_ready = all_ready && worker.engine->hash_pipeline_ready();
-        if (!all_ready) {
-            std::cerr << "CUDA GPUs are detected, but the GhostRider device hash stages are not implemented yet.\n";
-            std::cerr << "Refusing to silently fall back to CPU because this build is intended as a GPU miner.\n";
+    if (config_.gpu.enabled && !gpu_workers_.empty() && !gpu_pipeline_ready_) {
+        std::cout << "[GPU] Devices detected, but full GhostRider CUDA pipeline is not ready yet.\n";
+        if (config_.miner.cpu_enabled) {
+            std::cout << "[hybrid] CPU workers will mine; GPU workers remain idle until validated CUDA stages are complete.\n";
+        } else {
+            std::cerr << "No usable mining backend: CPU is disabled and CUDA pipeline is incomplete.\n";
             return 3;
         }
     }
 #endif
+
+    if (!config_.miner.cpu_enabled) {
+#ifdef YERBAS_HAS_CUDA
+        if (!config_.gpu.enabled || gpu_workers_.empty() || !gpu_pipeline_ready_) return 3;
+#else
+        return 3;
+#endif
+    }
 
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
@@ -393,20 +421,26 @@ bool Client::run_session(std::atomic_bool& stop_requested)
 
         if (authorized_ && job_.valid && target_ready_) {
 #ifdef YERBAS_HAS_CUDA
-            if (config_.gpu.enabled && !gpu_workers_.empty()) {
-                if (!gpu_job_loaded_) upload_gpu_job();
-                if (!mine_gpu_batch(static_cast<std::intptr_t>(socket_handle))) {
-                    close_socket(socket_handle);
-                    return false;
+            const bool usable_gpu = config_.gpu.enabled && !gpu_workers_.empty() && gpu_pipeline_ready_;
+            if (usable_gpu && !gpu_job_loaded_) upload_gpu_job();
+            if (usable_gpu && config_.miner.cpu_enabled && config_.miner.hybrid) {
+                if (!mine_hybrid_round(static_cast<std::intptr_t>(socket_handle))) {
+                    close_socket(socket_handle); return false;
                 }
-            } else
-#endif
-            {
-                if (!mine_one(static_cast<std::intptr_t>(socket_handle))) {
-                    close_socket(socket_handle);
-                    return false;
+            } else if (usable_gpu) {
+                if (!mine_gpu_batch(static_cast<std::intptr_t>(socket_handle))) {
+                    close_socket(socket_handle); return false;
+                }
+            } else if (config_.miner.cpu_enabled) {
+                if (!mine_cpu_batch(static_cast<std::intptr_t>(socket_handle))) {
+                    close_socket(socket_handle); return false;
                 }
             }
+#else
+            if (config_.miner.cpu_enabled && !mine_cpu_batch(static_cast<std::intptr_t>(socket_handle))) {
+                close_socket(socket_handle); return false;
+            }
+#endif
         } else if (!socket_readable(socket_handle, 0)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
@@ -466,9 +500,11 @@ void Client::handle_message(const std::string& line)
             next.clean_jobs = params[8].get<bool>();
             next.valid = true;
             job_ = std::move(next);
-            nonce_ = 0;
 #ifdef YERBAS_HAS_CUDA
+            nonce_ = (gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty()) ? kHybridCpuStart : 0U;
             gpu_job_loaded_ = false;
+#else
+            nonce_ = 0U;
 #endif
             if (job_.clean_jobs) ++extranonce2_counter_;
             ++received_jobs_;
@@ -542,10 +578,7 @@ bool Client::build_header(std::array<std::uint8_t, 80>& header,
         for (std::size_t i = 0; i < 32; ++i) header[36 + i] = merkle[31 - i];
         std::copy(ntime.begin(), ntime.end(), header.begin() + 68);
         std::copy(nbits.begin(), nbits.end(), header.begin() + 72);
-        header[76] = static_cast<std::uint8_t>(nonce);
-        header[77] = static_cast<std::uint8_t>(nonce >> 8);
-        header[78] = static_cast<std::uint8_t>(nonce >> 16);
-        header[79] = static_cast<std::uint8_t>(nonce >> 24);
+        write_nonce(header, nonce);
         return true;
     } catch (const std::exception& e) {
         std::cerr << "[miner] Header construction failed: " << e.what() << '\n';
@@ -561,13 +594,75 @@ bool Client::mine_one(std::intptr_t socket_value)
     if (!build_header(header, extranonce2, nonce)) return true;
     const ghostrider::Work work{header.data(), header.size()};
     const auto hash = ghostrider::hash_reference(work);
+    ++cpu_hashes_done_;
     ++hashes_done_;
     if (hash_meets_target(hash, target_le_)) {
-        std::cout << "[share] Candidate found | job=" << job_.job_id << " nonce=" << nonce_hex(nonce)
-                  << " total_hashes=" << hashes_done_ << '\n';
+        std::cout << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(nonce) << '\n';
         return submit_share(socket_value, extranonce2, nonce);
     }
     if (nonce_ == 0) ++extranonce2_counter_;
+    return true;
+}
+
+bool Client::mine_cpu_batch(std::intptr_t socket_value)
+{
+    if (!config_.miner.cpu_enabled) return true;
+
+    const unsigned int threads = config_.miner.threads == 0
+        ? std::max(1u, std::thread::hardware_concurrency())
+        : std::max(1u, config_.miner.threads);
+    const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 1U : config_.miner.cpu_batch;
+    const std::uint64_t total = static_cast<std::uint64_t>(threads) * per_thread;
+
+#ifdef YERBAS_HAS_CUDA
+    const bool hybrid_nonce_partition = gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty();
+#else
+    const bool hybrid_nonce_partition = false;
+#endif
+    const std::uint64_t cpu_region_start = hybrid_nonce_partition ? kHybridCpuStart : 0ULL;
+    if (static_cast<std::uint64_t>(nonce_) < cpu_region_start) nonce_ = static_cast<std::uint32_t>(cpu_region_start);
+
+    if (static_cast<std::uint64_t>(nonce_) + total > kNonceSpace) {
+        ++extranonce2_counter_;
+        nonce_ = static_cast<std::uint32_t>(cpu_region_start);
+    }
+
+    std::array<std::uint8_t, 80> base_header{};
+    std::string extranonce2;
+    if (!build_header(base_header, extranonce2, nonce_)) return true;
+
+    const std::uint32_t batch_start = nonce_;
+    nonce_ = static_cast<std::uint32_t>(static_cast<std::uint64_t>(nonce_) + total);
+
+    std::vector<std::future<std::vector<CpuCandidate>>> futures;
+    futures.reserve(threads);
+    for (unsigned int t = 0; t < threads; ++t) {
+        const std::uint32_t start = batch_start + t * per_thread;
+        futures.emplace_back(std::async(std::launch::async,
+            [this, base_header, extranonce2, start, per_thread]() mutable {
+                std::vector<CpuCandidate> found;
+                for (unsigned int i = 0; i < per_thread; ++i) {
+                    const std::uint32_t nonce = start + i;
+                    auto header = base_header;
+                    write_nonce(header, nonce);
+                    const ghostrider::Work work{header.data(), header.size()};
+                    const auto hash = ghostrider::hash_reference(work);
+                    if (hash_meets_target(hash, target_le_)) found.push_back({nonce, extranonce2});
+                }
+                return found;
+            }));
+    }
+
+    for (auto& future : futures) {
+        const auto candidates = future.get();
+        for (const auto& candidate : candidates) {
+            std::cout << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << '\n';
+            if (!submit_share(socket_value, candidate.extranonce2, candidate.nonce)) return false;
+        }
+    }
+
+    cpu_hashes_done_ += total;
+    hashes_done_ += total;
     return true;
 }
 
@@ -592,15 +687,19 @@ void Client::initialize_gpu_engines()
         GpuWorker worker;
         worker.device_id = id;
         worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size);
-        worker.next_nonce = static_cast<std::uint32_t>(id) * static_cast<std::uint32_t>(batch_size);
         gpu_workers_.push_back(std::move(worker));
         std::cout << "[GPU " << id << "] batch engine initialized | batch=" << batch_size << '\n';
+    }
+
+    gpu_pipeline_ready_ = !gpu_workers_.empty();
+    for (const auto& worker : gpu_workers_) {
+        gpu_pipeline_ready_ = gpu_pipeline_ready_ && worker.engine->hash_pipeline_ready();
     }
 }
 
 void Client::upload_gpu_job()
 {
-    if (gpu_workers_.empty()) return;
+    if (gpu_workers_.empty() || !gpu_pipeline_ready_) return;
     std::array<std::uint8_t, 80> header{};
     std::string extranonce2;
     if (!build_header(header, extranonce2, 0)) throw std::runtime_error("Unable to build CUDA job header");
@@ -611,27 +710,96 @@ void Client::upload_gpu_job()
     const ghostrider::Work work{descriptor.header.data(), descriptor.header.size()};
     descriptor.stages = ghostrider::stage_schedule(work);
 
-    for (auto& worker : gpu_workers_) {
+    const std::uint64_t gpu_space = static_cast<std::uint64_t>(kHybridCpuStart);
+    const std::uint64_t region_size = gpu_space / std::max<std::size_t>(1, gpu_workers_.size());
+    for (std::size_t i = 0; i < gpu_workers_.size(); ++i) {
+        auto& worker = gpu_workers_[i];
         worker.engine->upload_job(descriptor);
-        worker.next_nonce = static_cast<std::uint32_t>(worker.device_id) * static_cast<std::uint32_t>(worker.engine->batch_size());
+        const std::uint64_t start = i * region_size;
+        const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
+        worker.region_start = static_cast<std::uint32_t>(start);
+        worker.region_end = static_cast<std::uint32_t>(end - 1);
+        worker.next_nonce = worker.region_start;
     }
+    nonce_ = kHybridCpuStart;
     gpu_job_loaded_ = true;
-    std::cout << "[GPU] Job uploaded to " << gpu_workers_.size() << " device(s)\n";
+    std::cout << "[hybrid] Job partitioned: " << gpu_workers_.size()
+              << " GPU region(s) + CPU upper nonce region\n";
 }
 
 bool Client::mine_gpu_batch(std::intptr_t socket_value)
 {
-    const std::uint32_t stride = static_cast<std::uint32_t>(gpu_workers_.size());
+    if (!gpu_pipeline_ready_) return true;
     std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
+
+    struct PendingGpu {
+        GpuWorker* worker;
+        std::uint32_t start;
+        std::future<std::vector<cuda::Candidate>> future;
+    };
+    std::vector<PendingGpu> pending;
+    pending.reserve(gpu_workers_.size());
+
     for (auto& worker : gpu_workers_) {
-        const auto start = worker.next_nonce;
-        const auto candidates = worker.engine->scan(start);
-        const auto count = worker.engine->batch_size();
-        worker.hashes_done += count;
+        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) {
+            worker.next_nonce = worker.region_start;
+        }
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        auto* engine = worker.engine.get();
+        pending.push_back(PendingGpu{&worker, start,
+            std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
+    }
+
+    for (auto& task : pending) {
+        const auto candidates = task.future.get();
+        const auto count = task.worker->engine->batch_size();
+        task.worker->hashes_done += count;
         hashes_done_ += count;
-        worker.next_nonce += static_cast<std::uint32_t>(count * stride);
         for (const auto& candidate : candidates) {
-            std::cout << "[GPU " << worker.device_id << "] candidate nonce=" << nonce_hex(candidate.nonce) << '\n';
+            std::cout << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id
+                      << " nonce=" << nonce_hex(candidate.nonce) << '\n';
+            if (!submit_share(socket_value, extranonce2, candidate.nonce)) return false;
+        }
+    }
+    return true;
+}
+
+bool Client::mine_hybrid_round(std::intptr_t socket_value)
+{
+    if (!gpu_pipeline_ready_) return mine_cpu_batch(socket_value);
+
+    std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
+    struct PendingGpu {
+        GpuWorker* worker;
+        std::uint32_t start;
+        std::future<std::vector<cuda::Candidate>> future;
+    };
+    std::vector<PendingGpu> pending;
+    pending.reserve(gpu_workers_.size());
+
+    for (auto& worker : gpu_workers_) {
+        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) worker.next_nonce = worker.region_start;
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        auto* engine = worker.engine.get();
+        pending.push_back(PendingGpu{&worker, start,
+            std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
+    }
+
+    // CPU hashes its own nonce region while CUDA kernels are executing.
+    if (!mine_cpu_batch(socket_value)) return false;
+
+    for (auto& task : pending) {
+        const auto candidates = task.future.get();
+        const auto count = task.worker->engine->batch_size();
+        task.worker->hashes_done += count;
+        hashes_done_ += count;
+        for (const auto& candidate : candidates) {
+            std::cout << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id
+                      << " nonce=" << nonce_hex(candidate.nonce) << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce)) return false;
         }
     }
@@ -665,34 +833,41 @@ void Client::report_stats(bool force)
     if (mining_started_.time_since_epoch().count() == 0) return;
     const double since_report = std::chrono::duration<double>(now - last_report_).count();
     if (!force && since_report < 5.0) return;
+
     const std::uint64_t delta_hashes = hashes_done_ - hashes_at_last_report_;
-    const double interval_hps = since_report > 0.0 ? static_cast<double>(delta_hashes) / since_report : 0.0;
+    const std::uint64_t cpu_delta = cpu_hashes_done_ - cpu_hashes_at_last_report_;
+    const double total_hps = since_report > 0.0 ? static_cast<double>(delta_hashes) / since_report : 0.0;
+    const double cpu_hps = since_report > 0.0 ? static_cast<double>(cpu_delta) / since_report : 0.0;
     const double uptime = std::chrono::duration<double>(now - mining_started_).count();
     const double average_hps = uptime > 0.0 ? static_cast<double>(hashes_done_) / uptime : 0.0;
 
+    if (config_.miner.cpu_enabled) {
+        std::cout << "[CPU] " << format_rate(cpu_hps)
+                  << " | hashes " << cpu_hashes_done_ << '\n';
+    }
+
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled && !gpu_workers_.empty()) {
-        std::uint64_t total_gpu_hashes = 0;
-        for (const auto& worker : gpu_workers_) {
-            total_gpu_hashes += worker.hashes_done;
-            const double gpu_avg = uptime > 0.0 ? static_cast<double>(worker.hashes_done) / uptime : 0.0;
-            std::cout << "[GPU " << worker.device_id << "] " << format_rate(gpu_avg)
-                      << " | hashes " << worker.hashes_done
-                      << " | batch " << worker.engine->batch_size() << '\n';
+        for (auto& worker : gpu_workers_) {
+            const std::uint64_t gpu_delta = worker.hashes_done - worker.hashes_at_last_report;
+            const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_delta) / since_report : 0.0;
+            if (gpu_pipeline_ready_) {
+                std::cout << "[GPU " << worker.device_id << "] " << format_rate(gpu_hps)
+                          << " | hashes " << worker.hashes_done
+                          << " | batch " << worker.engine->batch_size() << '\n';
+            } else {
+                std::cout << "[GPU " << worker.device_id << "] idle | CUDA GhostRider pipeline incomplete\n";
+            }
+            worker.hashes_at_last_report = worker.hashes_done;
         }
-        std::cout << "[TOTAL] " << format_rate(average_hps)
-                  << " | hashes " << total_gpu_hashes
-                  << " | jobs " << received_jobs_
-                  << " | shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_;
-    } else
-#endif
-    {
-        std::cout << "[CPU] " << format_rate(interval_hps)
-                  << " | avg " << format_rate(average_hps)
-                  << " | hashes " << hashes_done_
-                  << " | jobs " << received_jobs_
-                  << " | shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_;
     }
+#endif
+
+    std::cout << "[TOTAL] " << format_rate(total_hps)
+              << " | avg " << format_rate(average_hps)
+              << " | hashes " << hashes_done_
+              << " | jobs " << received_jobs_
+              << " | shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_;
 
     if (difficulty_ > 0.0) {
         const double expected_hashes = difficulty_ * kStratumDiffOneHashes;
@@ -702,8 +877,10 @@ void Client::report_stats(bool force)
                   << " | avg ETA " << format_duration(eta);
     }
     std::cout << " | uptime " << format_duration(uptime) << '\n';
+
     last_report_ = now;
     hashes_at_last_report_ = hashes_done_;
+    cpu_hashes_at_last_report_ = cpu_hashes_done_;
 }
 
 } // namespace yerbas::stratum
