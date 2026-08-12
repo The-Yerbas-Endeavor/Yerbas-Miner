@@ -6,7 +6,10 @@
   },
   "miner": {
     "worker": "rig1",
-    "threads": 0
+    "cpu_enabled": true,
+    "threads": 0,
+    "hybrid": true,
+    "cpu_batch": 0
   },
   "gpu": {
     "enabled": true,
