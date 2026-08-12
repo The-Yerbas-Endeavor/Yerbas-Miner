@@ -1,7 +1,7 @@
 #include "ghostrider/ghostrider.h"
 
-#include <algorithm>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -10,14 +10,27 @@
 
 namespace yerbas::ghostrider {
 
+namespace {
+constexpr std::size_t kVersionSize = 4;
+constexpr std::size_t kPrevHashSize = 32;
+constexpr std::size_t kMinimumHeaderPrefix = kVersionSize + kPrevHashSize;
+}
+
 Hash256 hash_reference(const Work& work)
 {
-    if (work.data == nullptr || work.size == 0) {
-        throw std::invalid_argument("GhostRider work buffer is empty");
+    if (work.data == nullptr || work.size < kMinimumHeaderPrefix) {
+        throw std::invalid_argument(
+            "GhostRider input must contain at least nVersion and hashPrevBlock");
+    }
+    if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("GhostRider work buffer is too large");
     }
 
+    // CBlockHeader serializes nVersion first, followed immediately by
+    // hashPrevBlock. Copy the raw serialized bytes so HashSelection sees the
+    // exact same uint256 byte layout as Yerbas Core.
     uint256 prev_block_hash;
-    std::memcpy(prev_block_hash.begin(), work.prev_block_hash.data(), work.prev_block_hash.size());
+    std::memcpy(prev_block_hash.begin(), work.data + kVersionSize, kPrevHashSize);
 
     uint512 hash[18];
     HashSelection hash_selection(
@@ -29,8 +42,8 @@ Hash256 hash_reference(const Work& work)
     const std::vector<int> core_hash_indexes(hash_selection.getAlgoIndexes());
 
     for (int i = 0; i < 18; ++i) {
-        const void* to_hash = nullptr;
-        int len_to_hash = 0;
+        const void* to_hash;
+        int len_to_hash;
 
         if (i == 0) {
             to_hash = static_cast<const void*>(work.data);
@@ -57,11 +70,13 @@ Hash256 hash_reference(const Work& work)
             cn_selection = random_cns[2];
         }
 
-        // These are the exact Yerbas Core GhostRider primitives. Each stage calls
-        // both functions; the selector value of -1 makes the non-selected switch
-        // fall through without modifying the stage output.
         coreHash(to_hash, &hash[i], len_to_hash, core_selection);
-        cnHash(&hash[i - 1], &hash[i], len_to_hash, cn_selection);
+
+        // Yerbas Core calls cnHash at every stage and uses -1 to make the
+        // non-CryptoNight stages a no-op. Avoid forming &hash[-1] on stage 0
+        // while preserving identical behavior.
+        uint512* cn_input = (i == 0) ? &hash[0] : &hash[i - 1];
+        cnHash(cn_input, &hash[i], len_to_hash, cn_selection);
     }
 
     const uint256 result = hash[17].trim256();
