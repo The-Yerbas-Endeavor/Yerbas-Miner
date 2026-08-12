@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(YerbasMiner VERSION 0.5.0 LANGUAGES C CXX)
+project(YerbasMiner VERSION 0.5.1 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -19,6 +19,7 @@ if(NOT YERBAS_FETCH_CORE)
 endif()
 
 include(FetchContent)
+include(CTest)
 
 FetchContent_Declare(
     nlohmann_json
@@ -128,11 +129,14 @@ if(WIN32)
     target_link_libraries(yerbas-miner PRIVATE ws2_32)
 endif()
 
+set(YERBAS_CUDA_AVAILABLE OFF)
 if(YERBAS_ENABLE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
+        set(YERBAS_CUDA_AVAILABLE ON)
+
         target_sources(yerbas-miner PRIVATE src/cuda/cuda_backend.cu)
         target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
         set_target_properties(yerbas-miner PROPERTIES
@@ -145,10 +149,24 @@ if(YERBAS_ENABLE_CUDA)
     endif()
 endif()
 
-include(CTest)
 if(BUILD_TESTING)
     add_executable(ghostrider-smoke tests/ghostrider_smoke.cpp)
     target_include_directories(ghostrider-smoke PRIVATE src)
     target_link_libraries(ghostrider-smoke PRIVATE yerbas-ghostrider-reference)
     add_test(NAME ghostrider-smoke COMMAND ghostrider-smoke)
+
+    if(YERBAS_CUDA_AVAILABLE)
+        add_executable(cuda-keccak-validation
+            tests/cuda_keccak_validation.cpp
+            src/cuda/cuda_backend.cu
+        )
+        target_include_directories(cuda-keccak-validation PRIVATE src tests)
+        target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
+        set_target_properties(cuda-keccak-validation PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON
+            CUDA_SEPARABLE_COMPILATION ON
+        )
+        add_test(NAME cuda-keccak-validation COMMAND cuda-keccak-validation)
+    endif()
 endif()
