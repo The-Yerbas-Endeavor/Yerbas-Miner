@@ -83,6 +83,17 @@ target_include_directories(yerbas-ghostrider-reference
     PRIVATE ${YERBAS_CORE_SRC}
 )
 
+# Modern glibc defines htobe*/htole*/be*toh/le*toh as macros, while the
+# pinned Yerbas Core compat/endian.h declares functions with those names.
+# Force-include a tiny shim on Linux that loads glibc's header once and then
+# undefines the macros before any Core headers are parsed. This keeps the
+# pinned Core checkout untouched and works for both x86_64 and ARM64 Linux.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_options(yerbas-ghostrider-reference PRIVATE
+        -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
+    )
+endif()
+
 add_executable(yerbas-miner
     src/main.cpp
     src/miner.cpp
