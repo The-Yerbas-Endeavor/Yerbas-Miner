@@ -16,12 +16,16 @@ struct MinerConfig {
     bool cpu_enabled{true};
     unsigned int threads{0};
     bool hybrid{true};
-    unsigned int cpu_batch{0};
+    // Eight hashes per worker amortizes thread-launch overhead while keeping
+    // Stratum job switching responsive on the CPU reference backend.
+    unsigned int cpu_batch{8};
 };
 
 struct GpuConfig {
     bool enabled{true};
-    std::vector<int> devices{0};
+    // Empty means use every detected CUDA device. This is safer than assuming
+    // that device 0 is always the GPU the user intended to mine with.
+    std::vector<int> devices{};
     int intensity{0};
 };
 
