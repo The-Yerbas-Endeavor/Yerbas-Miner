@@ -71,6 +71,7 @@ private:
     Endpoint endpoint_;
     std::uint64_t received_jobs_{0};
     std::uint64_t hashes_done_{0};
+    std::uint64_t cpu_hashes_done_{0};
     std::uint64_t shares_submitted_{0};
     std::uint64_t shares_accepted_{0};
     std::uint64_t shares_rejected_{0};
@@ -89,6 +90,7 @@ private:
     std::chrono::steady_clock::time_point mining_started_{};
     std::chrono::steady_clock::time_point last_report_{};
     std::uint64_t hashes_at_last_report_{0};
+    std::uint64_t cpu_hashes_at_last_report_{0};
 
 #ifdef YERBAS_HAS_CUDA
     struct GpuWorker {
@@ -96,9 +98,11 @@ private:
         std::unique_ptr<cuda::BatchEngine> engine;
         std::uint32_t next_nonce{0};
         std::uint64_t hashes_done{0};
+        std::uint64_t hashes_at_last_report{0};
     };
     std::vector<GpuWorker> gpu_workers_;
     bool gpu_job_loaded_{false};
+    bool gpu_pipeline_ready_{false};
 #endif
 };
 
