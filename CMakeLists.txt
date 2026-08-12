@@ -133,20 +133,23 @@ set(YERBAS_CUDA_AVAILABLE OFF)
 if(YERBAS_ENABLE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
-    if(CMAKE_CUDA_COMPILER)
-        enable_language(CUDA)
-        set(YERBAS_CUDA_AVAILABLE ON)
-
-        target_sources(yerbas-miner PRIVATE src/cuda/cuda_backend.cu)
-        target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
-        set_target_properties(yerbas-miner PROPERTIES
-            CUDA_STANDARD 17
-            CUDA_STANDARD_REQUIRED ON
-            CUDA_SEPARABLE_COMPILATION ON
-        )
-    else()
-        message(WARNING "CUDA toolkit not found; building CPU reference only")
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(FATAL_ERROR
+            "YERBAS_ENABLE_CUDA=ON but no CUDA compiler was detected. "
+            "Refusing to produce a CPU-only binary labeled as a CUDA build.")
     endif()
+
+    enable_language(CUDA)
+    set(YERBAS_CUDA_AVAILABLE ON)
+    message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
+
+    target_sources(yerbas-miner PRIVATE src/cuda/cuda_backend.cu)
+    target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
+    set_target_properties(yerbas-miner PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_SEPARABLE_COMPILATION ON
+    )
 endif()
 
 if(BUILD_TESTING)
