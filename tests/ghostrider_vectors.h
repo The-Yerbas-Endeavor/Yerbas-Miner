@@ -1,0 +1,46 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+
+namespace yerbas::test_vectors {
+
+// Canonical Yerbas mainnet genesis block from Yerbas Core chainparams.cpp
+// (Core commit 040073f22e2b496b21e07eebfc6ca97e22b4cd40).
+//
+// nVersion      = 4
+// hashPrevBlock = 0000000000000000000000000000000000000000000000000000000000000000
+// hashMerkleRoot= bfe15871764bf35d6391308fc2dab8846f177ba563d256b1764271987ec99bc0
+// nTime         = 1652138420
+// nBits         = 0x20001fff
+// nNonce        = 3397
+// GetHash()     = eff0bbe5c1bbe1ef8da54822a18f528d6dc58232990bdb86e0a77ab2814ed12c
+//
+// This is the exact 80-byte CBlockHeader serialization consumed by HashGR.
+inline constexpr std::array<std::uint8_t, 80> MAINNET_GENESIS_HEADER = {
+    0x04,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0xc0,0x9b,0xc9,0x7e,0x98,0x71,0x42,0x76,
+    0xb1,0x56,0xd2,0x63,0xa5,0x7b,0x17,0x6f,
+    0x84,0xb8,0xda,0xc2,0x8f,0x30,0x91,0x63,
+    0x5d,0xf3,0x4b,0x76,0x71,0x58,0xe1,0xbf,
+    0xb4,0xa1,0x79,0x62,
+    0xff,0x1f,0x00,0x20,
+    0x45,0x0d,0x00,0x00
+};
+
+inline constexpr char MAINNET_GENESIS_HEADER_HEX[] =
+    "04000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "c09bc97e98714276b156d263a57b176f84b8dac28f3091635df34b767158e1bf"
+    "b4a17962"
+    "ff1f0020"
+    "450d0000";
+
+inline constexpr char MAINNET_GENESIS_BLOCK_HASH[] =
+    "eff0bbe5c1bbe1ef8da54822a18f528d6dc58232990bdb86e0a77ab2814ed12c";
+
+} // namespace yerbas::test_vectors
