@@ -59,6 +59,9 @@ void print_devices();
 // Standalone validation hooks for clean-room CUDA core stages. These remain
 // separate from BatchEngine until all job-selectable GhostRider stages are
 // implemented and validated against Yerbas Core.
+Hash512 blake512_reference_stage(int device_id,
+                                 const std::uint8_t* input,
+                                 std::size_t length);
 Hash512 keccak512_reference_stage(int device_id,
                                   const std::uint8_t* input,
                                   std::size_t length);
