@@ -87,11 +87,22 @@ jobs:
 
       - name: Install Boost
         shell: pwsh
-        run: choco install boost-msvc-14.3 --no-progress -y
+        run: |
+          choco install boost-msvc-14.3 --no-progress -y
+          $header = Get-ChildItem -Path C:\local -Filter cpp_int.hpp -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'boost\\multiprecision\\cpp_int.hpp$' } |
+            Select-Object -First 1
+          if (-not $header) {
+            throw 'Could not locate boost/multiprecision/cpp_int.hpp after Chocolatey install'
+          }
+          $boostDir = Split-Path (Split-Path (Split-Path $header.FullName -Parent) -Parent) -Parent
+          Write-Host "Boost include root: $boostDir"
+          "BOOST_INCLUDEDIR=$boostDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INCLUDE=$boostDir;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=ON -DBOOST_INCLUDEDIR="$env:BOOST_INCLUDEDIR"
 
       - name: Build
         shell: pwsh
