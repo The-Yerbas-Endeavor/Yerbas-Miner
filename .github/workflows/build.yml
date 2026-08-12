@@ -153,12 +153,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist/yerbas-miner-windows-cuda-x86_64 | Out-Null
           Copy-Item build-cuda/Release/yerbas-miner.exe dist/yerbas-miner-windows-cuda-x86_64/
+          Copy-Item build-cuda/Release/cuda-keccak-validation.exe dist/yerbas-miner-windows-cuda-x86_64/cuda-core-validation.exe
           Copy-Item README.md dist/yerbas-miner-windows-cuda-x86_64/
           Copy-Item config.example.json dist/yerbas-miner-windows-cuda-x86_64/
           @'
           This artifact was built with the NVIDIA CUDA backend compiled in.
           CUDA configuration is verified in CI before this ZIP can be published.
           Requires a supported NVIDIA GPU and driver.
+
+          Run cuda-core-validation.exe on a real NVIDIA GPU to compare the
+          implemented CUDA GhostRider core stages against Yerbas Core.
           '@ | Set-Content dist/yerbas-miner-windows-cuda-x86_64/CUDA-BUILD.txt
           Compress-Archive -Path dist/yerbas-miner-windows-cuda-x86_64/* -DestinationPath dist/yerbas-miner-windows-cuda-x86_64.zip
 
