@@ -65,6 +65,9 @@ Hash512 blake512_reference_stage(int device_id,
 Hash512 keccak512_reference_stage(int device_id,
                                   const std::uint8_t* input,
                                   std::size_t length);
+Hash512 skein512_reference_stage(int device_id,
+                                 const std::uint8_t* input,
+                                 std::size_t length);
 Hash512 cubehash512_reference_stage(int device_id,
                                     const std::uint8_t* input,
                                     std::size_t length);
