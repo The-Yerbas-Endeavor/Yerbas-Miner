@@ -150,6 +150,7 @@ if(YERBAS_ENABLE_CUDA)
     target_sources(yerbas-miner PRIVATE
         src/cuda/cuda_backend.cu
         src/cuda/blake_validation.cu
+        src/cuda/skein_validation.cu
     )
     target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
     set_target_properties(yerbas-miner PROPERTIES
@@ -171,6 +172,7 @@ if(BUILD_TESTING)
             tests/cuda_keccak_validation.cpp
             src/cuda/cuda_backend.cu
             src/cuda/blake_validation.cu
+            src/cuda/skein_validation.cu
         )
         target_include_directories(cuda-keccak-validation PRIVATE src tests)
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
