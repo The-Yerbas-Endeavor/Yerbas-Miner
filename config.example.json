@@ -1,0 +1,19 @@
+{
+  "pool": {
+    "url": "stratum+tcp://pool.example.com:3032",
+    "user": "YOUR_YERB_ADDRESS",
+    "password": "x"
+  },
+  "miner": {
+    "worker": "rig1",
+    "threads": 0
+  },
+  "gpu": {
+    "enabled": true,
+    "devices": [0],
+    "intensity": 0
+  },
+  "logging": {
+    "level": "info"
+  }
+}
