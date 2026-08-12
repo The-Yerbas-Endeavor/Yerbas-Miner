@@ -96,6 +96,8 @@ private:
     struct GpuWorker {
         int device_id{-1};
         std::unique_ptr<cuda::BatchEngine> engine;
+        std::uint32_t region_start{0};
+        std::uint32_t region_end{0};
         std::uint32_t next_nonce{0};
         std::uint64_t hashes_done{0};
         std::uint64_t hashes_at_last_report{0};
