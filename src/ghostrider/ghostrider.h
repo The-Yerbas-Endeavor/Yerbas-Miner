@@ -11,11 +11,11 @@ using Hash256 = std::array<std::uint8_t, 32>;
 struct Work {
     const std::uint8_t* data{nullptr};
     std::size_t size{0};
-    Hash256 prev_block_hash{};
 };
 
 // CPU reference implementation wired to the exact GhostRider primitives and
-// hash-selection logic from Yerbas Core.
+// hash-selection logic from Yerbas Core. For normal mining input, data is the
+// serialized 80-byte Yerbas block header (nVersion through nNonce).
 Hash256 hash_reference(const Work& work);
 
 bool reference_ready() noexcept;
