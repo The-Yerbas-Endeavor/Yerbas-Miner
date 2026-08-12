@@ -9,11 +9,11 @@
     "cpu_enabled": true,
     "threads": 0,
     "hybrid": true,
-    "cpu_batch": 0
+    "cpu_batch": 8
   },
   "gpu": {
     "enabled": true,
-    "devices": [0],
+    "devices": [],
     "intensity": 0
   },
   "logging": {
