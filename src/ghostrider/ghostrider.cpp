@@ -40,6 +40,26 @@ void selections(const Work& work,
 }
 }
 
+Hash512 core_hash_reference(const Work& work, int algorithm)
+{
+    if (work.data == nullptr || work.size == 0) {
+        throw std::invalid_argument("Core hash input must not be empty");
+    }
+    if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("Core hash work buffer is too large");
+    }
+    if (algorithm < 0 || algorithm > 14) {
+        throw std::invalid_argument("Core hash algorithm index must be 0..14");
+    }
+
+    uint512 result;
+    coreHash(work.data, &result, static_cast<int>(work.size), algorithm);
+
+    Hash512 out{};
+    std::memcpy(out.data(), result.begin(), out.size());
+    return out;
+}
+
 StageSchedule stage_schedule(const Work& work)
 {
     std::vector<int> core_hash_indexes;
