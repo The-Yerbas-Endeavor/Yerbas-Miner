@@ -1,11 +1,17 @@
 cmake_minimum_required(VERSION 3.24)
-project(YerbasMiner VERSION 0.4.0 LANGUAGES C CXX)
+project(YerbasMiner VERSION 0.4.1 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Build a self-contained Windows executable so users do not need a separately
+# installed MSVC runtime to launch yerbas-miner.exe from the release artifact.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 option(YERBAS_ENABLE_CUDA "Build the NVIDIA CUDA backend" ON)
 option(YERBAS_FETCH_CORE "Fetch the pinned Yerbas Core GhostRider reference sources" ON)
