@@ -13,7 +13,10 @@ struct PoolConfig {
 
 struct MinerConfig {
     std::string worker{"rig1"};
+    bool cpu_enabled{true};
     unsigned int threads{0};
+    bool hybrid{true};
+    unsigned int cpu_batch{0};
 };
 
 struct GpuConfig {
