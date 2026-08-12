@@ -5,6 +5,7 @@
 #include <atomic>
 #include <csignal>
 #include <iostream>
+#include <thread>
 #include <utility>
 
 #ifdef YERBAS_HAS_CUDA
@@ -46,6 +47,12 @@ int Miner::run()
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
 
+    const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int cpu_threads = config_.miner.threads == 0 ? hw_threads : config_.miner.threads;
+    std::cout << "CPU mining: " << (config_.miner.cpu_enabled ? "enabled" : "disabled")
+              << " | threads " << cpu_threads << (config_.miner.threads == 0 ? " (auto)" : "") << "\n";
+    std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
+
     stratum::Client stratum_client(config_);
     stratum_client.print_connection_plan();
 
@@ -53,67 +60,56 @@ int Miner::run()
     if (config_.gpu.enabled) {
         const auto devices = cuda::enumerate_devices();
         std::cout << "CUDA GPUs detected: " << devices.size() << "\n";
-
         if (devices.empty()) {
             std::cerr << "CUDA status: no compatible NVIDIA GPUs detected\n";
-            std::cerr << "GPU mining is enabled, so CPU fallback is disabled.\n";
+            if (!config_.miner.cpu_enabled) {
 #ifdef _WIN32
-            pause_before_exit();
+                pause_before_exit();
 #endif
-            return 3;
-        }
-
-        cuda::print_devices();
-        if (devices.size() == 1) {
-            std::cout << "GPU mode: single GPU\n";
+                return 3;
+            }
+            std::cout << "Hybrid mode: continuing with CPU worker(s) only\n";
         } else {
-            std::cout << "GPU mode: multi-GPU (" << devices.size()
-                      << " GPUs available)\n";
-            std::cout << "Each GPU can run an independent GhostRider nonce range.\n";
-        }
-
-        // Do not silently run the CPU reference miner when the GPU pipeline is
-        // incomplete. The CUDA artifact is a GPU miner first; CPU remains only
-        // a correctness/reference implementation.
-        cuda::BatchEngine readiness_probe(devices.front().id, 1);
-        if (!readiness_probe.hash_pipeline_ready()) {
-            std::cerr << "CUDA GhostRider pipeline is not complete yet.\n";
-            std::cerr << "CPU fallback is disabled because GPU mining is enabled.\n";
-            std::cerr << "No mining work will be performed until the full CUDA pipeline is ready.\n";
+            cuda::print_devices();
+            std::cout << "GPU mode: " << (devices.size() == 1 ? "single GPU" : "multi-GPU") << "\n";
+            cuda::BatchEngine readiness_probe(devices.front().id, 1);
+            if (!readiness_probe.hash_pipeline_ready()) {
+                std::cout << "CUDA GhostRider pipeline: partial/validation mode\n";
+                if (config_.miner.cpu_enabled) {
+                    std::cout << "Hybrid mode: CPU workers remain active while CUDA stages are completed\n";
+                } else {
+                    std::cerr << "No usable mining backend: CPU disabled and CUDA pipeline incomplete\n";
 #ifdef _WIN32
-            pause_before_exit();
+                    pause_before_exit();
 #endif
-            return 4;
+                    return 4;
+                }
+            }
         }
     } else {
         std::cout << "CUDA backend: disabled by configuration\n";
     }
 #else
     if (config_.gpu.enabled) {
-        std::cerr << "CUDA backend: not built in this binary\n";
-        std::cerr << "GPU mining is enabled in config.json, so CPU fallback is disabled.\n";
-        std::cerr << "Use the yerbas-miner-windows-cuda-x86_64 artifact.\n";
+        std::cout << "CUDA backend: not built in this binary\n";
+        std::cout << "Use yerbas-miner-windows-cuda-x86_64 for GPU + CPU hybrid mining\n";
+    }
+    if (!config_.miner.cpu_enabled) {
+        std::cerr << "No mining backend enabled\n";
 #ifdef _WIN32
         pause_before_exit();
 #endif
         return 3;
     }
-    std::cout << "CUDA backend: not built; CPU reference mode explicitly selected\n";
 #endif
 
     std::cout << "Configured GPU device ids:";
-    for (const int device : config_.gpu.devices) {
-        std::cout << ' ' << device;
-    }
+    for (const int device : config_.gpu.devices) std::cout << ' ' << device;
     std::cout << "\nGPU intensity: " << config_.gpu.intensity << " (0 = auto)\n";
 
     if (!stratum_client.ready()) {
         std::cout << "\nPool configuration is incomplete.\n";
-        std::cout << "Edit config.json in the same folder as yerbas-miner.exe and set:\n"
-                     "  pool.url\n"
-                     "  pool.user\n\n";
-        std::cout << "Or run:\n"
-                     "  yerbas-miner.exe --pool stratum+tcp://POOL:PORT --user YOUR_YERB_ADDRESS\n";
+        std::cout << "Edit config.json and set pool.url and pool.user.\n";
 #ifdef _WIN32
         pause_before_exit();
 #endif
