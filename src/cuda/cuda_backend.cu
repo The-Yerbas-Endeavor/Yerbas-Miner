@@ -1,4 +1,5 @@
 #include "cuda/cuda_backend.h"
+#include "cuda/core/cubehash512.cuh"
 #include "cuda/core/keccak512.cuh"
 
 #include <cuda_runtime.h>
@@ -15,7 +16,6 @@ namespace {
 
 constexpr std::size_t kMaxCandidates = 64;
 constexpr std::size_t kStateBytes = 64;
-constexpr std::uint8_t kKeccakCoreIndex = 4;
 
 struct DeviceJob {
     std::uint8_t header[80];
@@ -55,9 +55,6 @@ __global__ void initialize_nonce_batch(std::uint32_t start_nonce,
     }
 }
 
-// First real GhostRider core stage: Keccak-512 (Yerbas coreHash index 4).
-// stage_index == 0 hashes the 80-byte block header with the per-thread nonce.
-// Later stages hash the previous 64-byte state in-place.
 __global__ void keccak512_stage(const DeviceJob* job,
                                 const std::uint32_t* nonces,
                                 std::uint8_t* states,
@@ -68,12 +65,10 @@ __global__ void keccak512_stage(const DeviceJob* job,
     if (index >= count) return;
 
     std::uint8_t digest[64];
-
     if (stage_index == 0) {
         std::uint8_t header[80];
         #pragma unroll
         for (int i = 0; i < 80; ++i) header[i] = job->header[i];
-
         const std::uint32_t nonce = nonces[index];
         header[76] = static_cast<std::uint8_t>(nonce);
         header[77] = static_cast<std::uint8_t>(nonce >> 8);
@@ -81,8 +76,36 @@ __global__ void keccak512_stage(const DeviceJob* job,
         header[79] = static_cast<std::uint8_t>(nonce >> 24);
         core::keccak512(header, 80, digest);
     } else {
-        const std::uint8_t* input = states + index * kStateBytes;
-        core::keccak512(input, kStateBytes, digest);
+        core::keccak512(states + index * kStateBytes, kStateBytes, digest);
+    }
+
+    std::uint8_t* output = states + index * kStateBytes;
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) output[i] = digest[i];
+}
+
+__global__ void cubehash512_stage(const DeviceJob* job,
+                                  const std::uint32_t* nonces,
+                                  std::uint8_t* states,
+                                  std::size_t count,
+                                  int stage_index)
+{
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    std::uint8_t digest[64];
+    if (stage_index == 0) {
+        std::uint8_t header[80];
+        #pragma unroll
+        for (int i = 0; i < 80; ++i) header[i] = job->header[i];
+        const std::uint32_t nonce = nonces[index];
+        header[76] = static_cast<std::uint8_t>(nonce);
+        header[77] = static_cast<std::uint8_t>(nonce >> 8);
+        header[78] = static_cast<std::uint8_t>(nonce >> 16);
+        header[79] = static_cast<std::uint8_t>(nonce >> 24);
+        core::cubehash512(header, 80, digest);
+    } else {
+        core::cubehash512(states + index * kStateBytes, kStateBytes, digest);
     }
 
     std::uint8_t* output = states + index * kStateBytes;
@@ -101,8 +124,17 @@ __global__ void keccak512_validation_kernel(const std::uint8_t* input,
     for (int i = 0; i < 64; ++i) output[i] = digest[i];
 }
 
-// Once the final 512-bit GhostRider state exists, only its low 256 bits are
-// compared with the share target, matching Yerbas Core's trim256().
+__global__ void cubehash512_validation_kernel(const std::uint8_t* input,
+                                              std::size_t length,
+                                              std::uint8_t* output)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    std::uint8_t digest[64];
+    core::cubehash512(input, length, digest);
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) output[i] = digest[i];
+}
+
 __global__ void collect_candidates(const std::uint32_t* nonces,
                                    const std::uint8_t* states,
                                    std::size_t count,
@@ -120,8 +152,47 @@ __global__ void collect_candidates(const std::uint32_t* nonces,
     if (slot >= kMaxCandidates) return;
 
     candidates[slot].nonce = nonces[index];
-    for (int i = 0; i < 32; ++i) {
-        candidates[slot].hash[i] = hash[i];
+    for (int i = 0; i < 32; ++i) candidates[slot].hash[i] = hash[i];
+}
+
+Hash512 run_validation_kernel(int device_id,
+                              const std::uint8_t* input,
+                              std::size_t length,
+                              bool use_keccak)
+{
+    if (input == nullptr || length == 0) {
+        throw std::invalid_argument("CUDA core validation input must not be empty");
+    }
+
+    check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
+    std::uint8_t* d_input = nullptr;
+    std::uint8_t* d_output = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_input), length),
+               "cudaMalloc validation input failed");
+    try {
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_output), 64),
+                   "cudaMalloc validation output failed");
+        check_cuda(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice),
+                   "cudaMemcpy validation input failed");
+
+        if (use_keccak) {
+            keccak512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
+        } else {
+            cubehash512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
+        }
+        check_cuda(cudaGetLastError(), "CUDA core validation launch failed");
+        check_cuda(cudaDeviceSynchronize(), "CUDA core validation synchronize failed");
+
+        Hash512 out{};
+        check_cuda(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost),
+                   "cudaMemcpy validation output failed");
+        cudaFree(d_output);
+        cudaFree(d_input);
+        return out;
+    } catch (...) {
+        if (d_output) cudaFree(d_output);
+        if (d_input) cudaFree(d_input);
+        throw;
     }
 }
 
@@ -141,10 +212,7 @@ struct BatchEngine::Impl {
     Impl(int id, std::size_t size)
         : device_id(id), batch_size(size)
     {
-        if (batch_size == 0) {
-            throw std::runtime_error("CUDA batch size must be greater than zero");
-        }
-
+        if (batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
                    "cudaStreamCreateWithFlags failed");
@@ -176,7 +244,6 @@ BatchEngine::BatchEngine(int device_id, std::size_t batch_size)
     : impl_(std::make_unique<Impl>(device_id, batch_size))
 {
 }
-
 BatchEngine::~BatchEngine() = default;
 BatchEngine::BatchEngine(BatchEngine&&) noexcept = default;
 BatchEngine& BatchEngine::operator=(BatchEngine&&) noexcept = default;
@@ -187,7 +254,6 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     std::memcpy(device_job.header, job.header.data(), job.header.size());
     std::memcpy(device_job.target_le, job.target_le.data(), job.target_le.size());
     std::memcpy(device_job.stages, job.stages.data(), job.stages.size());
-
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
     check_cuda(cudaMemcpyAsync(impl_->d_job, &device_job, sizeof(device_job),
                                cudaMemcpyHostToDevice, impl_->stream),
@@ -198,16 +264,8 @@ void BatchEngine::upload_job(const JobDescriptor& job)
 
 std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 {
-    if (!impl_->job_loaded) {
-        throw std::runtime_error("CUDA batch scan requested before upload_job");
-    }
-
-    if (!hash_pipeline_ready()) {
-        // One core kernel is now implemented and independently testable, but a
-        // complete GhostRider share requires all 15 core hashes plus the three
-        // selected CryptoNight stages. Never submit partial-pipeline results.
-        return {};
-    }
+    if (!impl_->job_loaded) throw std::runtime_error("CUDA batch scan requested before upload_job");
+    if (!hash_pipeline_ready()) return {};
 
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream),
@@ -220,9 +278,8 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                   impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Dispatcher will be enabled only after every possible job-selected stage
-    // has a validated CUDA implementation. Keccak-512 is implemented today as
-    // the first core stage and exercised through keccak512_reference_stage().
+    // Full 18-stage dispatcher remains disabled until every selectable core and
+    // CryptoNight variant has a validated device implementation.
 
     collect_candidates<<<blocks, threads, 0, impl_->stream>>>(impl_->d_nonces,
                                                                impl_->d_states,
@@ -261,41 +318,14 @@ int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
 bool BatchEngine::hash_pipeline_ready() const noexcept { return false; }
 
-Hash512 keccak512_reference_stage(int device_id,
-                                  const std::uint8_t* input,
-                                  std::size_t length)
+Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length)
 {
-    if (input == nullptr || length == 0) {
-        throw std::invalid_argument("CUDA Keccak validation input must not be empty");
-    }
+    return run_validation_kernel(device_id, input, length, true);
+}
 
-    check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
-
-    std::uint8_t* d_input = nullptr;
-    std::uint8_t* d_output = nullptr;
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_input), length),
-               "cudaMalloc validation input failed");
-    try {
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_output), 64),
-                   "cudaMalloc validation output failed");
-        check_cuda(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice),
-                   "cudaMemcpy validation input failed");
-
-        keccak512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
-        check_cuda(cudaGetLastError(), "keccak512 validation launch failed");
-        check_cuda(cudaDeviceSynchronize(), "keccak512 validation synchronize failed");
-
-        Hash512 out{};
-        check_cuda(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost),
-                   "cudaMemcpy validation output failed");
-        cudaFree(d_output);
-        cudaFree(d_input);
-        return out;
-    } catch (...) {
-        if (d_output) cudaFree(d_output);
-        if (d_input) cudaFree(d_input);
-        throw;
-    }
+Hash512 cubehash512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length)
+{
+    return run_validation_kernel(device_id, input, length, false);
 }
 
 int device_count()
@@ -315,7 +345,6 @@ std::vector<DeviceInfo> enumerate_devices()
     std::vector<DeviceInfo> devices;
     const int count = device_count();
     devices.reserve(static_cast<std::size_t>(count));
-
     for (int device = 0; device < count; ++device) {
         cudaDeviceProp props{};
         check_cuda(cudaGetDeviceProperties(&props, device), "cudaGetDeviceProperties failed");
