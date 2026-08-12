@@ -32,8 +32,6 @@ endif()
 
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 
-# This list mirrors the GhostRider/SPHlib/CryptoNight sources used by Yerbas
-# Core's crypto library and hash_selection.cpp.
 set(YERBAS_GR_CORE_SOURCES
     ${YERBAS_CORE_SRC}/hash_selection.cpp
 
@@ -83,14 +81,22 @@ target_include_directories(yerbas-ghostrider-reference
     PRIVATE ${YERBAS_CORE_SRC}
 )
 
-# Modern glibc defines htobe*/htole*/be*toh/le*toh as macros, while the
-# pinned Yerbas Core compat/endian.h declares functions with those names.
-# Force-include a tiny shim on Linux that loads glibc's header once and then
-# undefines the macros before any Core headers are parsed. This keeps the
-# pinned Core checkout untouched and works for both x86_64 and ARM64 Linux.
+# Modern glibc defines endian helpers as macros; the pinned Core compatibility
+# header declares functions with the same names. Force-include a Linux-only shim
+# that removes those macros before any Core headers are parsed.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(yerbas-ghostrider-reference PRIVATE
         -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
+    )
+endif()
+
+# The imported CryptoNight/OpenAES C sources include POSIX sys/time.h and
+# unistd.h even though the code path needed by Yerbas does not depend on POSIX
+# APIs. Provide minimal compatibility headers ahead of the Core include tree
+# when building with MSVC/Windows, leaving the pinned Core checkout unchanged.
+if(WIN32)
+    target_include_directories(yerbas-ghostrider-reference BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/compat/windows"
     )
 endif()
 
