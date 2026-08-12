@@ -10,6 +10,7 @@
 
 #ifdef YERBAS_HAS_CUDA
 #include "cuda/cuda_backend.h"
+#include "cuda/core_coverage.h"
 #endif
 
 namespace yerbas {
@@ -72,6 +73,17 @@ int Miner::run()
         } else {
             cuda::print_devices();
             std::cout << "GPU mode: " << (devices.size() == 1 ? "single GPU" : "multi-GPU") << "\n";
+            std::cout << "CUDA core coverage: " << cuda::implemented_core_count() << "/15 conventional GhostRider cores\n";
+            std::cout << "CUDA-ready cores:";
+            for (const auto& core : cuda::kCoreCoverage) {
+                if (core.implemented) std::cout << ' ' << static_cast<unsigned int>(core.index) << ':' << core.name;
+            }
+            std::cout << "\nCUDA pending cores:";
+            for (const auto& core : cuda::kCoreCoverage) {
+                if (!core.implemented) std::cout << ' ' << static_cast<unsigned int>(core.index) << ':' << core.name;
+            }
+            std::cout << '\n';
+
             cuda::BatchEngine readiness_probe(devices.front().id, 1);
             if (!readiness_probe.hash_pipeline_ready()) {
                 std::cout << "CUDA GhostRider pipeline: partial/validation mode\n";
