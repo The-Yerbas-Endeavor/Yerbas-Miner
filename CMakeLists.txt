@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(YerbasMiner VERSION 0.4.1 LANGUAGES C CXX)
+project(YerbasMiner VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -7,8 +7,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Build a self-contained Windows executable so users do not need a separately
-# installed MSVC runtime to launch yerbas-miner.exe from the release artifact.
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
@@ -101,10 +99,7 @@ add_library(yerbas-ghostrider-reference STATIC
     src/ghostrider/ghostrider.cpp
     ${YERBAS_GR_CORE_SOURCES}
 )
-target_include_directories(yerbas-ghostrider-reference
-    PUBLIC src
-    PRIVATE ${YERBAS_CORE_SRC}
-)
+target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE ${YERBAS_CORE_SRC})
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(yerbas-ghostrider-reference PRIVATE
@@ -116,9 +111,7 @@ if(WIN32)
     target_include_directories(yerbas-ghostrider-reference BEFORE PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/compat/windows"
     )
-    target_sources(yerbas-ghostrider-reference PRIVATE
-        compat/windows/gettimeofday.c
-    )
+    target_sources(yerbas-ghostrider-reference PRIVATE compat/windows/gettimeofday.c)
 endif()
 
 add_executable(yerbas-miner
@@ -129,10 +122,7 @@ add_executable(yerbas-miner
     src/stratum/stratum.cpp
 )
 target_include_directories(yerbas-miner PRIVATE src)
-target_link_libraries(yerbas-miner PRIVATE
-    yerbas-ghostrider-reference
-    nlohmann_json::nlohmann_json
-)
+target_link_libraries(yerbas-miner PRIVATE yerbas-ghostrider-reference nlohmann_json::nlohmann_json)
 
 if(WIN32)
     target_link_libraries(yerbas-miner PRIVATE ws2_32)
