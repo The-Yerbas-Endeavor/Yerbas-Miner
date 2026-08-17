@@ -3,12 +3,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "config.h"
@@ -43,7 +40,6 @@ Endpoint parse_endpoint(const std::string& url);
 class Client {
 public:
     explicit Client(const AppConfig& config);
-    ~Client();
 
     void print_connection_plan() const;
     bool ready() const noexcept;
@@ -59,9 +55,6 @@ private:
                       std::uint32_t nonce) const;
     bool mine_one(std::intptr_t socket_value);
     bool mine_cpu_batch(std::intptr_t socket_value);
-    void initialize_cpu_workers();
-    void stop_cpu_workers();
-    void cpu_worker_loop(std::size_t worker_index);
 #ifdef YERBAS_HAS_CUDA
     bool mine_gpu_batch(std::intptr_t socket_value);
     bool mine_hybrid_round(std::intptr_t socket_value);
@@ -95,21 +88,6 @@ private:
     std::array<std::uint8_t, 32> target_le_{};
     bool target_ready_{false};
     double difficulty_{0.0};
-
-    // Persistent CPU scheduler. Workers are created once and reused for every
-    // nonce batch instead of paying std::async/thread creation cost per batch.
-    std::vector<std::thread> cpu_workers_;
-    std::vector<std::vector<std::uint32_t>> cpu_worker_candidates_;
-    std::mutex cpu_work_mutex_;
-    std::condition_variable cpu_work_cv_;
-    std::condition_variable cpu_done_cv_;
-    bool cpu_workers_stop_{false};
-    std::uint64_t cpu_work_generation_{0};
-    std::size_t cpu_workers_completed_{0};
-    std::array<std::uint8_t, 80> cpu_work_header_{};
-    std::string cpu_work_extranonce2_;
-    std::uint32_t cpu_work_batch_start_{0};
-    unsigned int cpu_work_per_thread_{0};
 
     std::chrono::steady_clock::time_point mining_started_{};
     std::chrono::steady_clock::time_point last_report_{};
