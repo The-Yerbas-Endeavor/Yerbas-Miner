@@ -1,4 +1,5 @@
 #include "config.h"
+#include "console.h"
 #include "miner.h"
 
 #include <exception>
@@ -32,8 +33,12 @@ void pause_on_windows_error()
 
 int main(int argc, char** argv)
 {
+    yerbas::console::enable_colors();
     write_startup_log("Yerbas Miner starting");
-    std::cout << "Yerbas Miner starting...\n" << std::flush;
+
+    std::cout << "\nYerbas Miner starting...\n"
+              << "------------------------------------------------------------\n"
+              << std::flush;
 
     try {
         const auto config = yerbas::load_config(argc, argv);
