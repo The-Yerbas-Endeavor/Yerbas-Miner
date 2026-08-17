@@ -16,9 +16,9 @@ struct MinerConfig {
     bool cpu_enabled{true};
     unsigned int threads{0};
     bool hybrid{true};
-    // Eight hashes per worker amortizes thread-launch overhead while keeping
-    // Stratum job switching responsive on the CPU reference backend.
-    unsigned int cpu_batch{8};
+    // 16 hashes per worker better amortizes scheduler/thread-launch overhead
+    // while keeping Stratum job switching responsive on the reference backend.
+    unsigned int cpu_batch{16};
 };
 
 struct GpuConfig {
