@@ -7,6 +7,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Release mining builds benefit materially from whole-program optimization,
+# especially because the GhostRider reference path crosses C/C++ translation
+# unit boundaries on every hash.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT YERBAS_IPO_SUPPORTED OUTPUT YERBAS_IPO_ERROR)
+if(YERBAS_IPO_SUPPORTED)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
@@ -102,6 +111,12 @@ add_library(yerbas-ghostrider-reference STATIC
 )
 target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE ${YERBAS_CORE_SRC})
 
+if(MSVC)
+    target_compile_options(yerbas-ghostrider-reference PRIVATE $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot>)
+else()
+    target_compile_options(yerbas-ghostrider-reference PRIVATE $<$<CONFIG:Release>:-O3>)
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(yerbas-ghostrider-reference PRIVATE
         -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
@@ -124,6 +139,12 @@ add_executable(yerbas-miner
 )
 target_include_directories(yerbas-miner PRIVATE src)
 target_link_libraries(yerbas-miner PRIVATE yerbas-ghostrider-reference nlohmann_json::nlohmann_json)
+
+if(MSVC)
+    target_compile_options(yerbas-miner PRIVATE $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot>)
+else()
+    target_compile_options(yerbas-miner PRIVATE $<$<CONFIG:Release>:-O3>)
+endif()
 
 if(WIN32)
     target_link_libraries(yerbas-miner PRIVATE ws2_32)
