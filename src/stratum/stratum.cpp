@@ -42,7 +42,12 @@ namespace yerbas::stratum {
 namespace {
 
 using boost::multiprecision::cpp_int;
-constexpr double kStratumDiffOneHashes = 4294967296.0;
+// GhostRider miners use a 65536 target factor.  Treating pool difficulty as
+// raw Bitcoin diff makes the local share target 65536x too hard and prevents
+// normal vardiff shares from ever being submitted at realistic hash rates.
+constexpr double kGhostRiderTargetFactor = 65536.0;
+constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
+constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
 
@@ -391,7 +396,7 @@ bool Client::run_session(std::atomic_bool& stop_requested)
     SocketHandle socket_handle = connect_tcp(endpoint_);
     std::cout << "[stratum] Connected\n";
 
-    const nlohmann::json subscribe = {{"id",1},{"method","mining.subscribe"},{"params",nlohmann::json::array({"Yerbas-Miner/0.5.0"})}};
+    const nlohmann::json subscribe = {{"id",1},{"method","mining.subscribe"},{"params",nlohmann::json::array({"Yerbas-Miner/0.5.2"})}};
     const nlohmann::json authorize = {{"id",2},{"method","mining.authorize"},{"params",nlohmann::json::array({login_user(),config_.pool.password})}};
     if (!send_all(socket_handle, json_line(subscribe)) || !send_all(socket_handle, json_line(authorize))) {
         close_socket(socket_handle);
@@ -475,10 +480,20 @@ void Client::handle_message(const std::string& line)
             if (ok && error.is_null()) { authorized_ = true; std::cout << "[stratum] Authorization accepted as " << login_user() << '\n'; }
             else std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
         } else if (id >= 1000) {
-            const bool accepted = error.is_null() && message.contains("result") &&
-                                  ((message["result"].is_boolean() && message["result"].get<bool>()) || !message["result"].is_null());
-            if (accepted) { ++shares_accepted_; std::cout << "[share] ACCEPTED | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << '\n'; }
-            else { ++shares_rejected_; std::cout << "[share] REJECTED | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << " | " << message.dump() << '\n'; }
+            bool result_ok = false;
+            if (message.contains("result")) {
+                const auto& result = message["result"];
+                result_ok = result.is_boolean() ? result.get<bool>() : !result.is_null();
+            }
+            const bool accepted = error.is_null() && result_ok;
+            if (accepted) {
+                ++shares_accepted_;
+                std::cout << "[share] ACCEPTED | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << '\n';
+            } else {
+                ++shares_rejected_;
+                std::cout << "[share] REJECTED | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_
+                          << " | response=" << message.dump() << '\n';
+            }
         }
         return;
     }
@@ -547,7 +562,9 @@ void Client::set_difficulty(double difficulty)
     difficulty_ = difficulty;
     static const cpp_int diff1 = parse_hex_int("00000000ffff0000000000000000000000000000000000000000000000000000");
     const std::uint64_t scaled = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(difficulty * 1000000.0));
-    cpp_int target = (diff1 * 1000000) / scaled;
+    cpp_int target = (diff1 * kGhostRiderTargetFactorInt * 1000000ULL) / scaled;
+    const cpp_int max_target = (cpp_int(1) << 256) - 1;
+    if (target > max_target) target = max_target;
     for (std::size_t i = 0; i < 32; ++i) {
         target_le_[i] = static_cast<std::uint8_t>(target & 0xff);
         target >>= 8;
@@ -557,8 +574,12 @@ void Client::set_difficulty(double difficulty)
     gpu_job_loaded_ = false;
 #endif
     const double expected = difficulty_ * kStratumDiffOneHashes;
-    std::cout << "[stratum] Difficulty set to " << difficulty_ << " | average work/share ~"
-              << std::fixed << std::setprecision(0) << expected << " hashes\n";
+    std::ostringstream msg;
+    msg << std::defaultfloat << std::setprecision(8)
+        << "[stratum] Difficulty set to " << difficulty_
+        << " | GhostRider target factor " << static_cast<std::uint64_t>(kGhostRiderTargetFactor)
+        << " | average work/share ~" << std::fixed << std::setprecision(0) << expected << " hashes";
+    std::cout << msg.str() << '\n';
 }
 
 bool Client::build_header(std::array<std::uint8_t, 80>& header,
@@ -611,7 +632,7 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
     const unsigned int threads = config_.miner.threads == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : std::max(1u, config_.miner.threads);
-    const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 1U : config_.miner.cpu_batch;
+    const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 8U : config_.miner.cpu_batch;
     const std::uint64_t total = static_cast<std::uint64_t>(threads) * per_thread;
 
 #ifdef YERBAS_HAS_CUDA
@@ -823,7 +844,11 @@ bool Client::submit_share(std::intptr_t socket_value,
         return false;
     }
     ++shares_submitted_;
-    std::cout << "[share] Submitted #" << shares_submitted_ << '\n';
+    std::cout << "[share] Submitted #" << shares_submitted_
+              << " | job=" << job_.job_id
+              << " extranonce2=" << extranonce2_hex
+              << " ntime=" << job_.ntime
+              << " nonce=" << nonce_hex(nonce) << '\n';
     return true;
 }
 
@@ -872,9 +897,12 @@ void Client::report_stats(bool force)
     if (difficulty_ > 0.0) {
         const double expected_hashes = difficulty_ * kStratumDiffOneHashes;
         const double eta = average_hps > 0.0 ? expected_hashes / average_hps : std::numeric_limits<double>::infinity();
-        std::cout << " | diff " << difficulty_
-                  << " | expected/share " << std::fixed << std::setprecision(0) << expected_hashes
-                  << " | avg ETA " << format_duration(eta);
+        std::ostringstream diff_stats;
+        diff_stats << std::defaultfloat << std::setprecision(8)
+                   << " | diff " << difficulty_
+                   << " | expected/share " << std::fixed << std::setprecision(0) << expected_hashes
+                   << " | avg ETA " << format_duration(eta);
+        std::cout << diff_stats.str();
     }
     std::cout << " | uptime " << format_duration(uptime) << '\n';
 
