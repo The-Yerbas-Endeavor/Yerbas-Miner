@@ -42,7 +42,7 @@ namespace yerbas::stratum {
 namespace {
 
 using boost::multiprecision::cpp_int;
-// GhostRider miners use a 65536 target factor.  Treating pool difficulty as
+// GhostRider miners use a 65536 target factor. Treating pool difficulty as
 // raw Bitcoin diff makes the local share target 65536x too hard and prevents
 // normal vardiff shares from ever being submitted at realistic hash rates.
 constexpr double kGhostRiderTargetFactor = 65536.0;
@@ -184,8 +184,16 @@ std::string hex_fixed(std::uint64_t value, std::size_t bytes)
 
 std::string nonce_hex(std::uint32_t nonce)
 {
+    // Stratum's standard little-endian submission path hex-encodes the four
+    // nonce bytes as they appear in the 80-byte block header.  Formatting the
+    // host integer directly reverses those bytes and makes the pool rebuild a
+    // different header from the one we actually hashed.
     std::ostringstream ss;
-    ss << std::hex << std::setfill('0') << std::setw(8) << nonce;
+    ss << std::hex << std::setfill('0')
+       << std::setw(2) << static_cast<unsigned int>(nonce & 0xffU)
+       << std::setw(2) << static_cast<unsigned int>((nonce >> 8) & 0xffU)
+       << std::setw(2) << static_cast<unsigned int>((nonce >> 16) & 0xffU)
+       << std::setw(2) << static_cast<unsigned int>((nonce >> 24) & 0xffU);
     return ss.str();
 }
 
