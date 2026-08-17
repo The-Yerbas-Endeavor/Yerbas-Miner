@@ -3,7 +3,10 @@
 // Minimal compatibility shim for the handful of boost::multiprecision::cpp_int
 // operations used by Yerbas-Miner's Stratum target calculation. This keeps the
 // miner self-contained on Windows while preserving the existing call sites.
-// It is intentionally limited to unsigned 256-bit arithmetic.
+//
+// The final mining target is 256 bits, but GhostRider's fixed-point difficulty
+// conversion can temporarily exceed 256 bits before division. Keep a small
+// widened working area so those intermediate products do not wrap.
 
 #include <array>
 #include <cstddef>
@@ -15,6 +18,9 @@ namespace boost::multiprecision {
 
 class cpp_int {
 public:
+    static constexpr std::size_t kBytes = 48; // 384-bit working precision
+    static constexpr unsigned int kBits = static_cast<unsigned int>(kBytes * 8);
+
     cpp_int() = default;
     cpp_int(std::uint64_t value)
     {
@@ -26,22 +32,23 @@ public:
     cpp_int& operator<<=(unsigned int bits)
     {
         if (bits == 0) return *this;
-        if (bits >= 256) {
+        if (bits >= kBits) {
             bytes_.fill(0);
             return *this;
         }
 
         const unsigned int byte_shift = bits / 8;
         const unsigned int bit_shift = bits % 8;
-        std::array<std::uint8_t, 32> out{};
+        std::array<std::uint8_t, kBytes> out{};
 
-        for (int i = 31; i >= 0; --i) {
+        for (int i = static_cast<int>(kBytes) - 1; i >= 0; --i) {
             const int src = i - static_cast<int>(byte_shift);
             if (src < 0) continue;
 
-            std::uint16_t value = static_cast<std::uint16_t>(bytes_[static_cast<std::size_t>(src)]) << bit_shift;
+            const std::uint16_t value =
+                static_cast<std::uint16_t>(bytes_[static_cast<std::size_t>(src)]) << bit_shift;
             out[static_cast<std::size_t>(i)] |= static_cast<std::uint8_t>(value & 0xffU);
-            if (bit_shift != 0 && i + 1 < 32) {
+            if (bit_shift != 0 && i + 1 < static_cast<int>(kBytes)) {
                 out[static_cast<std::size_t>(i + 1)] |= static_cast<std::uint8_t>(value >> 8);
             }
         }
@@ -52,21 +59,21 @@ public:
     cpp_int& operator>>=(unsigned int bits)
     {
         if (bits == 0) return *this;
-        if (bits >= 256) {
+        if (bits >= kBits) {
             bytes_.fill(0);
             return *this;
         }
 
         const unsigned int byte_shift = bits / 8;
         const unsigned int bit_shift = bits % 8;
-        std::array<std::uint8_t, 32> out{};
+        std::array<std::uint8_t, kBytes> out{};
 
-        for (std::size_t i = 0; i < 32; ++i) {
+        for (std::size_t i = 0; i < kBytes; ++i) {
             const std::size_t src = i + byte_shift;
-            if (src >= 32) continue;
+            if (src >= kBytes) continue;
 
             std::uint16_t value = bytes_[src];
-            if (bit_shift != 0 && src + 1 < 32) {
+            if (bit_shift != 0 && src + 1 < kBytes) {
                 value |= static_cast<std::uint16_t>(bytes_[src + 1]) << 8;
             }
             out[i] = static_cast<std::uint8_t>((value >> bit_shift) & 0xffU);
@@ -78,7 +85,7 @@ public:
     cpp_int& operator+=(std::uint64_t value)
     {
         std::uint64_t carry = value;
-        for (std::size_t i = 0; i < 32 && carry != 0; ++i) {
+        for (std::size_t i = 0; i < kBytes && carry != 0; ++i) {
             const std::uint64_t sum = static_cast<std::uint64_t>(bytes_[i]) + (carry & 0xffU);
             bytes_[i] = static_cast<std::uint8_t>(sum & 0xffU);
             carry = (carry >> 8) + (sum >> 8);
@@ -86,16 +93,50 @@ public:
         return *this;
     }
 
+    friend cpp_int operator<<(cpp_int lhs, unsigned int bits)
+    {
+        lhs <<= bits;
+        return lhs;
+    }
+
+    friend cpp_int operator-(cpp_int lhs, std::uint64_t rhs)
+    {
+        std::uint64_t borrow = rhs;
+        for (std::size_t i = 0; i < kBytes && borrow != 0; ++i) {
+            const std::uint64_t sub = borrow & 0xffU;
+            const std::uint64_t current = lhs.bytes_[i];
+            if (current >= sub) {
+                lhs.bytes_[i] = static_cast<std::uint8_t>(current - sub);
+                borrow >>= 8;
+            } else {
+                lhs.bytes_[i] = static_cast<std::uint8_t>(256U + current - sub);
+                borrow = (borrow >> 8) + 1U;
+            }
+        }
+        return lhs;
+    }
+
+    friend bool operator>(const cpp_int& lhs, const cpp_int& rhs)
+    {
+        for (int i = static_cast<int>(kBytes) - 1; i >= 0; --i) {
+            const auto index = static_cast<std::size_t>(i);
+            if (lhs.bytes_[index] > rhs.bytes_[index]) return true;
+            if (lhs.bytes_[index] < rhs.bytes_[index]) return false;
+        }
+        return false;
+    }
+
     friend cpp_int operator*(const cpp_int& lhs, std::uint64_t rhs)
     {
         cpp_int out;
         std::uint64_t carry = 0;
-        for (std::size_t i = 0; i < 32; ++i) {
-            // rhs is 1,000,000 in Yerbas-Miner. The product therefore remains
-            // comfortably within uint64_t for each base-256 digit step.
+        for (std::size_t i = 0; i < kBytes; ++i) {
             const std::uint64_t product = static_cast<std::uint64_t>(lhs.bytes_[i]) * rhs + carry;
             out.bytes_[i] = static_cast<std::uint8_t>(product & 0xffU);
             carry = product >> 8;
+        }
+        if (carry != 0) {
+            throw std::runtime_error("cpp_int working precision exceeded during target multiplication");
         }
         return out;
     }
@@ -104,17 +145,15 @@ public:
     {
         if (divisor == 0) throw std::runtime_error("cpp_int division by zero");
 
-        // Base-256 long division. Pool share difficulties are far below the
-        // limit where remainder*256 can overflow uint64_t. Guard explicitly
-        // rather than silently producing a bad mining target.
         if (divisor > (std::numeric_limits<std::uint64_t>::max() >> 8)) {
             throw std::runtime_error("Stratum difficulty is too large for fixed-width target conversion");
         }
 
         cpp_int out;
         std::uint64_t remainder = 0;
-        for (int i = 31; i >= 0; --i) {
-            const std::uint64_t current = (remainder << 8) | lhs.bytes_[static_cast<std::size_t>(i)];
+        for (int i = static_cast<int>(kBytes) - 1; i >= 0; --i) {
+            const std::uint64_t current =
+                (remainder << 8) | lhs.bytes_[static_cast<std::size_t>(i)];
             out.bytes_[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(current / divisor);
             remainder = current % divisor;
         }
@@ -131,7 +170,7 @@ public:
     }
 
 private:
-    std::array<std::uint8_t, 32> bytes_{};
+    std::array<std::uint8_t, kBytes> bytes_{};
 };
 
 } // namespace boost::multiprecision
