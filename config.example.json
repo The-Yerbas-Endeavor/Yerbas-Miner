@@ -1,6 +1,6 @@
 {
   "pool": {
-    "url": "stratum+tcp://pool.example.com:3032",
+    "url": "stratum+tcp://pool.yerbas.org:3333",
     "user": "YOUR_YERB_ADDRESS",
     "password": "x"
   },
