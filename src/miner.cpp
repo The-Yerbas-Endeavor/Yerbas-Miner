@@ -43,7 +43,7 @@ int Miner::run()
     std::signal(SIGTERM, handle_signal);
 #endif
 
-    std::cout << "Yerbas Miner 0.5.0\n";
+    std::cout << "Yerbas Miner 0.5.2\n";
     std::cout << "Config: " << config_.config_path << "\n";
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
@@ -73,7 +73,12 @@ int Miner::run()
         } else {
             cuda::print_devices();
             std::cout << "GPU mode: " << (devices.size() == 1 ? "single GPU" : "multi-GPU") << "\n";
-            std::cout << "CUDA core coverage: " << cuda::implemented_core_count() << "/15 conventional GhostRider cores\n";
+
+            const auto core_count = cuda::implemented_core_count();
+            const auto cn_count = cuda::implemented_cryptonight_count();
+            std::cout << "CUDA GhostRider coverage: cores " << core_count << "/" << cuda::kCoreCoverage.size()
+                      << " | CryptoNight " << cn_count << "/" << cuda::kCryptoNightCoverage.size() << "\n";
+
             std::cout << "CUDA-ready cores:";
             for (const auto& core : cuda::kCoreCoverage) {
                 if (core.implemented) std::cout << ' ' << static_cast<unsigned int>(core.index) << ':' << core.name;
@@ -82,7 +87,19 @@ int Miner::run()
             for (const auto& core : cuda::kCoreCoverage) {
                 if (!core.implemented) std::cout << ' ' << static_cast<unsigned int>(core.index) << ':' << core.name;
             }
+            std::cout << "\nCUDA pending CryptoNight:";
+            for (const auto& variant : cuda::kCryptoNightCoverage) {
+                if (!variant.implemented) std::cout << ' ' << variant.name;
+            }
             std::cout << '\n';
+
+            for (const auto& device : devices) {
+                std::cout << "[GPU " << device.id << "] CUDA ready | CC "
+                          << device.compute_major << '.' << device.compute_minor
+                          << " | GhostRider cores " << core_count << '/' << cuda::kCoreCoverage.size()
+                          << " | CN " << cn_count << '/' << cuda::kCryptoNightCoverage.size()
+                          << " | mining " << (cuda::full_ghostrider_cuda_coverage() ? "ready" : "blocked") << "\n";
+            }
 
             cuda::BatchEngine readiness_probe(devices.front().id, 1);
             if (!readiness_probe.hash_pipeline_ready()) {
@@ -115,9 +132,14 @@ int Miner::run()
     }
 #endif
 
-    std::cout << "Configured GPU device ids:";
-    for (const int device : config_.gpu.devices) std::cout << ' ' << device;
-    std::cout << "\nGPU intensity: " << config_.gpu.intensity << " (0 = auto)\n";
+    if (config_.gpu.devices.empty()) {
+        std::cout << "Configured GPU device ids: all detected GPUs\n";
+    } else {
+        std::cout << "Configured GPU device ids:";
+        for (const int device : config_.gpu.devices) std::cout << ' ' << device;
+        std::cout << '\n';
+    }
+    std::cout << "GPU intensity: " << config_.gpu.intensity << " (0 = auto)\n";
 
     if (!stratum_client.ready()) {
         std::cout << "\nPool configuration is incomplete.\n";
