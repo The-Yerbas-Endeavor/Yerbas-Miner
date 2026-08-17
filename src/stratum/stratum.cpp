@@ -184,16 +184,11 @@ std::string hex_fixed(std::uint64_t value, std::size_t bytes)
 
 std::string nonce_hex(std::uint32_t nonce)
 {
-    // Stratum's standard little-endian submission path hex-encodes the four
-    // nonce bytes as they appear in the 80-byte block header.  Formatting the
-    // host integer directly reverses those bytes and makes the pool rebuild a
-    // different header from the one we actually hashed.
+    // YERB-Pool parses the submitted nonce hex as an integer and serializes
+    // that value little-endian into the block header. Submit the host-order
+    // numeric value here so the pool reconstructs the same nonce bytes we hash.
     std::ostringstream ss;
-    ss << std::hex << std::setfill('0')
-       << std::setw(2) << static_cast<unsigned int>(nonce & 0xffU)
-       << std::setw(2) << static_cast<unsigned int>((nonce >> 8) & 0xffU)
-       << std::setw(2) << static_cast<unsigned int>((nonce >> 16) & 0xffU)
-       << std::setw(2) << static_cast<unsigned int>((nonce >> 24) & 0xffU);
+    ss << std::hex << std::setfill('0') << std::setw(8) << nonce;
     return ss.str();
 }
 
@@ -604,7 +599,9 @@ bool Client::build_header(std::array<std::uint8_t, 80>& header,
         const auto nbits = reversed_4byte_field(job_.nbits);
         std::copy(version.begin(), version.end(), header.begin());
         std::copy(prev.begin(), prev.end(), header.begin() + 4);
-        for (std::size_t i = 0; i < 32; ++i) header[36 + i] = merkle[31 - i];
+        // The pool's merkle_root_from_coinbase() returns the raw SHA256d bytes,
+        // and header_bytes() copies them into the serialized header unchanged.
+        std::copy(merkle.begin(), merkle.end(), header.begin() + 36);
         std::copy(ntime.begin(), ntime.end(), header.begin() + 68);
         std::copy(nbits.begin(), nbits.end(), header.begin() + 72);
         write_nonce(header, nonce);
