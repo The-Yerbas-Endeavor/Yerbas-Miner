@@ -96,6 +96,11 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--help" || arg == "-h") {}
         else throw std::runtime_error("Unknown option: " + arg);
     }
+
+    // Auto CPU batching is normalized here so all scheduler paths see the same
+    // tuned chunk size. 16 hashes/thread cuts launch overhead roughly in half
+    // versus the old automatic value while preserving quick Stratum job swaps.
+    if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
     return cfg;
 }
 
