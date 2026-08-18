@@ -159,9 +159,15 @@ def inline_helpers(source: str, specs: list[str]) -> str:
         )
         if not marker.search(source):
             raise ValueError(f"include {include_name!r} not found in source")
+        # Replace only the first occurrence. Some sphlib sources (notably
+        # SHAvite) contain an alternate helper include inside a block comment.
+        # Replacing that commented include injects helper comments containing
+        # */ and prematurely terminates the outer comment, activating the
+        # alternate AES_BIG_ENDIAN path in generated CUDA.
         source = marker.sub(
             f"/* begin generated inline {include_name} */\n{helper}\n/* end generated inline {include_name} */",
             source,
+            count=1,
         )
     return source
 
