@@ -18,15 +18,30 @@ def public_function_pattern(stem: str) -> re.Pattern[str]:
     )
 
 
-def strip_public_prototypes(header: str, stem: str) -> str:
-    """Remove host sphlib public prototypes from the generated type header.
+def strip_c_linkage_wrappers(text: str) -> str:
+    """Remove sphlib's host C-linkage wrappers for private CUDA code.
 
-    Device declarations are emitted separately inside the private CUDA
-    implementation namespace. Keeping the original host declarations would
-    make unqualified calls bind to host functions instead of the generated
-    device copies.
+    Generated functions live in C++ namespaces and use private __device__
+    linkage. Leaving the original extern \"C\" wrapper around either the
+    declarations or definitions makes MSVC/NVCC diagnose contradictory
+    linkage specifications.
     """
-    return public_function_pattern(stem).sub("", header)
+    text = re.sub(
+        r'(?ms)^\s*#\s*ifdef\s+__cplusplus\s*\n\s*extern\s+"C"\s*\{\s*\n\s*#\s*endif\s*',
+        '',
+        text,
+    )
+    text = re.sub(
+        r'(?ms)^\s*#\s*ifdef\s+__cplusplus\s*\n\s*\}\s*\n\s*#\s*endif\s*',
+        '',
+        text,
+    )
+    return text
+
+
+def strip_public_prototypes(header: str, stem: str) -> str:
+    """Remove host sphlib public prototypes from the generated type header."""
+    return public_function_pattern(stem).sub("", strip_c_linkage_wrappers(header))
 
 
 def context_type_for(function_name: str, stem: str) -> str | None:
@@ -54,13 +69,6 @@ def context_type_for(function_name: str, stem: str) -> str | None:
 
 
 def type_cc_parameter(signature: str, function_name: str, stem: str) -> str:
-    """Replace the public API's C-style void *cc with its concrete type.
-
-    sphlib is C and relies on implicit void-pointer conversion. nvcc compiles
-    the generated implementation as C++, where those conversions are invalid.
-    The CUDA wrappers already pass the matching concrete context type, so this
-    is a type-safety adaptation only; it does not change hashing behavior.
-    """
     context_type = context_type_for(function_name, stem)
     if context_type is None:
         return signature
@@ -100,101 +108,58 @@ def type_public_definitions(source: str, stem: str) -> str:
 
 
 def device_endian_helpers() -> str:
-    """Provide CUDA-safe sphlib endian helpers used by generated algorithms.
-
-    sph_types.h defines these as ordinary host inline functions. Generated
-    device code must not bind to those host implementations, so calls are
-    redirected to equivalent byte-oriented device helpers. Byte assembly is
-    deliberately used instead of host architecture detection or inline asm;
-    it is valid device code on every CUDA architecture we build.
-    """
+    """Provide CUDA-safe sphlib endian helpers used by generated algorithms."""
     return r'''/* generated CUDA endian helpers */
 __device__ __forceinline__ sph_u32 yerbas_cuda_dec32le(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
-    return (sph_u32)p[0]
-        | ((sph_u32)p[1] << 8)
-        | ((sph_u32)p[2] << 16)
-        | ((sph_u32)p[3] << 24);
+    return (sph_u32)p[0] | ((sph_u32)p[1] << 8) | ((sph_u32)p[2] << 16) | ((sph_u32)p[3] << 24);
 }
 
 __device__ __forceinline__ sph_u32 yerbas_cuda_dec32be(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
-    return ((sph_u32)p[0] << 24)
-        | ((sph_u32)p[1] << 16)
-        | ((sph_u32)p[2] << 8)
-        | (sph_u32)p[3];
+    return ((sph_u32)p[0] << 24) | ((sph_u32)p[1] << 16) | ((sph_u32)p[2] << 8) | (sph_u32)p[3];
 }
 
 __device__ __forceinline__ sph_u64 yerbas_cuda_dec64le(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
-    return (sph_u64)p[0]
-        | ((sph_u64)p[1] << 8)
-        | ((sph_u64)p[2] << 16)
-        | ((sph_u64)p[3] << 24)
-        | ((sph_u64)p[4] << 32)
-        | ((sph_u64)p[5] << 40)
-        | ((sph_u64)p[6] << 48)
-        | ((sph_u64)p[7] << 56);
+    return (sph_u64)p[0] | ((sph_u64)p[1] << 8) | ((sph_u64)p[2] << 16) | ((sph_u64)p[3] << 24)
+        | ((sph_u64)p[4] << 32) | ((sph_u64)p[5] << 40) | ((sph_u64)p[6] << 48) | ((sph_u64)p[7] << 56);
 }
 
 __device__ __forceinline__ sph_u64 yerbas_cuda_dec64be(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
-    return ((sph_u64)p[0] << 56)
-        | ((sph_u64)p[1] << 48)
-        | ((sph_u64)p[2] << 40)
-        | ((sph_u64)p[3] << 32)
-        | ((sph_u64)p[4] << 24)
-        | ((sph_u64)p[5] << 16)
-        | ((sph_u64)p[6] << 8)
-        | (sph_u64)p[7];
+    return ((sph_u64)p[0] << 56) | ((sph_u64)p[1] << 48) | ((sph_u64)p[2] << 40) | ((sph_u64)p[3] << 32)
+        | ((sph_u64)p[4] << 24) | ((sph_u64)p[5] << 16) | ((sph_u64)p[6] << 8) | (sph_u64)p[7];
 }
 
 __device__ __forceinline__ void yerbas_cuda_enc32le(void *dst, sph_u32 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)val;
-    p[1] = (unsigned char)(val >> 8);
-    p[2] = (unsigned char)(val >> 16);
-    p[3] = (unsigned char)(val >> 24);
+    p[0] = (unsigned char)val; p[1] = (unsigned char)(val >> 8); p[2] = (unsigned char)(val >> 16); p[3] = (unsigned char)(val >> 24);
 }
 
 __device__ __forceinline__ void yerbas_cuda_enc32be(void *dst, sph_u32 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)(val >> 24);
-    p[1] = (unsigned char)(val >> 16);
-    p[2] = (unsigned char)(val >> 8);
-    p[3] = (unsigned char)val;
+    p[0] = (unsigned char)(val >> 24); p[1] = (unsigned char)(val >> 16); p[2] = (unsigned char)(val >> 8); p[3] = (unsigned char)val;
 }
 
 __device__ __forceinline__ void yerbas_cuda_enc64le(void *dst, sph_u64 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)val;
-    p[1] = (unsigned char)(val >> 8);
-    p[2] = (unsigned char)(val >> 16);
-    p[3] = (unsigned char)(val >> 24);
-    p[4] = (unsigned char)(val >> 32);
-    p[5] = (unsigned char)(val >> 40);
-    p[6] = (unsigned char)(val >> 48);
-    p[7] = (unsigned char)(val >> 56);
+    p[0] = (unsigned char)val; p[1] = (unsigned char)(val >> 8); p[2] = (unsigned char)(val >> 16); p[3] = (unsigned char)(val >> 24);
+    p[4] = (unsigned char)(val >> 32); p[5] = (unsigned char)(val >> 40); p[6] = (unsigned char)(val >> 48); p[7] = (unsigned char)(val >> 56);
 }
 
 __device__ __forceinline__ void yerbas_cuda_enc64be(void *dst, sph_u64 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)(val >> 56);
-    p[1] = (unsigned char)(val >> 48);
-    p[2] = (unsigned char)(val >> 40);
-    p[3] = (unsigned char)(val >> 32);
-    p[4] = (unsigned char)(val >> 24);
-    p[5] = (unsigned char)(val >> 16);
-    p[6] = (unsigned char)(val >> 8);
-    p[7] = (unsigned char)val;
+    p[0] = (unsigned char)(val >> 56); p[1] = (unsigned char)(val >> 48); p[2] = (unsigned char)(val >> 40); p[3] = (unsigned char)(val >> 32);
+    p[4] = (unsigned char)(val >> 24); p[5] = (unsigned char)(val >> 16); p[6] = (unsigned char)(val >> 8); p[7] = (unsigned char)val;
 }
 
 #define sph_dec32le yerbas_cuda_dec32le
@@ -218,16 +183,13 @@ __device__ __forceinline__ void yerbas_cuda_enc64be(void *dst, sph_u64 val)
 
 
 def transform_source(source: str, stem: str) -> str:
-    # Runtime/type headers are included globally by the generated type header;
-    # do not include C/C++ standard headers from inside the private namespace.
+    # The private CUDA implementation must not retain sphlib's host C linkage.
+    source = strip_c_linkage_wrappers(source)
+
+    # Runtime/type headers are included globally by the generated type header.
     source = re.sub(r'(?m)^\s*#\s*include\s+[<\"].*[>\"]\s*$', '', source)
 
-    # sphlib file-scope helpers/tables are at column zero. Device-decorating
-    # only those declarations avoids rewriting normal local variables.
     source = re.sub(r'(?m)^static\s+', '__device__ static ', source)
-
-    # Public sphlib entry points become private device functions. This handles
-    # both one-line and two-line function declaration styles used by sphlib.
     source = re.sub(
         rf'(?m)^void([ \t\r\n]+)(sph_{re.escape(stem)}[A-Za-z0-9_]*)',
         r'__device__ static void\1\2',
@@ -235,17 +197,12 @@ def transform_source(source: str, stem: str) -> str:
     )
     source = type_public_definitions(source, stem)
 
-    # C permits implicit conversion from void*; C++/nvcc does not. Luffa's
-    # close helpers assign their public void* destination to byte pointers.
-    # Make that conversion explicit without touching the algorithm itself.
     source = re.sub(
         r'(?m)^(\s*)out\s*=\s*dst\s*;',
         r'\1out = static_cast<unsigned char *>(dst);',
         source,
     )
 
-    # Prevent legacy implementation macros from leaking into the next hash
-    # implementation included by stage_dispatch.cuh.
     names: list[str] = []
     for m in re.finditer(r'(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)', source):
         if m.group(1) not in names:
@@ -254,8 +211,6 @@ def transform_source(source: str, stem: str) -> str:
         source += "\n\n/* generated macro cleanup */\n"
         source += "\n".join(f"#undef {name}" for name in reversed(names)) + "\n"
 
-    # Endian helper aliases are generator-owned and must also be cleaned up
-    # before the next generated algorithm enters its private namespace.
     source += "\n/* generated CUDA endian helper cleanup */\n"
     for name in (
         "sph_dec32le", "sph_dec32le_aligned", "sph_dec32be", "sph_dec32be_aligned",
