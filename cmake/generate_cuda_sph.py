@@ -231,6 +231,16 @@ def transform_source(source: str, stem: str, inline_specs: list[str], inline_all
     if stem == "simd":
         source = re.sub(r'\bd\s*=\s*dst\b', 'd = static_cast<unsigned char *>(dst)', source)
 
+    # Echo, Hamsi and Shabal use byte-oriented internal core helpers while
+    # their public sphlib API intentionally accepts const void*. C permits
+    # that implicit conversion; C++/nvcc requires the byte pointer explicitly.
+    if stem in ("echo", "hamsi", "shabal"):
+        source = re.sub(
+            r'\b(echo_small_core|echo_big_core|hamsi_small|hamsi_big|shabal_core)\(([^,\n]+),\s*data\s*,',
+            r'\1(\2, static_cast<const unsigned char *>(data),',
+            source,
+        )
+
     names: list[str] = []
     for m in re.finditer(r'(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)', source):
         if m.group(1) not in names:
