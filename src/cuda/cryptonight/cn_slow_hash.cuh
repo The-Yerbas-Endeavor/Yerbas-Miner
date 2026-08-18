@@ -10,9 +10,9 @@
 namespace yerbas::cuda::cryptonight {
 
 // Implemented by cn_final.cuh from the pinned Yerbas Core c_* extra hashes.
-__device__ void dispatch_extra_hash(std::uint8_t selector,
-                                    const std::uint8_t state[200],
-                                    std::uint8_t out[32]);
+__device__ static __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
+                                                            const std::uint8_t state[200],
+                                                            std::uint8_t out[32]);
 
 __device__ __forceinline__ std::uint64_t cn_load64(const std::uint8_t* p)
 {
@@ -38,7 +38,6 @@ __device__ __forceinline__ void xor16(std::uint8_t* dst, const std::uint8_t* src
 
 __device__ __forceinline__ std::size_t cn_index(const std::uint8_t block[16], std::size_t aes_rounds)
 {
-    // Exact Yerbas Core e2i(): (u64 / AES_BLOCK_SIZE) & (count - 1).
     return static_cast<std::size_t>((cn_load64(block) >> 4) & (aes_rounds - 1));
 }
 
@@ -50,9 +49,6 @@ __device__ __forceinline__ void variant1_mutate(std::uint8_t block[16])
     block[11] = static_cast<std::uint8_t>(tmp ^ ((table >> index) & 0x30U));
 }
 
-// Correctness-first native CUDA translation of pinned Yerbas Core cn_slow_hash.
-// One CUDA thread owns one scratchpad. Optimization/cooperative AES comes only
-// after byte-for-byte equivalence is established for all six variants.
 __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
                                           const std::uint8_t* input,
                                           std::size_t length,
@@ -88,7 +84,6 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
     }
 
-    // Yerbas Core VARIANT1_INIT: input[35..42] XOR state.hs.w[24].
     const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
 
     for (std::uint32_t i = 0; i < cfg->iterations; ++i) {
