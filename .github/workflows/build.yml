@@ -163,14 +163,22 @@ jobs:
       - name: Verify CUDA configuration
         shell: pwsh
         run: |
-          $cache = Get-Content build-cuda/CMakeCache.txt -Raw
-          if ($cache -notmatch 'CMAKE_CUDA_COMPILER:FILEPATH=.*nvcc') {
-            throw 'CMake did not configure an NVIDIA CUDA compiler'
+          $compilerFiles = Get-ChildItem build-cuda/CMakeFiles -Recurse -Filter CMakeCUDACompiler.cmake -ErrorAction SilentlyContinue
+          if (-not $compilerFiles) {
+            throw 'CMake did not generate CMakeCUDACompiler.cmake'
+          }
+          $compilerText = ($compilerFiles | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          if ($compilerText -notmatch 'nvcc(\.exe)?') {
+            Write-Host $compilerText
+            throw 'Generated CUDA compiler configuration does not reference nvcc'
           }
           if (-not (Test-Path build-cuda/cuda-keccak-validation.vcxproj)) {
             throw 'CUDA validation target was not generated'
           }
-          Write-Host 'Confirmed: real CUDA compiler and CUDA validation target are enabled.'
+          if (-not (Test-Path build-cuda/yerbas-miner.vcxproj)) {
+            throw 'Yerbas CUDA miner project was not generated'
+          }
+          Write-Host 'Confirmed: CMake generated NVIDIA CUDA compiler state and CUDA targets.'
 
       - name: Build CUDA miner
         shell: pwsh
