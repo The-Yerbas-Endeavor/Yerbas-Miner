@@ -20,9 +20,8 @@ namespace {
 
 constexpr std::size_t kMaxCandidates = 64;
 constexpr std::size_t kStateBytes = 64;
-// Until all 18 selectable stages are native CUDA, keep fallback batches small.
-// This makes the bootstrap path useful for correctness/accepted-share testing
-// without spending seconds copying and reference-hashing a 65K state batch.
+// Until all 18 selectable stages are native CUDA, keep initialization batches
+// small. Mining scans remain disabled until full native CUDA coverage exists.
 constexpr std::size_t kBootstrapBatch = 256;
 
 struct DeviceJob {
@@ -261,7 +260,9 @@ void BatchEngine::upload_job(const JobDescriptor& job)
 std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 {
     if (!impl_->job_loaded) throw std::runtime_error("CUDA batch scan requested before upload_job");
-    if (!hash_pipeline_ready()) return {};
+    if (!hash_pipeline_ready()) {
+        throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
+    }
 
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream),
@@ -274,74 +275,26 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                   impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Bootstrap dispatcher: validated CUDA cores run on-device. Missing cores
-    // and CryptoNight variants run through the exact pinned Yerbas Core stage
-    // implementation on the host. As native kernels land, the fallback count
-    // shrinks without changing the final GhostRider result.
+    // GPU mining is strictly GPU-only. Missing GhostRider stages are never
+    // evaluated by host reference code. Until a stage has a native CUDA
+    // implementation, the CUDA mining pipeline remains unavailable.
     for (int stage_index = 0; stage_index < 18; ++stage_index) {
         const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
         const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
         const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
         const bool native_cuda = !is_cn && core::core512_implemented(algorithm);
 
-        if (native_cuda) {
-            core512_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_job,
-                                                                 impl_->d_nonces,
-                                                                 impl_->d_states,
-                                                                 impl_->batch_size,
-                                                                 stage_index,
-                                                                 algorithm);
-            check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
-            continue;
+        if (!native_cuda) {
+            throw std::runtime_error("GhostRider stage has no native CUDA implementation; CPU fallback is disabled");
         }
 
-        if (stage_index > 0) {
-            check_cuda(cudaMemcpyAsync(impl_->host_states.data(), impl_->d_states,
-                                       impl_->host_states.size(), cudaMemcpyDeviceToHost,
-                                       impl_->stream),
-                       "cudaMemcpyAsync fallback states failed");
-            check_cuda(cudaStreamSynchronize(impl_->stream),
-                       "cudaStreamSynchronize fallback read failed");
-        }
-
-        const std::size_t worker_count = std::min<std::size_t>(impl_->fallback_threads,
-                                                                impl_->batch_size);
-        const std::size_t chunk = (impl_->batch_size + worker_count - 1) / worker_count;
-        std::vector<std::thread> fallback_workers;
-        fallback_workers.reserve(worker_count);
-
-        for (std::size_t worker = 0; worker < worker_count; ++worker) {
-            const std::size_t begin = worker * chunk;
-            const std::size_t end = std::min(impl_->batch_size, begin + chunk);
-            if (begin >= end) break;
-
-            fallback_workers.emplace_back([&, begin, end, stage_index, stage, start_nonce]() {
-                for (std::size_t i = begin; i < end; ++i) {
-                    ghostrider::Hash512 digest{};
-                    if (stage_index == 0) {
-                        std::array<std::uint8_t, 80> header = impl_->host_job.header;
-                        const std::uint32_t nonce = start_nonce + static_cast<std::uint32_t>(i);
-                        header[76] = static_cast<std::uint8_t>(nonce);
-                        header[77] = static_cast<std::uint8_t>(nonce >> 8);
-                        header[78] = static_cast<std::uint8_t>(nonce >> 16);
-                        header[79] = static_cast<std::uint8_t>(nonce >> 24);
-                        digest = ghostrider::stage_reference({header.data(), header.size()}, stage);
-                    } else {
-                        std::uint8_t* state = impl_->host_states.data() + i * kStateBytes;
-                        digest = ghostrider::stage_reference({state, kStateBytes}, stage);
-                    }
-                    std::memcpy(impl_->host_states.data() + i * kStateBytes,
-                                digest.data(), kStateBytes);
-                }
-            });
-        }
-
-        for (auto& worker : fallback_workers) worker.join();
-
-        check_cuda(cudaMemcpyAsync(impl_->d_states, impl_->host_states.data(),
-                                   impl_->host_states.size(), cudaMemcpyHostToDevice,
-                                   impl_->stream),
-                   "cudaMemcpyAsync fallback states upload failed");
+        core512_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_job,
+                                                             impl_->d_nonces,
+                                                             impl_->d_states,
+                                                             impl_->batch_size,
+                                                             stage_index,
+                                                             algorithm);
+        check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
     }
 
     collect_candidates<<<blocks, threads, 0, impl_->stream>>>(impl_->d_nonces,
@@ -381,9 +334,7 @@ int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
 bool BatchEngine::hash_pipeline_ready() const noexcept
 {
-    // Native full-CUDA coverage is still the performance goal, but the hybrid
-    // stage fallback provides a complete, reference-correct mining pipeline.
-    return ghostrider::reference_ready();
+    return full_ghostrider_cuda_coverage();
 }
 
 Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length)
