@@ -1,6 +1,5 @@
 #include "ghostrider/ghostrider.h"
 
-#include <array>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -28,92 +27,18 @@ uint256 previous_block_hash(const Work& work)
     return prev_block_hash;
 }
 
-StageSchedule build_stage_schedule(const Work& work)
+void selections(const Work& work,
+                std::vector<int>& core_hash_indexes,
+                std::vector<int>& random_cns)
 {
     HashSelection hash_selection(
         previous_block_hash(work),
         {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
         {0, 1, 2, 3, 4, 5});
-
-    const std::vector<int> random_cns = hash_selection.getCnIndexes();
-    const std::vector<int> core_hash_indexes = hash_selection.getAlgoIndexes();
-
-    StageSchedule schedule{};
-    for (int i = 0; i < 18; ++i) {
-        if (i < 5) {
-            schedule[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(core_hash_indexes[i]);
-        } else if (i == 5) {
-            schedule[5] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[0]);
-        } else if (i < 11) {
-            schedule[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(core_hash_indexes[i - 1]);
-        } else if (i == 11) {
-            schedule[11] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[1]);
-        } else if (i < 17) {
-            schedule[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(core_hash_indexes[i - 2]);
-        } else {
-            schedule[17] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[2]);
-        }
-    }
-    return schedule;
+    random_cns = hash_selection.getCnIndexes();
+    core_hash_indexes = hash_selection.getAlgoIndexes();
 }
-
-const StageSchedule& cached_stage_schedule(const Work& work)
-{
-    if (work.data == nullptr || work.size < kMinimumHeaderPrefix) {
-        throw std::invalid_argument(
-            "GhostRider input must contain at least nVersion and hashPrevBlock");
-    }
-
-    struct ThreadScheduleCache {
-        std::array<std::uint8_t, kPrevHashSize> prev_hash{};
-        StageSchedule schedule{};
-        bool valid{false};
-    };
-
-    thread_local ThreadScheduleCache cache;
-    const auto* prev = work.data + kVersionSize;
-    if (!cache.valid || std::memcmp(cache.prev_hash.data(), prev, kPrevHashSize) != 0) {
-        std::memcpy(cache.prev_hash.data(), prev, kPrevHashSize);
-        cache.schedule = build_stage_schedule(work);
-        cache.valid = true;
-    }
-    return cache.schedule;
 }
-
-Hash256 hash_with_schedule(const Work& work, const StageSchedule& schedule)
-{
-    // Only the previous stage output is needed to compute the next stage.
-    // A rolling pair avoids touching an 18 x 64-byte intermediate array on
-    // every nonce and keeps the hot state much friendlier to L1 cache.
-    uint512 state_a{};
-    uint512 state_b{};
-    uint512* previous = &state_a;
-    uint512* current = &state_b;
-
-    for (int i = 0; i < 18; ++i) {
-        const std::uint8_t stage = schedule[static_cast<std::size_t>(i)];
-        const void* input = i == 0
-            ? static_cast<const void*>(work.data)
-            : static_cast<const void*>(previous);
-        const int input_length = i == 0 ? static_cast<int>(work.size) : 64;
-
-        if ((stage & kCryptoNightStageFlag) != 0) {
-            const int cn_selection = static_cast<int>(stage & 0x7fU);
-            cnHash(previous, current, input_length, cn_selection);
-        } else {
-            const int core_selection = static_cast<int>(stage);
-            coreHash(input, current, input_length, core_selection);
-        }
-
-        std::swap(previous, current);
-    }
-
-    const uint256 result = previous->trim256();
-    Hash256 out{};
-    std::memcpy(out.data(), result.begin(), out.size());
-    return out;
-}
-} // namespace
 
 Hash512 core_hash_reference(const Work& work, int algorithm)
 {
@@ -137,19 +62,78 @@ Hash512 core_hash_reference(const Work& work, int algorithm)
 
 StageSchedule stage_schedule(const Work& work)
 {
-    return build_stage_schedule(work);
+    std::vector<int> core_hash_indexes;
+    std::vector<int> random_cns;
+    selections(work, core_hash_indexes, random_cns);
+
+    StageSchedule schedule{};
+    for (int i = 0; i < 18; ++i) {
+        if (i < 5) {
+            schedule[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(core_hash_indexes[i]);
+        } else if (i == 5) {
+            schedule[5] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[0]);
+        } else if (i < 11) {
+            schedule[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(core_hash_indexes[i - 1]);
+        } else if (i == 11) {
+            schedule[11] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[1]);
+        } else if (i < 17) {
+            schedule[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(core_hash_indexes[i - 2]);
+        } else {
+            schedule[17] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[2]);
+        }
+    }
+    return schedule;
 }
 
 Hash256 hash_reference(const Work& work)
 {
-    if (work.data == nullptr || work.size == 0) {
-        throw std::invalid_argument("GhostRider work buffer must not be empty");
-    }
     if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("GhostRider work buffer is too large");
     }
 
-    return hash_with_schedule(work, cached_stage_schedule(work));
+    std::vector<int> core_hash_indexes;
+    std::vector<int> random_cns;
+    selections(work, core_hash_indexes, random_cns);
+
+    uint512 hash[18];
+    for (int i = 0; i < 18; ++i) {
+        const void* to_hash;
+        int len_to_hash;
+
+        if (i == 0) {
+            to_hash = static_cast<const void*>(work.data);
+            len_to_hash = static_cast<int>(work.size);
+        } else {
+            to_hash = static_cast<const void*>(&hash[i - 1]);
+            len_to_hash = 64;
+        }
+
+        int core_selection = -1;
+        int cn_selection = -1;
+
+        if (i < 5) {
+            core_selection = core_hash_indexes[i];
+        } else if (i == 5) {
+            cn_selection = random_cns[0];
+        } else if (i < 11) {
+            core_selection = core_hash_indexes[i - 1];
+        } else if (i == 11) {
+            cn_selection = random_cns[1];
+        } else if (i < 17) {
+            core_selection = core_hash_indexes[i - 2];
+        } else {
+            cn_selection = random_cns[2];
+        }
+
+        coreHash(to_hash, &hash[i], len_to_hash, core_selection);
+        uint512* cn_input = (i == 0) ? &hash[0] : &hash[i - 1];
+        cnHash(cn_input, &hash[i], len_to_hash, cn_selection);
+    }
+
+    const uint256 result = hash[17].trim256();
+    Hash256 out{};
+    std::memcpy(out.data(), result.begin(), out.size());
+    return out;
 }
 
 bool reference_ready() noexcept
