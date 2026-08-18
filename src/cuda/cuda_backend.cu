@@ -1,6 +1,9 @@
 #include "cuda/cuda_backend.h"
 #include "cuda/core/stage_dispatch.cuh"
 #include "cuda/core_coverage.h"
+#include "cuda/cryptonight/cn_config.cuh"
+#include "cuda/cryptonight/cn_final.cuh"
+#include "cuda/cryptonight/cn_slow_hash.cuh"
 #include "ghostrider/ghostrider.h"
 
 #include <cuda_runtime.h>
@@ -20,9 +23,7 @@ namespace {
 
 constexpr std::size_t kMaxCandidates = 64;
 constexpr std::size_t kStateBytes = 64;
-// Until all 18 selectable stages are native CUDA, keep initialization batches
-// small. Mining scans remain disabled until full native CUDA coverage exists.
-constexpr std::size_t kBootstrapBatch = 256;
+constexpr std::size_t kCnScratchpadStride = cryptonight::max_scratchpad_bytes();
 
 struct DeviceJob {
     std::uint8_t header[80];
@@ -95,6 +96,29 @@ __global__ void core512_stage(const DeviceJob* job,
     std::uint8_t* output = states + index * kStateBytes;
     #pragma unroll
     for (int i = 0; i < 64; ++i) output[i] = digest[i];
+}
+
+__global__ void cryptonight_stage(std::uint8_t* states,
+                                  std::size_t count,
+                                  std::uint8_t variant,
+                                  std::uint8_t* scratchpads)
+{
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    std::uint8_t* state = states + index * kStateBytes;
+    std::uint8_t* scratchpad = scratchpads + index * kCnScratchpadStride;
+    std::uint8_t digest[32];
+
+    if (!cryptonight::slow_hash(variant, state, kStateBytes, scratchpad, digest)) return;
+
+    // Yerbas Core writes the 256-bit CryptoNight result into a uint512 that
+    // is zero initialized. Preserve that exact 64-byte state representation
+    // for the conventional core that follows this CN stage.
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) state[i] = digest[i];
+    #pragma unroll
+    for (int i = 32; i < 64; ++i) state[i] = 0;
 }
 
 __global__ void keccak512_validation_kernel(const std::uint8_t* input,
@@ -190,6 +214,7 @@ struct BatchEngine::Impl {
     DeviceJob* d_job{nullptr};
     std::uint32_t* d_nonces{nullptr};
     std::uint8_t* d_states{nullptr};
+    std::uint8_t* d_cn_scratchpads{nullptr};
     DeviceCandidate* d_candidates{nullptr};
     unsigned int* d_candidate_count{nullptr};
     JobDescriptor host_job{};
@@ -198,9 +223,7 @@ struct BatchEngine::Impl {
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
         : device_id(id),
-          batch_size(full_ghostrider_cuda_coverage()
-                         ? requested_size
-                         : std::min(requested_size, kBootstrapBatch)),
+          batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
           fallback_threads(std::max(1u, requested_fallback_threads)),
           host_states(batch_size * kStateBytes)
     {
@@ -214,6 +237,9 @@ struct BatchEngine::Impl {
                    "cudaMalloc nonce batch failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_size * kStateBytes),
                    "cudaMalloc 512-bit state batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads),
+                              batch_size * kCnScratchpadStride),
+                   "cudaMalloc CryptoNight scratchpads failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)),
                    "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)),
@@ -225,6 +251,7 @@ struct BatchEngine::Impl {
         cudaSetDevice(device_id);
         if (d_candidate_count) cudaFree(d_candidate_count);
         if (d_candidates) cudaFree(d_candidates);
+        if (d_cn_scratchpads) cudaFree(d_cn_scratchpads);
         if (d_states) cudaFree(d_states);
         if (d_nonces) cudaFree(d_nonces);
         if (d_job) cudaFree(d_job);
@@ -275,26 +302,35 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                   impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // GPU mining is strictly GPU-only. Missing GhostRider stages are never
-    // evaluated by host reference code. Until a stage has a native CUDA
-    // implementation, the CUDA mining pipeline remains unavailable.
+    // Run all 18 GhostRider stages natively on the GPU. CryptoNight stages
+    // use one independent scratchpad slice per active nonce and produce the
+    // same zero-extended uint512 state used by Yerbas Core.
     for (int stage_index = 0; stage_index < 18; ++stage_index) {
         const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
         const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
         const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
-        const bool native_cuda = !is_cn && core::core512_implemented(algorithm);
 
-        if (!native_cuda) {
-            throw std::runtime_error("GhostRider stage has no native CUDA implementation; CPU fallback is disabled");
+        if (is_cn) {
+            if (algorithm >= cryptonight::kVariantConfigs.size()) {
+                throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+            }
+            cryptonight_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_states,
+                                                                      impl_->batch_size,
+                                                                      algorithm,
+                                                                      impl_->d_cn_scratchpads);
+            check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight stage launch failed");
+        } else {
+            if (!core::core512_implemented(algorithm)) {
+                throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
+            }
+            core512_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_job,
+                                                                 impl_->d_nonces,
+                                                                 impl_->d_states,
+                                                                 impl_->batch_size,
+                                                                 stage_index,
+                                                                 algorithm);
+            check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
         }
-
-        core512_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_job,
-                                                             impl_->d_nonces,
-                                                             impl_->d_states,
-                                                             impl_->batch_size,
-                                                             stage_index,
-                                                             algorithm);
-        check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
     }
 
     collect_candidates<<<blocks, threads, 0, impl_->stream>>>(impl_->d_nonces,
