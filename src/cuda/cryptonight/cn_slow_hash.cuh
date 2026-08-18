@@ -10,9 +10,9 @@
 namespace yerbas::cuda::cryptonight {
 
 // Implemented by cn_final.cuh from the pinned Yerbas Core c_* extra hashes.
-__device__ static __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
-                                                            const std::uint8_t state[200],
-                                                            std::uint8_t out[32]);
+__device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
+                                                    const std::uint8_t state[200],
+                                                    std::uint8_t out[32]);
 
 __device__ __forceinline__ std::uint64_t cn_load64(const std::uint8_t* p)
 {
