@@ -105,11 +105,12 @@ jobs:
 
       - name: Install CUDA Toolkit 12.8.1
         id: cuda-toolkit
+        timeout-minutes: 20
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.8.1'
-          method: network
-          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          method: local
+          sub-packages: '["nvcc", "cudart"]'
 
       - name: Verify CUDA compiler
         shell: pwsh
