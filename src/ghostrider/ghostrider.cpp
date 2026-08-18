@@ -82,36 +82,33 @@ const StageSchedule& cached_stage_schedule(const Work& work)
 
 Hash256 hash_with_schedule(const Work& work, const StageSchedule& schedule)
 {
-    uint512 hash[18];
+    // Only the previous stage output is needed to compute the next stage.
+    // A rolling pair avoids touching an 18 x 64-byte intermediate array on
+    // every nonce and keeps the hot state much friendlier to L1 cache.
+    uint512 state_a{};
+    uint512 state_b{};
+    uint512* previous = &state_a;
+    uint512* current = &state_b;
+
     for (int i = 0; i < 18; ++i) {
-        const void* to_hash;
-        int len_to_hash;
-
-        if (i == 0) {
-            to_hash = static_cast<const void*>(work.data);
-            len_to_hash = static_cast<int>(work.size);
-        } else {
-            to_hash = static_cast<const void*>(&hash[i - 1]);
-            len_to_hash = 64;
-        }
-
         const std::uint8_t stage = schedule[static_cast<std::size_t>(i)];
+        const void* input = i == 0
+            ? static_cast<const void*>(work.data)
+            : static_cast<const void*>(previous);
+        const int input_length = i == 0 ? static_cast<int>(work.size) : 64;
+
         if ((stage & kCryptoNightStageFlag) != 0) {
-            // CryptoNight stages consume the previous 512-bit result and write
-            // the next 512-bit state. Do not call coreHash() with a sentinel
-            // selector first; that no-op call is pure mining-loop overhead.
             const int cn_selection = static_cast<int>(stage & 0x7fU);
-            uint512* cn_input = (i == 0) ? &hash[0] : &hash[i - 1];
-            cnHash(cn_input, &hash[i], len_to_hash, cn_selection);
+            cnHash(previous, current, input_length, cn_selection);
         } else {
-            // Conventional GhostRider stages only need coreHash(). Avoid the
-            // matching cnHash(..., -1) no-op that the reference scaffold used.
             const int core_selection = static_cast<int>(stage);
-            coreHash(to_hash, &hash[i], len_to_hash, core_selection);
+            coreHash(input, current, input_length, core_selection);
         }
+
+        std::swap(previous, current);
     }
 
-    const uint256 result = hash[17].trim256();
+    const uint256 result = previous->trim256();
     Hash256 out{};
     std::memcpy(out.data(), result.begin(), out.size());
     return out;
