@@ -60,6 +60,40 @@ Hash512 core_hash_reference(const Work& work, int algorithm)
     return out;
 }
 
+Hash512 stage_reference(const Work& work, std::uint8_t stage)
+{
+    if (work.data == nullptr || work.size == 0) {
+        throw std::invalid_argument("GhostRider stage input must not be empty");
+    }
+    if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("GhostRider stage work buffer is too large");
+    }
+
+    uint512 result;
+    if ((stage & kCryptoNightStageFlag) != 0) {
+        const int variant = static_cast<int>(stage & 0x7fU);
+        if (variant < 0 || variant > 5) {
+            throw std::invalid_argument("CryptoNight stage index must be 0..5");
+        }
+        if (work.size != 64) {
+            throw std::invalid_argument("CryptoNight GhostRider stage input must be 64 bytes");
+        }
+        uint512 input;
+        std::memcpy(input.begin(), work.data, 64);
+        cnHash(&input, &result, 64, variant);
+    } else {
+        const int algorithm = static_cast<int>(stage);
+        if (algorithm < 0 || algorithm > 14) {
+            throw std::invalid_argument("Core GhostRider stage index must be 0..14");
+        }
+        coreHash(work.data, &result, static_cast<int>(work.size), algorithm);
+    }
+
+    Hash512 out{};
+    std::memcpy(out.data(), result.begin(), out.size());
+    return out;
+}
+
 StageSchedule stage_schedule(const Work& work)
 {
     std::vector<int> core_hash_indexes;
