@@ -19,12 +19,12 @@ struct CryptoNightCoverage {
 
 inline constexpr std::array<CoreCoverage, 15> kCoreCoverage{{
     {0,  "BLAKE-512",    true},
-    {1,  "BMW-512",      false},
-    {2,  "Groestl-512",  false},
-    {3,  "JH-512",       false},
+    {1,  "BMW-512",      true},
+    {2,  "Groestl-512",  true},
+    {3,  "JH-512",       true},
     {4,  "Keccak-512",   true},
     {5,  "Skein-512",    true},
-    {6,  "Luffa-512",    false},
+    {6,  "Luffa-512",    true},
     {7,  "CubeHash-512", true},
     {8,  "Shavite-512",  false},
     {9,  "SIMD-512",     false},
@@ -35,10 +35,6 @@ inline constexpr std::array<CoreCoverage, 15> kCoreCoverage{{
     {14, "Whirlpool",    false},
 }};
 
-// Yerbas Core's GhostRider selector can choose one of six CryptoNight
-// variants for each of the three memory-hard positions in the 18-stage chain.
-// Keep these false until a device implementation is validated byte-for-byte
-// against the pinned Yerbas Core reference.
 inline constexpr std::array<CryptoNightCoverage, 6> kCryptoNightCoverage{{
     {0, "CN-Dark",       false},
     {1, "CN-DarkLite",   false},
@@ -51,18 +47,14 @@ inline constexpr std::array<CryptoNightCoverage, 6> kCryptoNightCoverage{{
 inline constexpr unsigned int implemented_core_count()
 {
     unsigned int count = 0;
-    for (const auto& core : kCoreCoverage) {
-        if (core.implemented) ++count;
-    }
+    for (const auto& core : kCoreCoverage) if (core.implemented) ++count;
     return count;
 }
 
 inline constexpr unsigned int implemented_cryptonight_count()
 {
     unsigned int count = 0;
-    for (const auto& variant : kCryptoNightCoverage) {
-        if (variant.implemented) ++count;
-    }
+    for (const auto& variant : kCryptoNightCoverage) if (variant.implemented) ++count;
     return count;
 }
 

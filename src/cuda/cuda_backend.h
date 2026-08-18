@@ -58,24 +58,16 @@ int device_count();
 std::vector<DeviceInfo> enumerate_devices();
 void print_devices();
 
-// Standalone validation hooks for clean-room CUDA core stages. These remain
-// separate from BatchEngine until all job-selectable GhostRider stages are
-// implemented and validated against Yerbas Core.
-Hash512 blake512_reference_stage(int device_id,
-                                 const std::uint8_t* input,
-                                 std::size_t length);
-Hash512 keccak512_reference_stage(int device_id,
-                                  const std::uint8_t* input,
-                                  std::size_t length);
-Hash512 skein512_reference_stage(int device_id,
-                                 const std::uint8_t* input,
-                                 std::size_t length);
-Hash512 cubehash512_reference_stage(int device_id,
-                                    const std::uint8_t* input,
-                                    std::size_t length);
+Hash512 blake512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 bmw512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 groestl512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 jh512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 skein512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 luffa512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 cubehash512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
 
 } // namespace yerbas::cuda
 
-// Compatibility wrappers retained for the existing miner startup path.
 int yerbas_cuda_device_count();
 void yerbas_cuda_print_devices();

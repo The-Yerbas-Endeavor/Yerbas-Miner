@@ -1,8 +1,12 @@
 #pragma once
 
 #include "cuda/core/blake512.cuh"
+#include "cuda/core/bmw512.cuh"
 #include "cuda/core/cubehash512.cuh"
+#include "cuda/core/groestl512.cuh"
+#include "cuda/core/jh512.cuh"
 #include "cuda/core/keccak512.cuh"
+#include "cuda/core/luffa512.cuh"
 #include "cuda/core/skein512.cuh"
 
 #include <cstddef>
@@ -11,35 +15,28 @@
 namespace yerbas::cuda::core {
 
 // GhostRider core indexes match Yerbas Core HashSelection/coreHash ordering.
-// This dispatcher intentionally returns false for algorithms that have not yet
-// been implemented and validated on CUDA.  Callers must never treat false as a
-// valid digest.
+// Every true case here is GPU-only; CPU hash fallback is intentionally absent.
 __device__ __forceinline__ bool dispatch_core512(std::uint8_t algorithm,
                                                  const std::uint8_t* input,
                                                  std::size_t length,
                                                  std::uint8_t out[64])
 {
     switch (algorithm) {
-    case 0: // BLAKE-512
-        blake512(input, length, out);
-        return true;
-    case 4: // Keccak-512
-        keccak512(input, length, out);
-        return true;
-    case 5: // Skein-512
-        skein512(input, length, out);
-        return true;
-    case 7: // CubeHash-512
-        cubehash512(input, length, out);
-        return true;
-    default:
-        return false;
+    case 0: blake512(input, length, out); return true;
+    case 1: bmw512(input, length, out); return true;
+    case 2: groestl512(input, length, out); return true;
+    case 3: jh512(input, length, out); return true;
+    case 4: keccak512(input, length, out); return true;
+    case 5: skein512(input, length, out); return true;
+    case 6: luffa512(input, length, out); return true;
+    case 7: cubehash512(input, length, out); return true;
+    default: return false;
     }
 }
 
 __host__ __device__ constexpr bool core512_implemented(std::uint8_t algorithm)
 {
-    return algorithm == 0 || algorithm == 4 || algorithm == 5 || algorithm == 7;
+    return algorithm <= 7;
 }
 
 __host__ __device__ constexpr const char* core512_name(std::uint8_t algorithm)

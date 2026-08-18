@@ -7,9 +7,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Whole-program optimization is useful for the CPU GhostRider reference
-# library, but enabling it globally also changes nvcc code generation. Keep
-# IPO scoped to the CPU library so CUDA builds stay independent and portable.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT YERBAS_IPO_SUPPORTED OUTPUT YERBAS_IPO_ERROR)
 
@@ -146,8 +143,6 @@ add_executable(yerbas-miner
 target_include_directories(yerbas-miner PRIVATE src)
 target_link_libraries(yerbas-miner PRIVATE yerbas-ghostrider-reference nlohmann_json::nlohmann_json)
 
-# These are host C/C++ flags. The COMPILE_LANGUAGE guard is critical: passing
-# raw MSVC switches such as /Oi or /Ot to nvcc makes CUDA compilation fail.
 if(MSVC)
     target_compile_options(yerbas-miner PRIVATE
         $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/O2>
@@ -182,10 +177,37 @@ if(YERBAS_ENABLE_CUDA)
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
+    # Generate private CUDA-device copies directly from the exact sphlib files
+    # in the pinned Yerbas Core revision. This keeps CPU and GPU correctness
+    # tied to the same source instead of maintaining four independent ports.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(YERBAS_CUDA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cuda")
+    file(MAKE_DIRECTORY "${YERBAS_CUDA_GENERATED_DIR}")
+    foreach(YERBAS_CUDA_SPH IN ITEMS bmw groestl jh luffa)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_cuda_sph.py"
+                --stem "${YERBAS_CUDA_SPH}"
+                --source "${YERBAS_CORE_SRC}/crypto/${YERBAS_CUDA_SPH}.c"
+                --header "${YERBAS_CORE_SRC}/crypto/sph_${YERBAS_CUDA_SPH}.h"
+                --out-source "${YERBAS_CUDA_GENERATED_DIR}/${YERBAS_CUDA_SPH}_device_impl.cuh"
+                --out-header "${YERBAS_CUDA_GENERATED_DIR}/${YERBAS_CUDA_SPH}_device_types.cuh"
+            RESULT_VARIABLE YERBAS_CUDA_SPH_RESULT
+        )
+        if(NOT YERBAS_CUDA_SPH_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed to generate CUDA ${YERBAS_CUDA_SPH} device source")
+        endif()
+    endforeach()
+
     target_sources(yerbas-miner PRIVATE
         src/cuda/cuda_backend.cu
         src/cuda/blake_validation.cu
         src/cuda/skein_validation.cu
+        src/cuda/sph_batch_validation.cu
+    )
+    target_include_directories(yerbas-miner PRIVATE
+        "${YERBAS_CUDA_GENERATED_DIR}"
+        "${YERBAS_CORE_SRC}/crypto"
     )
     target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
     set_target_properties(yerbas-miner PROPERTIES
@@ -218,8 +240,14 @@ if(BUILD_TESTING)
             src/cuda/cuda_backend.cu
             src/cuda/blake_validation.cu
             src/cuda/skein_validation.cu
+            src/cuda/sph_batch_validation.cu
         )
-        target_include_directories(cuda-keccak-validation PRIVATE src tests)
+        target_include_directories(cuda-keccak-validation PRIVATE
+            src
+            tests
+            "${YERBAS_CUDA_GENERATED_DIR}"
+            "${YERBAS_CORE_SRC}/crypto"
+        )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
         set_target_properties(cuda-keccak-validation PROPERTIES
             CUDA_STANDARD 17
