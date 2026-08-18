@@ -214,7 +214,8 @@ if(YERBAS_ENABLE_CUDA)
         --inline-include "sph_hamsi_helper.c=${YERBAS_CORE_SRC}/crypto/sph_hamsi_helper.c")
     yerbas_generate_cuda_sph(fugue sph_fugue.c sph_fugue.h)
     yerbas_generate_cuda_sph(shabal sph_shabal.c sph_shabal.h)
-    yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h)
+    yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h
+        --inline-include-all "md_helper.c=${YERBAS_CORE_SRC}/crypto/md_helper.c")
 
     target_sources(yerbas-miner PRIVATE
         src/cuda/cuda_backend.cu
