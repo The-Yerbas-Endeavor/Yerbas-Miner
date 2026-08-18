@@ -112,16 +112,38 @@ jobs:
           method: local
           sub-packages: '["nvcc", "cudart"]'
 
-      - name: Verify CUDA compiler
+      - name: Resolve and verify CUDA compiler
         shell: pwsh
         run: |
-          Write-Host "CUDA_PATH=$env:CUDA_PATH"
-          nvcc --version
+          $candidates = @()
+          if ($env:CUDA_PATH) {
+            $candidates += (Join-Path $env:CUDA_PATH 'bin\nvcc.exe')
+          }
+          $candidates += 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe'
+          $candidates += 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8.1\bin\nvcc.exe'
+
+          $nvcc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $nvcc) {
+            Write-Host 'CUDA_PATH from installer:' $env:CUDA_PATH
+            Write-Host 'CUDA directories found:'
+            Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+            throw 'CUDA installer completed but nvcc.exe was not found'
+          }
+
+          $cudaRoot = Split-Path (Split-Path $nvcc -Parent) -Parent
+          Write-Host "Resolved CUDA_PATH=$cudaRoot"
+          Write-Host "Resolved nvcc=$nvcc"
+          "CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CUDAToolkit_ROOT=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $cudaRoot 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nvcc --version
 
       - name: Configure CUDA build
         shell: pwsh
         run: |
-          cmake -S . -B build-cuda -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=ON -DBUILD_TESTING=ON
+          $nvcc = Join-Path $env:CUDA_PATH 'bin\nvcc.exe'
+          if (-not (Test-Path $nvcc)) { throw "nvcc missing before CMake: $nvcc" }
+          cmake -S . -B build-cuda -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=ON -DBUILD_TESTING=ON -DCMAKE_CUDA_COMPILER="$nvcc" -DCUDAToolkit_ROOT="$env:CUDA_PATH"
 
       - name: Verify CUDA configuration
         shell: pwsh
