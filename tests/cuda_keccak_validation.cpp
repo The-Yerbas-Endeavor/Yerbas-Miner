@@ -24,6 +24,13 @@ constexpr ValidationCase kCases[] = {
     {5, "Skein-512",    yerbas::cuda::skein512_reference_stage},
     {6, "Luffa-512",    yerbas::cuda::luffa512_reference_stage},
     {7, "CubeHash-512", yerbas::cuda::cubehash512_reference_stage},
+    {8, "Shavite-512",  yerbas::cuda::shavite512_reference_stage},
+    {9, "SIMD-512",     yerbas::cuda::simd512_reference_stage},
+    {10, "Echo-512",    yerbas::cuda::echo512_reference_stage},
+    {11, "Hamsi-512",   yerbas::cuda::hamsi512_reference_stage},
+    {12, "Fugue-512",   yerbas::cuda::fugue512_reference_stage},
+    {13, "Shabal-512",  yerbas::cuda::shabal512_reference_stage},
+    {14, "Whirlpool",   yerbas::cuda::whirlpool512_reference_stage},
 };
 }
 
@@ -59,6 +66,6 @@ int main()
         }
     }
 
-    std::cout << "CUDA cores 0-7 match pinned Yerbas Core for 80-byte and 64-byte inputs\n";
+    std::cout << "CUDA cores 0-14 match pinned Yerbas Core for 80-byte and 64-byte inputs\n";
     return 0;
 }

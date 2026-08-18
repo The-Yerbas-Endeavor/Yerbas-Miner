@@ -2,8 +2,8 @@
 """Generate CUDA-device copies of selected sphlib hash implementations.
 
 The source of truth remains the Yerbas Core revision pinned by CMake. This
-performs a small mechanical transformation so the exact pinned sphlib code can
-execute on CUDA without introducing a second algorithm implementation.
+performs mechanical source adaptation so the exact pinned sphlib code can run
+as CUDA device code without maintaining a second cryptographic implementation.
 """
 
 from __future__ import annotations
@@ -19,52 +19,27 @@ def public_function_pattern(stem: str) -> re.Pattern[str]:
 
 
 def strip_c_linkage_wrappers(text: str) -> str:
-    """Remove sphlib's host C-linkage wrappers for private CUDA code.
-
-    Generated functions live in C++ namespaces and use private __device__
-    linkage. Leaving the original extern \"C\" wrapper around either the
-    declarations or definitions makes MSVC/NVCC diagnose contradictory
-    linkage specifications.
-    """
     text = re.sub(
         r'(?ms)^\s*#\s*ifdef\s+__cplusplus\s*\n\s*extern\s+"C"\s*\{\s*\n\s*#\s*endif\s*',
-        '',
-        text,
+        '', text,
     )
     text = re.sub(
         r'(?ms)^\s*#\s*ifdef\s+__cplusplus\s*\n\s*\}\s*\n\s*#\s*endif\s*',
-        '',
-        text,
+        '', text,
     )
     return text
 
 
 def strip_public_prototypes(header: str, stem: str) -> str:
-    """Remove host sphlib public prototypes from the generated type header."""
     return public_function_pattern(stem).sub("", strip_c_linkage_wrappers(header))
 
 
 def context_type_for(function_name: str, stem: str) -> str | None:
-    """Return the concrete sphlib context type for a public entry point."""
-    if stem == "bmw":
-        if "224" in function_name or "256" in function_name:
-            return "sph_bmw_small_context"
-        if "384" in function_name or "512" in function_name:
-            return "sph_bmw_big_context"
-    elif stem == "groestl":
-        if "224" in function_name or "256" in function_name:
-            return "sph_groestl_small_context"
-        if "384" in function_name or "512" in function_name:
-            return "sph_groestl_big_context"
-    elif stem == "jh":
-        return "sph_jh_context"
-    elif stem == "luffa":
-        if "224" in function_name or "256" in function_name:
-            return "sph_luffa224_context"
-        if "384" in function_name:
-            return "sph_luffa384_context"
-        if "512" in function_name:
-            return "sph_luffa512_context"
+    if stem == "whirlpool":
+        return "sph_whirlpool_context"
+    bits = re.search(r"(224|256|384|512)", function_name)
+    if bits:
+        return f"sph_{stem}{bits.group(1)}_context"
     return None
 
 
@@ -81,7 +56,6 @@ def type_cc_parameter(signature: str, function_name: str, stem: str) -> str:
 
 
 def device_public_prototypes(header: str, stem: str) -> str:
-    """Build forward declarations for generated public device functions."""
     declarations: list[str] = []
     for match in public_function_pattern(stem).finditer(header):
         name = match.group(1)
@@ -93,7 +67,6 @@ def device_public_prototypes(header: str, stem: str) -> str:
 
 
 def type_public_definitions(source: str, stem: str) -> str:
-    """Give generated public function definitions concrete context pointers."""
     pattern = re.compile(
         rf"(?ms)(__device__\s+static\s+void\s+)"
         rf"(sph_{re.escape(stem)}[A-Za-z0-9_]*)"
@@ -108,60 +81,51 @@ def type_public_definitions(source: str, stem: str) -> str:
 
 
 def device_endian_helpers() -> str:
-    """Provide CUDA-safe sphlib endian helpers used by generated algorithms."""
     return r'''/* generated CUDA endian helpers */
 __device__ __forceinline__ sph_u32 yerbas_cuda_dec32le(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
     return (sph_u32)p[0] | ((sph_u32)p[1] << 8) | ((sph_u32)p[2] << 16) | ((sph_u32)p[3] << 24);
 }
-
 __device__ __forceinline__ sph_u32 yerbas_cuda_dec32be(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
     return ((sph_u32)p[0] << 24) | ((sph_u32)p[1] << 16) | ((sph_u32)p[2] << 8) | (sph_u32)p[3];
 }
-
 __device__ __forceinline__ sph_u64 yerbas_cuda_dec64le(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
     return (sph_u64)p[0] | ((sph_u64)p[1] << 8) | ((sph_u64)p[2] << 16) | ((sph_u64)p[3] << 24)
         | ((sph_u64)p[4] << 32) | ((sph_u64)p[5] << 40) | ((sph_u64)p[6] << 48) | ((sph_u64)p[7] << 56);
 }
-
 __device__ __forceinline__ sph_u64 yerbas_cuda_dec64be(const void *src)
 {
     const unsigned char *p = static_cast<const unsigned char *>(src);
     return ((sph_u64)p[0] << 56) | ((sph_u64)p[1] << 48) | ((sph_u64)p[2] << 40) | ((sph_u64)p[3] << 32)
         | ((sph_u64)p[4] << 24) | ((sph_u64)p[5] << 16) | ((sph_u64)p[6] << 8) | (sph_u64)p[7];
 }
-
 __device__ __forceinline__ void yerbas_cuda_enc32le(void *dst, sph_u32 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)val; p[1] = (unsigned char)(val >> 8); p[2] = (unsigned char)(val >> 16); p[3] = (unsigned char)(val >> 24);
+    p[0]=(unsigned char)val; p[1]=(unsigned char)(val>>8); p[2]=(unsigned char)(val>>16); p[3]=(unsigned char)(val>>24);
 }
-
 __device__ __forceinline__ void yerbas_cuda_enc32be(void *dst, sph_u32 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)(val >> 24); p[1] = (unsigned char)(val >> 16); p[2] = (unsigned char)(val >> 8); p[3] = (unsigned char)val;
+    p[0]=(unsigned char)(val>>24); p[1]=(unsigned char)(val>>16); p[2]=(unsigned char)(val>>8); p[3]=(unsigned char)val;
 }
-
 __device__ __forceinline__ void yerbas_cuda_enc64le(void *dst, sph_u64 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)val; p[1] = (unsigned char)(val >> 8); p[2] = (unsigned char)(val >> 16); p[3] = (unsigned char)(val >> 24);
-    p[4] = (unsigned char)(val >> 32); p[5] = (unsigned char)(val >> 40); p[6] = (unsigned char)(val >> 48); p[7] = (unsigned char)(val >> 56);
+    p[0]=(unsigned char)val; p[1]=(unsigned char)(val>>8); p[2]=(unsigned char)(val>>16); p[3]=(unsigned char)(val>>24);
+    p[4]=(unsigned char)(val>>32); p[5]=(unsigned char)(val>>40); p[6]=(unsigned char)(val>>48); p[7]=(unsigned char)(val>>56);
 }
-
 __device__ __forceinline__ void yerbas_cuda_enc64be(void *dst, sph_u64 val)
 {
     unsigned char *p = static_cast<unsigned char *>(dst);
-    p[0] = (unsigned char)(val >> 56); p[1] = (unsigned char)(val >> 48); p[2] = (unsigned char)(val >> 40); p[3] = (unsigned char)(val >> 32);
-    p[4] = (unsigned char)(val >> 24); p[5] = (unsigned char)(val >> 16); p[6] = (unsigned char)(val >> 8); p[7] = (unsigned char)val;
+    p[0]=(unsigned char)(val>>56); p[1]=(unsigned char)(val>>48); p[2]=(unsigned char)(val>>40); p[3]=(unsigned char)(val>>32);
+    p[4]=(unsigned char)(val>>24); p[5]=(unsigned char)(val>>16); p[6]=(unsigned char)(val>>8); p[7]=(unsigned char)val;
 }
-
 #define sph_dec32le yerbas_cuda_dec32le
 #define sph_dec32le_aligned yerbas_cuda_dec32le
 #define sph_dec32be yerbas_cuda_dec32be
@@ -182,25 +146,39 @@ __device__ __forceinline__ void yerbas_cuda_enc64be(void *dst, sph_u64 val)
 '''
 
 
-def transform_source(source: str, stem: str) -> str:
-    # The private CUDA implementation must not retain sphlib's host C linkage.
+def inline_helpers(source: str, specs: list[str]) -> str:
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(f"invalid --inline-include value: {spec}")
+        include_name, helper_path = spec.split("=", 1)
+        helper = pathlib.Path(helper_path).read_text(encoding="utf-8")
+        helper = strip_c_linkage_wrappers(helper)
+        helper = re.sub(r'(?m)^\s*#\s*include\s+[<\"].*[>\"]\s*$', '', helper)
+        marker = re.compile(
+            rf'(?m)^\s*#\s*include\s+"{re.escape(include_name)}"\s*$'
+        )
+        if not marker.search(source):
+            raise ValueError(f"include {include_name!r} not found in source")
+        source = marker.sub(
+            f"/* begin generated inline {include_name} */\n{helper}\n/* end generated inline {include_name} */",
+            source,
+        )
+    return source
+
+
+def transform_source(source: str, stem: str, inline_specs: list[str]) -> str:
+    source = inline_helpers(source, inline_specs)
     source = strip_c_linkage_wrappers(source)
-
-    # Runtime/type headers are included globally by the generated type header.
     source = re.sub(r'(?m)^\s*#\s*include\s+[<\"].*[>\"]\s*$', '', source)
-
     source = re.sub(r'(?m)^static\s+', '__device__ static ', source)
     source = re.sub(
         rf'(?m)^void([ \t\r\n]+)(sph_{re.escape(stem)}[A-Za-z0-9_]*)',
-        r'__device__ static void\1\2',
-        source,
+        r'__device__ static void\1\2', source,
     )
     source = type_public_definitions(source, stem)
-
     source = re.sub(
         r'(?m)^(\s*)out\s*=\s*dst\s*;',
-        r'\1out = static_cast<unsigned char *>(dst);',
-        source,
+        r'\1out = static_cast<unsigned char *>(dst);', source,
     )
 
     names: list[str] = []
@@ -229,6 +207,7 @@ def main() -> int:
     p.add_argument('--header', required=True)
     p.add_argument('--out-source', required=True)
     p.add_argument('--out-header', required=True)
+    p.add_argument('--inline-include', action='append', default=[])
     a = p.parse_args()
 
     source = pathlib.Path(a.source).read_text(encoding='utf-8')
@@ -236,18 +215,14 @@ def main() -> int:
 
     generated_header = (
         "/* Generated from pinned Yerbas Core sphlib source. Do not edit. */\n"
-        "#include <cuda_runtime.h>\n"
-        "#include <stddef.h>\n"
-        "#include <stdint.h>\n"
-        "#include <string.h>\n"
-        "#include <limits.h>\n"
+        "#include <cuda_runtime.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n#include <limits.h>\n"
         + strip_public_prototypes(header, a.stem)
     )
     generated_source = (
         "/* Generated from pinned Yerbas Core sphlib source. Do not edit. */\n"
         + device_endian_helpers()
         + device_public_prototypes(header, a.stem)
-        + transform_source(source, a.stem)
+        + transform_source(source, a.stem, a.inline_include)
     )
 
     out_source = pathlib.Path(a.out_source)

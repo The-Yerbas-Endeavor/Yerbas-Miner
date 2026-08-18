@@ -3,11 +3,18 @@
 #include "cuda/core/blake512.cuh"
 #include "cuda/core/bmw512.cuh"
 #include "cuda/core/cubehash512.cuh"
+#include "cuda/core/echo512.cuh"
+#include "cuda/core/fugue512.cuh"
 #include "cuda/core/groestl512.cuh"
+#include "cuda/core/hamsi512.cuh"
 #include "cuda/core/jh512.cuh"
 #include "cuda/core/keccak512.cuh"
 #include "cuda/core/luffa512.cuh"
+#include "cuda/core/shabal512.cuh"
+#include "cuda/core/shavite512.cuh"
+#include "cuda/core/simd512.cuh"
 #include "cuda/core/skein512.cuh"
+#include "cuda/core/whirlpool512.cuh"
 
 #include <cstddef>
 #include <cstdint>
@@ -30,13 +37,20 @@ __device__ __forceinline__ bool dispatch_core512(std::uint8_t algorithm,
     case 5: skein512(input, length, out); return true;
     case 6: luffa512(input, length, out); return true;
     case 7: cubehash512(input, length, out); return true;
+    case 8: shavite512(input, length, out); return true;
+    case 9: simd512(input, length, out); return true;
+    case 10: echo512(input, length, out); return true;
+    case 11: hamsi512(input, length, out); return true;
+    case 12: fugue512(input, length, out); return true;
+    case 13: shabal512(input, length, out); return true;
+    case 14: whirlpool512(input, length, out); return true;
     default: return false;
     }
 }
 
 __host__ __device__ constexpr bool core512_implemented(std::uint8_t algorithm)
 {
-    return algorithm <= 7;
+    return algorithm <= 14;
 }
 
 __host__ __device__ constexpr const char* core512_name(std::uint8_t algorithm)

@@ -66,6 +66,13 @@ Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std:
 Hash512 skein512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
 Hash512 luffa512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
 Hash512 cubehash512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 shavite512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 simd512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 echo512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 hamsi512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 fugue512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 shabal512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 whirlpool512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
 
 } // namespace yerbas::cuda
 

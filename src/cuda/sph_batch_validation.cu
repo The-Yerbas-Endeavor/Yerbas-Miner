@@ -47,4 +47,11 @@ Hash512 bmw512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { re
 Hash512 groestl512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,2,p,n); }
 Hash512 jh512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,3,p,n); }
 Hash512 luffa512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,6,p,n); }
+Hash512 shavite512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,8,p,n); }
+Hash512 simd512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,9,p,n); }
+Hash512 echo512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,10,p,n); }
+Hash512 hamsi512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,11,p,n); }
+Hash512 fugue512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,12,p,n); }
+Hash512 shabal512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,13,p,n); }
+Hash512 whirlpool512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,14,p,n); }
 }

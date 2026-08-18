@@ -178,26 +178,43 @@ if(YERBAS_ENABLE_CUDA)
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
     # Generate private CUDA-device copies directly from the exact sphlib files
-    # in the pinned Yerbas Core revision. This keeps CPU and GPU correctness
-    # tied to the same source instead of maintaining four independent ports.
+    # in the pinned Yerbas Core revision. Helper .c files used as textual
+    # includes are inlined by the generator before host-only includes are removed.
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(YERBAS_CUDA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cuda")
     file(MAKE_DIRECTORY "${YERBAS_CUDA_GENERATED_DIR}")
-    foreach(YERBAS_CUDA_SPH IN ITEMS bmw groestl jh luffa)
+
+    function(yerbas_generate_cuda_sph STEM SOURCE_FILE HEADER_FILE)
         execute_process(
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_cuda_sph.py"
-                --stem "${YERBAS_CUDA_SPH}"
-                --source "${YERBAS_CORE_SRC}/crypto/${YERBAS_CUDA_SPH}.c"
-                --header "${YERBAS_CORE_SRC}/crypto/sph_${YERBAS_CUDA_SPH}.h"
-                --out-source "${YERBAS_CUDA_GENERATED_DIR}/${YERBAS_CUDA_SPH}_device_impl.cuh"
-                --out-header "${YERBAS_CUDA_GENERATED_DIR}/${YERBAS_CUDA_SPH}_device_types.cuh"
+                --stem "${STEM}"
+                --source "${YERBAS_CORE_SRC}/crypto/${SOURCE_FILE}"
+                --header "${YERBAS_CORE_SRC}/crypto/${HEADER_FILE}"
+                --out-source "${YERBAS_CUDA_GENERATED_DIR}/${STEM}_device_impl.cuh"
+                --out-header "${YERBAS_CUDA_GENERATED_DIR}/${STEM}_device_types.cuh"
+                ${ARGN}
             RESULT_VARIABLE YERBAS_CUDA_SPH_RESULT
         )
         if(NOT YERBAS_CUDA_SPH_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to generate CUDA ${YERBAS_CUDA_SPH} device source")
+            message(FATAL_ERROR "Failed to generate CUDA ${STEM} device source")
         endif()
-    endforeach()
+    endfunction()
+
+    yerbas_generate_cuda_sph(bmw bmw.c sph_bmw.h)
+    yerbas_generate_cuda_sph(groestl groestl.c sph_groestl.h)
+    yerbas_generate_cuda_sph(jh jh.c sph_jh.h)
+    yerbas_generate_cuda_sph(luffa luffa.c sph_luffa.h)
+    yerbas_generate_cuda_sph(shavite shavite.c sph_shavite.h
+        --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
+    yerbas_generate_cuda_sph(simd simd.c sph_simd.h)
+    yerbas_generate_cuda_sph(echo echo.c sph_echo.h
+        --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
+    yerbas_generate_cuda_sph(hamsi sph_hamsi.c sph_hamsi.h
+        --inline-include "sph_hamsi_helper.c=${YERBAS_CORE_SRC}/crypto/sph_hamsi_helper.c")
+    yerbas_generate_cuda_sph(fugue sph_fugue.c sph_fugue.h)
+    yerbas_generate_cuda_sph(shabal sph_shabal.c sph_shabal.h)
+    yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h)
 
     target_sources(yerbas-miner PRIVATE
         src/cuda/cuda_backend.cu
