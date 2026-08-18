@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -52,8 +53,28 @@ constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
 constexpr const char* kCpuColor = "\x1b[95m";
+constexpr const char* kAcceptColor = "\x1b[92m";
+constexpr const char* kRejectColor = "\x1b[91m";
 constexpr const char* kColorReset = "\x1b[0m";
+constexpr std::array<const char*, 6> kGpuColors{{
+    "\x1b[96m", // bright cyan
+    "\x1b[92m", // bright green
+    "\x1b[94m", // bright blue
+    "\x1b[93m", // bright yellow
+    "\x1b[36m", // cyan
+    "\x1b[32m", // green
+}};
+
 std::unordered_map<int, std::string> g_pending_share_sources;
+std::mutex g_pending_share_sources_mutex;
+
+const char* gpu_color(int device_id)
+{
+    const std::size_t index = device_id >= 0
+        ? static_cast<std::size_t>(device_id) % kGpuColors.size()
+        : 0U;
+    return kGpuColors[index];
+}
 
 struct CpuCandidate {
     std::uint32_t nonce{0};
@@ -493,21 +514,25 @@ void Client::handle_message(const std::string& line)
                 result_ok = result.is_boolean() ? result.get<bool>() : !result.is_null();
             }
             std::string source = "unknown";
-            const auto source_it = g_pending_share_sources.find(id);
-            if (source_it != g_pending_share_sources.end()) {
-                source = source_it->second;
-                g_pending_share_sources.erase(source_it);
+            {
+                std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex);
+                const auto source_it = g_pending_share_sources.find(id);
+                if (source_it != g_pending_share_sources.end()) {
+                    source = source_it->second;
+                    g_pending_share_sources.erase(source_it);
+                }
             }
             const bool accepted = error.is_null() && result_ok;
             if (accepted) {
                 ++shares_accepted_;
-                std::cout << "[share] ACCEPTED | source=" << source
-                          << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << '\n';
+                std::cout << kAcceptColor << "[share] ACCEPTED | source=" << source
+                          << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_
+                          << kColorReset << '\n';
             } else {
                 ++shares_rejected_;
-                std::cout << "[share] REJECTED | source=" << source
+                std::cout << kRejectColor << "[share] REJECTED | source=" << source
                           << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_
-                          << " | response=" << message.dump() << '\n';
+                          << " | response=" << message.dump() << kColorReset << '\n';
             }
         }
         return;
@@ -637,7 +662,7 @@ bool Client::mine_one(std::intptr_t socket_value)
     if (hash_meets_target(hash, target_le_)) {
         std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id
                   << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
-        return submit_share(socket_value, extranonce2, nonce);
+        return submit_share(socket_value, extranonce2, nonce, "CPU");
     }
     if (nonce_ == 0) ++extranonce2_counter_;
     return true;
@@ -697,7 +722,7 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
         for (const auto& candidate : candidates) {
             std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id
                       << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-            if (!submit_share(socket_value, candidate.extranonce2, candidate.nonce)) return false;
+            if (!submit_share(socket_value, candidate.extranonce2, candidate.nonce, "CPU")) return false;
         }
     }
 
@@ -728,7 +753,8 @@ void Client::initialize_gpu_engines()
         worker.device_id = id;
         worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size);
         gpu_workers_.push_back(std::move(worker));
-        std::cout << "[GPU " << id << "] batch engine initialized | batch=" << batch_size << '\n';
+        std::cout << gpu_color(id) << "[GPU " << id << "] batch engine initialized | batch="
+                  << batch_size << kColorReset << '\n';
     }
 
     gpu_pipeline_ready_ = !gpu_workers_.empty();
@@ -797,10 +823,12 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
         const auto count = task.worker->engine->batch_size();
         task.worker->hashes_done += count;
         hashes_done_ += count;
+        const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (const auto& candidate : candidates) {
-            std::cout << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id
-                      << " nonce=" << nonce_hex(candidate.nonce) << '\n';
-            if (!submit_share(socket_value, extranonce2, candidate.nonce)) return false;
+            std::cout << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id
+                      << "] candidate | job=" << job_.job_id
+                      << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
     }
     return true;
@@ -837,10 +865,12 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         const auto count = task.worker->engine->batch_size();
         task.worker->hashes_done += count;
         hashes_done_ += count;
+        const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (const auto& candidate : candidates) {
-            std::cout << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id
-                      << " nonce=" << nonce_hex(candidate.nonce) << '\n';
-            if (!submit_share(socket_value, extranonce2, candidate.nonce)) return false;
+            std::cout << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id
+                      << "] candidate | job=" << job_.job_id
+                      << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
     }
     return true;
@@ -849,20 +879,11 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
 
 bool Client::submit_share(std::intptr_t socket_value,
                           const std::string& extranonce2_hex,
-                          std::uint32_t nonce)
+                          std::uint32_t nonce,
+                          const std::string& source)
 {
     const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
     const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
-
-    std::string source = "CPU";
-#ifdef YERBAS_HAS_CUDA
-    for (const auto& worker : gpu_workers_) {
-        if (nonce >= worker.region_start && nonce <= worker.region_end) {
-            source = "GPU " + std::to_string(worker.device_id);
-            break;
-        }
-    }
-#endif
 
     const nlohmann::json submit = {
         {"id", request_id},
@@ -873,7 +894,10 @@ bool Client::submit_share(std::intptr_t socket_value,
         std::cerr << "[share] Failed to send candidate share\n";
         return false;
     }
-    g_pending_share_sources[request_id] = source;
+    {
+        std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex);
+        g_pending_share_sources[request_id] = source;
+    }
     ++shares_submitted_;
     std::cout << "[share] Submitted #" << shares_submitted_
               << " | source=" << source
@@ -909,11 +933,13 @@ void Client::report_stats(bool force)
             const std::uint64_t gpu_delta = worker.hashes_done - worker.hashes_at_last_report;
             const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_delta) / since_report : 0.0;
             if (gpu_pipeline_ready_) {
-                std::cout << "[GPU " << worker.device_id << "] " << format_rate(gpu_hps)
+                std::cout << gpu_color(worker.device_id) << "[GPU " << worker.device_id << "] "
+                          << format_rate(gpu_hps)
                           << " | hashes " << worker.hashes_done
-                          << " | batch " << worker.engine->batch_size() << '\n';
+                          << " | batch " << worker.engine->batch_size() << kColorReset << '\n';
             } else {
-                std::cout << "[GPU " << worker.device_id << "] idle | CUDA GhostRider pipeline incomplete\n";
+                std::cout << gpu_color(worker.device_id) << "[GPU " << worker.device_id
+                          << "] idle | CUDA GhostRider pipeline incomplete" << kColorReset << '\n';
             }
             worker.hashes_at_last_report = worker.hashes_done;
         }

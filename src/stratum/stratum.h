@@ -63,7 +63,8 @@ private:
 #endif
     bool submit_share(std::intptr_t socket_value,
                       const std::string& extranonce2_hex,
-                      std::uint32_t nonce);
+                      std::uint32_t nonce,
+                      const std::string& source);
 
     void set_target_hex(const std::string& target_hex);
     void set_difficulty(double difficulty);
