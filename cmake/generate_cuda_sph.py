@@ -99,6 +99,124 @@ def type_public_definitions(source: str, stem: str) -> str:
     return pattern.sub(repl, source)
 
 
+def device_endian_helpers() -> str:
+    """Provide CUDA-safe sphlib endian helpers used by generated algorithms.
+
+    sph_types.h defines these as ordinary host inline functions. Generated
+    device code must not bind to those host implementations, so calls are
+    redirected to equivalent byte-oriented device helpers. Byte assembly is
+    deliberately used instead of host architecture detection or inline asm;
+    it is valid device code on every CUDA architecture we build.
+    """
+    return r'''/* generated CUDA endian helpers */
+__device__ __forceinline__ sph_u32 yerbas_cuda_dec32le(const void *src)
+{
+    const unsigned char *p = static_cast<const unsigned char *>(src);
+    return (sph_u32)p[0]
+        | ((sph_u32)p[1] << 8)
+        | ((sph_u32)p[2] << 16)
+        | ((sph_u32)p[3] << 24);
+}
+
+__device__ __forceinline__ sph_u32 yerbas_cuda_dec32be(const void *src)
+{
+    const unsigned char *p = static_cast<const unsigned char *>(src);
+    return ((sph_u32)p[0] << 24)
+        | ((sph_u32)p[1] << 16)
+        | ((sph_u32)p[2] << 8)
+        | (sph_u32)p[3];
+}
+
+__device__ __forceinline__ sph_u64 yerbas_cuda_dec64le(const void *src)
+{
+    const unsigned char *p = static_cast<const unsigned char *>(src);
+    return (sph_u64)p[0]
+        | ((sph_u64)p[1] << 8)
+        | ((sph_u64)p[2] << 16)
+        | ((sph_u64)p[3] << 24)
+        | ((sph_u64)p[4] << 32)
+        | ((sph_u64)p[5] << 40)
+        | ((sph_u64)p[6] << 48)
+        | ((sph_u64)p[7] << 56);
+}
+
+__device__ __forceinline__ sph_u64 yerbas_cuda_dec64be(const void *src)
+{
+    const unsigned char *p = static_cast<const unsigned char *>(src);
+    return ((sph_u64)p[0] << 56)
+        | ((sph_u64)p[1] << 48)
+        | ((sph_u64)p[2] << 40)
+        | ((sph_u64)p[3] << 32)
+        | ((sph_u64)p[4] << 24)
+        | ((sph_u64)p[5] << 16)
+        | ((sph_u64)p[6] << 8)
+        | (sph_u64)p[7];
+}
+
+__device__ __forceinline__ void yerbas_cuda_enc32le(void *dst, sph_u32 val)
+{
+    unsigned char *p = static_cast<unsigned char *>(dst);
+    p[0] = (unsigned char)val;
+    p[1] = (unsigned char)(val >> 8);
+    p[2] = (unsigned char)(val >> 16);
+    p[3] = (unsigned char)(val >> 24);
+}
+
+__device__ __forceinline__ void yerbas_cuda_enc32be(void *dst, sph_u32 val)
+{
+    unsigned char *p = static_cast<unsigned char *>(dst);
+    p[0] = (unsigned char)(val >> 24);
+    p[1] = (unsigned char)(val >> 16);
+    p[2] = (unsigned char)(val >> 8);
+    p[3] = (unsigned char)val;
+}
+
+__device__ __forceinline__ void yerbas_cuda_enc64le(void *dst, sph_u64 val)
+{
+    unsigned char *p = static_cast<unsigned char *>(dst);
+    p[0] = (unsigned char)val;
+    p[1] = (unsigned char)(val >> 8);
+    p[2] = (unsigned char)(val >> 16);
+    p[3] = (unsigned char)(val >> 24);
+    p[4] = (unsigned char)(val >> 32);
+    p[5] = (unsigned char)(val >> 40);
+    p[6] = (unsigned char)(val >> 48);
+    p[7] = (unsigned char)(val >> 56);
+}
+
+__device__ __forceinline__ void yerbas_cuda_enc64be(void *dst, sph_u64 val)
+{
+    unsigned char *p = static_cast<unsigned char *>(dst);
+    p[0] = (unsigned char)(val >> 56);
+    p[1] = (unsigned char)(val >> 48);
+    p[2] = (unsigned char)(val >> 40);
+    p[3] = (unsigned char)(val >> 32);
+    p[4] = (unsigned char)(val >> 24);
+    p[5] = (unsigned char)(val >> 16);
+    p[6] = (unsigned char)(val >> 8);
+    p[7] = (unsigned char)val;
+}
+
+#define sph_dec32le yerbas_cuda_dec32le
+#define sph_dec32le_aligned yerbas_cuda_dec32le
+#define sph_dec32be yerbas_cuda_dec32be
+#define sph_dec32be_aligned yerbas_cuda_dec32be
+#define sph_dec64le yerbas_cuda_dec64le
+#define sph_dec64le_aligned yerbas_cuda_dec64le
+#define sph_dec64be yerbas_cuda_dec64be
+#define sph_dec64be_aligned yerbas_cuda_dec64be
+#define sph_enc32le yerbas_cuda_enc32le
+#define sph_enc32le_aligned yerbas_cuda_enc32le
+#define sph_enc32be yerbas_cuda_enc32be
+#define sph_enc32be_aligned yerbas_cuda_enc32be
+#define sph_enc64le yerbas_cuda_enc64le
+#define sph_enc64le_aligned yerbas_cuda_enc64le
+#define sph_enc64be yerbas_cuda_enc64be
+#define sph_enc64be_aligned yerbas_cuda_enc64be
+
+'''
+
+
 def transform_source(source: str, stem: str) -> str:
     # Runtime/type headers are included globally by the generated type header;
     # do not include C/C++ standard headers from inside the private namespace.
@@ -135,6 +253,17 @@ def transform_source(source: str, stem: str) -> str:
     if names:
         source += "\n\n/* generated macro cleanup */\n"
         source += "\n".join(f"#undef {name}" for name in reversed(names)) + "\n"
+
+    # Endian helper aliases are generator-owned and must also be cleaned up
+    # before the next generated algorithm enters its private namespace.
+    source += "\n/* generated CUDA endian helper cleanup */\n"
+    for name in (
+        "sph_dec32le", "sph_dec32le_aligned", "sph_dec32be", "sph_dec32be_aligned",
+        "sph_dec64le", "sph_dec64le_aligned", "sph_dec64be", "sph_dec64be_aligned",
+        "sph_enc32le", "sph_enc32le_aligned", "sph_enc32be", "sph_enc32be_aligned",
+        "sph_enc64le", "sph_enc64le_aligned", "sph_enc64be", "sph_enc64be_aligned",
+    ):
+        source += f"#undef {name}\n"
     return source
 
 
@@ -161,6 +290,7 @@ def main() -> int:
     )
     generated_source = (
         "/* Generated from pinned Yerbas Core sphlib source. Do not edit. */\n"
+        + device_endian_helpers()
         + device_public_prototypes(header, a.stem)
         + transform_source(source, a.stem)
     )
