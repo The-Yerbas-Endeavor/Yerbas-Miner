@@ -96,8 +96,73 @@ jobs:
           path: dist/yerbas-miner-windows-x86_64.zip
           if-no-files-found: error
 
-  windows-cuda-x86_64:
-    name: Windows CUDA x86_64
+  windows-cuda-dev:
+    name: Windows CUDA Dev
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit 12.8.1
+        id: cuda-toolkit
+        timeout-minutes: 20
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.8.1'
+          method: local
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
+      - name: Resolve CUDA compiler
+        shell: pwsh
+        run: |
+          $candidates = @()
+          if ($env:CUDA_PATH) {
+            $candidates += (Join-Path $env:CUDA_PATH 'bin\nvcc.exe')
+          }
+          $candidates += 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe'
+          $candidates += 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8.1\bin\nvcc.exe'
+
+          $nvcc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $nvcc) {
+            throw 'CUDA installer completed but nvcc.exe was not found'
+          }
+
+          $cudaRoot = Split-Path (Split-Path $nvcc -Parent) -Parent
+          "CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CUDAToolkit_ROOT=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $cudaRoot 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nvcc --version
+
+      - name: Configure CUDA dev build
+        shell: pwsh
+        run: |
+          $nvcc = Join-Path $env:CUDA_PATH 'bin\nvcc.exe'
+          if (-not (Test-Path $nvcc)) { throw "nvcc missing before CMake: $nvcc" }
+          cmake -S . -B build-cuda-dev -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=ON -DBUILD_TESTING=ON -DCMAKE_CUDA_COMPILER="$nvcc" -DCUDAToolkit_ROOT="$env:CUDA_PATH"
+
+      - name: Build CUDA validation target
+        shell: pwsh
+        run: cmake --build build-cuda-dev --config Release --target cuda-keccak-validation --parallel
+
+      - name: Build CUDA miner target
+        shell: pwsh
+        run: cmake --build build-cuda-dev --config Release --target yerbas-miner --parallel
+
+      - name: Test CPU reference
+        shell: pwsh
+        run: ctest --test-dir build-cuda-dev -C Release -R ghostrider-smoke --output-on-failure
+
+      - name: Verify dev binaries
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build-cuda-dev/Release/yerbas-miner.exe)) { throw 'CUDA miner executable not produced' }
+          if (-not (Test-Path build-cuda-dev/Release/cuda-keccak-validation.exe)) { throw 'CUDA validation executable not produced' }
+          Write-Host 'Fast CUDA development build succeeded.'
+
+  windows-cuda-release:
+    name: Windows CUDA Release
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-2022
     steps:
       - name: Checkout
