@@ -26,6 +26,22 @@ inline constexpr std::array<VariantConfig, 6> kVariantConfigs{{
     {5, "CN-TurtleLite", 262144U,   65536U,   8192U,  1},
 }};
 
+// Keep the host constexpr table above for host-side sizing and validation,
+// but return literal device-local configs when called from CUDA code. This
+// avoids taking a device pointer into std::array host storage.
+__host__ __device__ inline constexpr VariantConfig config_value(std::uint8_t index)
+{
+    switch (index) {
+    case 0: return {0, "CN-Dark",       524288U,  131072U,  32768U,  1};
+    case 1: return {1, "CN-DarkLite",   524288U,  131072U,  16384U,  1};
+    case 2: return {2, "CN-Fast",      2097152U,  262144U, 131072U,  1};
+    case 3: return {3, "CN-Lite",      1048576U,  262144U,  65536U,  1};
+    case 4: return {4, "CN-Turtle",     262144U,   65536U,  16384U,  1};
+    case 5: return {5, "CN-TurtleLite", 262144U,   65536U,   8192U,  1};
+    default: return {255, nullptr, 0U, 0U, 0U, 0};
+    }
+}
+
 inline constexpr const VariantConfig* config(std::uint8_t index)
 {
     return index < kVariantConfigs.size() ? &kVariantConfigs[index] : nullptr;
