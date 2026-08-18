@@ -1,4 +1,5 @@
 #include "cuda/cuda_backend.h"
+#include "cuda/cryptonight/cn_validation.h"
 #include "ghostrider/ghostrider.h"
 #include "ghostrider_vectors.h"
 
@@ -31,6 +32,10 @@ constexpr ValidationCase kCases[] = {
     {12, "Fugue-512",   yerbas::cuda::fugue512_reference_stage},
     {13, "Shabal-512",  yerbas::cuda::shabal512_reference_stage},
     {14, "Whirlpool",   yerbas::cuda::whirlpool512_reference_stage},
+};
+
+constexpr const char* kCnNames[] = {
+    "CN-Dark", "CN-DarkLite", "CN-Fast", "CN-Lite", "CN-Turtle", "CN-TurtleLite"
 };
 }
 
@@ -65,7 +70,27 @@ int main()
             return 30 + item.algorithm;
         }
     }
-
     std::cout << "CUDA cores 0-14 match pinned Yerbas Core for 80-byte and 64-byte inputs\n";
+
+    for (std::uint8_t variant = 0; variant < 6; ++variant) {
+        std::cout << "Validating " << kCnNames[variant] << "..." << std::flush;
+        const std::uint8_t encoded_stage = static_cast<std::uint8_t>(
+            yerbas::ghostrider::kCryptoNightStageFlag | variant);
+        const auto cpu = yerbas::ghostrider::stage_reference(stage_work, encoded_stage);
+        const auto gpu = yerbas::cuda::cryptonight::validation_hash(
+            0, variant, stage_input.data(), stage_input.size());
+        bool match = true;
+        for (std::size_t i = 0; i < gpu.size(); ++i) {
+            if (gpu[i] != cpu[i]) { match = false; break; }
+        }
+        if (!match) {
+            std::cerr << " FAILED\nCUDA " << kCnNames[variant]
+                      << " mismatch for 64-byte intermediate state\n";
+            return 60 + variant;
+        }
+        std::cout << " OK\n";
+    }
+
+    std::cout << "CUDA CryptoNight variants 0-5 match pinned Yerbas Core\n";
     return 0;
 }
