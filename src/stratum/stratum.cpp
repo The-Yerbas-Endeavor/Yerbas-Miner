@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -50,6 +51,9 @@ constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
 constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
+constexpr const char* kCpuColor = "\x1b[95m";
+constexpr const char* kColorReset = "\x1b[0m";
+std::unordered_map<int, std::string> g_pending_share_sources;
 
 struct CpuCandidate {
     std::uint32_t nonce{0};
@@ -488,13 +492,21 @@ void Client::handle_message(const std::string& line)
                 const auto& result = message["result"];
                 result_ok = result.is_boolean() ? result.get<bool>() : !result.is_null();
             }
+            std::string source = "unknown";
+            const auto source_it = g_pending_share_sources.find(id);
+            if (source_it != g_pending_share_sources.end()) {
+                source = source_it->second;
+                g_pending_share_sources.erase(source_it);
+            }
             const bool accepted = error.is_null() && result_ok;
             if (accepted) {
                 ++shares_accepted_;
-                std::cout << "[share] ACCEPTED | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << '\n';
+                std::cout << "[share] ACCEPTED | source=" << source
+                          << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << '\n';
             } else {
                 ++shares_rejected_;
-                std::cout << "[share] REJECTED | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_
+                std::cout << "[share] REJECTED | source=" << source
+                          << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_
                           << " | response=" << message.dump() << '\n';
             }
         }
@@ -623,7 +635,8 @@ bool Client::mine_one(std::intptr_t socket_value)
     ++cpu_hashes_done_;
     ++hashes_done_;
     if (hash_meets_target(hash, target_le_)) {
-        std::cout << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(nonce) << '\n';
+        std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id
+                  << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
         return submit_share(socket_value, extranonce2, nonce);
     }
     if (nonce_ == 0) ++extranonce2_counter_;
@@ -682,7 +695,8 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
     for (auto& future : futures) {
         const auto candidates = future.get();
         for (const auto& candidate : candidates) {
-            std::cout << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << '\n';
+            std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id
+                      << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, candidate.extranonce2, candidate.nonce)) return false;
         }
     }
@@ -839,6 +853,17 @@ bool Client::submit_share(std::intptr_t socket_value,
 {
     const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
     const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
+
+    std::string source = "CPU";
+#ifdef YERBAS_HAS_CUDA
+    for (const auto& worker : gpu_workers_) {
+        if (nonce >= worker.region_start && nonce <= worker.region_end) {
+            source = "GPU " + std::to_string(worker.device_id);
+            break;
+        }
+    }
+#endif
+
     const nlohmann::json submit = {
         {"id", request_id},
         {"method", "mining.submit"},
@@ -848,8 +873,10 @@ bool Client::submit_share(std::intptr_t socket_value,
         std::cerr << "[share] Failed to send candidate share\n";
         return false;
     }
+    g_pending_share_sources[request_id] = source;
     ++shares_submitted_;
     std::cout << "[share] Submitted #" << shares_submitted_
+              << " | source=" << source
               << " | job=" << job_.job_id
               << " extranonce2=" << extranonce2_hex
               << " ntime=" << job_.ntime
@@ -872,8 +899,8 @@ void Client::report_stats(bool force)
     const double average_hps = uptime > 0.0 ? static_cast<double>(hashes_done_) / uptime : 0.0;
 
     if (config_.miner.cpu_enabled) {
-        std::cout << "[CPU] " << format_rate(cpu_hps)
-                  << " | hashes " << cpu_hashes_done_ << '\n';
+        std::cout << kCpuColor << "[CPU] " << format_rate(cpu_hps)
+                  << " | hashes " << cpu_hashes_done_ << kColorReset << '\n';
     }
 
 #ifdef YERBAS_HAS_CUDA
