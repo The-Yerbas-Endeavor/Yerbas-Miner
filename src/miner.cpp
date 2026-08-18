@@ -93,16 +93,20 @@ int Miner::run()
             }
             std::cout << '\n';
 
+            cuda::BatchEngine readiness_probe(devices.front().id, 1);
+            const bool pipeline_ready = readiness_probe.hash_pipeline_ready();
+            const bool native_ready = cuda::full_ghostrider_cuda_coverage();
             for (const auto& device : devices) {
                 std::cout << "[GPU " << device.id << "] CUDA ready | CC "
                           << device.compute_major << '.' << device.compute_minor
                           << " | GhostRider cores " << core_count << '/' << cuda::kCoreCoverage.size()
                           << " | CN " << cn_count << '/' << cuda::kCryptoNightCoverage.size()
-                          << " | mining " << (cuda::full_ghostrider_cuda_coverage() ? "ready" : "blocked") << "\n";
+                          << " | mining "
+                          << (native_ready ? "native" : (pipeline_ready ? "hybrid-bootstrap" : "blocked"))
+                          << "\n";
             }
 
-            cuda::BatchEngine readiness_probe(devices.front().id, 1);
-            if (!readiness_probe.hash_pipeline_ready()) {
+            if (!pipeline_ready) {
                 std::cout << "CUDA GhostRider pipeline: partial/validation mode\n";
                 if (config_.miner.cpu_enabled) {
                     std::cout << "Hybrid mode: CPU workers remain active while CUDA stages are completed\n";
@@ -113,6 +117,11 @@ int Miner::run()
 #endif
                     return 4;
                 }
+            } else if (!native_ready) {
+                std::cout << "CUDA GhostRider pipeline: hybrid-bootstrap mining enabled\n";
+                std::cout << "Validated CUDA cores run on GPU; pending stages use the pinned CPU reference fallback\n";
+            } else {
+                std::cout << "CUDA GhostRider pipeline: full native CUDA mining enabled\n";
             }
         }
     } else {
