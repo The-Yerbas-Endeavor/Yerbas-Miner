@@ -96,19 +96,19 @@ Hash256 hash_with_schedule(const Work& work, const StageSchedule& schedule)
         }
 
         const std::uint8_t stage = schedule[static_cast<std::size_t>(i)];
-        int core_selection = -1;
-        int cn_selection = -1;
         if ((stage & kCryptoNightStageFlag) != 0) {
-            cn_selection = static_cast<int>(stage & 0x7fU);
+            // CryptoNight stages consume the previous 512-bit result and write
+            // the next 512-bit state. Do not call coreHash() with a sentinel
+            // selector first; that no-op call is pure mining-loop overhead.
+            const int cn_selection = static_cast<int>(stage & 0x7fU);
+            uint512* cn_input = (i == 0) ? &hash[0] : &hash[i - 1];
+            cnHash(cn_input, &hash[i], len_to_hash, cn_selection);
         } else {
-            core_selection = static_cast<int>(stage);
+            // Conventional GhostRider stages only need coreHash(). Avoid the
+            // matching cnHash(..., -1) no-op that the reference scaffold used.
+            const int core_selection = static_cast<int>(stage);
+            coreHash(to_hash, &hash[i], len_to_hash, core_selection);
         }
-
-        // Preserve Yerbas Core's exact reference call sequence. The inactive
-        // selector is -1 and the corresponding helper is a no-op.
-        coreHash(to_hash, &hash[i], len_to_hash, core_selection);
-        uint512* cn_input = (i == 0) ? &hash[0] : &hash[i - 1];
-        cnHash(cn_input, &hash[i], len_to_hash, cn_selection);
     }
 
     const uint256 result = hash[17].trim256();
