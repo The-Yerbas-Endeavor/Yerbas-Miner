@@ -32,7 +32,9 @@ struct Candidate {
 
 class BatchEngine {
 public:
-    explicit BatchEngine(int device_id, std::size_t batch_size = 65536);
+    explicit BatchEngine(int device_id,
+                         std::size_t batch_size = 65536,
+                         unsigned int fallback_threads = 1);
     ~BatchEngine();
 
     BatchEngine(const BatchEngine&) = delete;

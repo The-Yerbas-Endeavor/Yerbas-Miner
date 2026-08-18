@@ -186,6 +186,7 @@ Hash512 run_validation_kernel(int device_id,
 struct BatchEngine::Impl {
     int device_id{-1};
     std::size_t batch_size{0};
+    unsigned int fallback_threads{1};
     cudaStream_t stream{};
     DeviceJob* d_job{nullptr};
     std::uint32_t* d_nonces{nullptr};
@@ -196,11 +197,12 @@ struct BatchEngine::Impl {
     std::vector<std::uint8_t> host_states;
     bool job_loaded{false};
 
-    Impl(int id, std::size_t requested_size)
+    Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
         : device_id(id),
           batch_size(full_ghostrider_cuda_coverage()
                          ? requested_size
                          : std::min(requested_size, kBootstrapBatch)),
+          fallback_threads(std::max(1u, requested_fallback_threads)),
           host_states(batch_size * kStateBytes)
     {
         if (batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
@@ -231,8 +233,10 @@ struct BatchEngine::Impl {
     }
 };
 
-BatchEngine::BatchEngine(int device_id, std::size_t batch_size)
-    : impl_(std::make_unique<Impl>(device_id, batch_size))
+BatchEngine::BatchEngine(int device_id,
+                         std::size_t batch_size,
+                         unsigned int fallback_threads)
+    : impl_(std::make_unique<Impl>(device_id, batch_size, fallback_threads))
 {
 }
 BatchEngine::~BatchEngine() = default;
@@ -300,8 +304,8 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                        "cudaStreamSynchronize fallback read failed");
         }
 
-        const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
-        const std::size_t worker_count = std::min<std::size_t>(hw_threads, impl_->batch_size);
+        const std::size_t worker_count = std::min<std::size_t>(impl_->fallback_threads,
+                                                                impl_->batch_size);
         const std::size_t chunk = (impl_->batch_size + worker_count - 1) / worker_count;
         std::vector<std::thread> fallback_workers;
         fallback_workers.reserve(worker_count);

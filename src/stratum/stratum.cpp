@@ -672,9 +672,17 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
 {
     if (!config_.miner.cpu_enabled) return true;
 
-    const unsigned int threads = config_.miner.threads == 0
+    unsigned int threads = config_.miner.threads == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : std::max(1u, config_.miner.threads);
+#ifdef YERBAS_HAS_CUDA
+    if (gpu_pipeline_ready_ && config_.gpu.enabled && config_.miner.hybrid && !gpu_workers_.empty()) {
+        const unsigned int reserved = std::min<unsigned int>(threads,
+            static_cast<unsigned int>(gpu_workers_.size()));
+        threads -= reserved;
+        if (threads == 0) return true;
+    }
+#endif
     const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 8U : config_.miner.cpu_batch;
     const std::uint64_t total = static_cast<std::uint64_t>(threads) * per_thread;
 
@@ -751,15 +759,27 @@ void Client::initialize_gpu_engines()
             : 65536;
         GpuWorker worker;
         worker.device_id = id;
-        worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size);
+        worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size, 1U);
         gpu_workers_.push_back(std::move(worker));
         std::cout << gpu_color(id) << "[GPU " << id << "] batch engine initialized | batch="
-                  << batch_size << kColorReset << '\n';
+                  << batch_size << " | fallback_threads=1" << kColorReset << '\n';
     }
 
     gpu_pipeline_ready_ = !gpu_workers_.empty();
     for (const auto& worker : gpu_workers_) {
         gpu_pipeline_ready_ = gpu_pipeline_ready_ && worker.engine->hash_pipeline_ready();
+    }
+
+    if (config_.miner.cpu_enabled && config_.miner.hybrid && !gpu_workers_.empty()) {
+        const unsigned int total_budget = config_.miner.threads == 0
+            ? std::max(1u, std::thread::hardware_concurrency())
+            : std::max(1u, config_.miner.threads);
+        const unsigned int fallback_budget = std::min<unsigned int>(total_budget,
+            static_cast<unsigned int>(gpu_workers_.size()));
+        const unsigned int cpu_budget = total_budget - fallback_budget;
+        std::cout << "[hybrid] CPU thread budget: " << cpu_budget
+                  << " miner + " << fallback_budget
+                  << " CUDA fallback = " << total_budget << " total\n";
     }
 }
 
