@@ -35,8 +35,11 @@ def strip_public_prototypes(header: str, stem: str) -> str:
 
 
 def context_type_for(function_name: str, stem: str) -> str | None:
+    # Whirlpool's md_helper-generated public entry points retain void *cc.
+    # Typed pointers convert safely to void* in C++, while forcing a concrete
+    # type here makes the macro-generated close wrappers incompatible.
     if stem == "whirlpool":
-        return "sph_whirlpool_context"
+        return None
     bits = re.search(r"(224|256|384|512)", function_name)
     if bits:
         return f"sph_{stem}{bits.group(1)}_context"
@@ -146,46 +149,87 @@ __device__ __forceinline__ void yerbas_cuda_enc64be(void *dst, sph_u64 val)
 '''
 
 
-def inline_helpers(source: str, specs: list[str]) -> str:
+def load_helper(spec: str) -> tuple[str, str]:
+    if "=" not in spec:
+        raise ValueError(f"invalid inline include value: {spec}")
+    include_name, helper_path = spec.split("=", 1)
+    helper = pathlib.Path(helper_path).read_text(encoding="utf-8")
+    helper = strip_c_linkage_wrappers(helper)
+    helper = re.sub(r'(?m)^\s*#\s*include\s+[<\"].*[>\"]\s*$', '', helper)
+    return include_name, helper
+
+
+def inline_helpers(source: str, specs: list[str], all_specs: list[str]) -> str:
+    # Normal helpers are replaced once. This matters for SHAvite, which has a
+    # second aes_helper.c include inside a block comment for an alternate BE
+    # implementation that must remain commented out.
     for spec in specs:
-        if "=" not in spec:
-            raise ValueError(f"invalid --inline-include value: {spec}")
-        include_name, helper_path = spec.split("=", 1)
-        helper = pathlib.Path(helper_path).read_text(encoding="utf-8")
-        helper = strip_c_linkage_wrappers(helper)
-        helper = re.sub(r'(?m)^\s*#\s*include\s+[<\"].*[>\"]\s*$', '', helper)
-        marker = re.compile(
-            rf'(?m)^\s*#\s*include\s+"{re.escape(include_name)}"\s*$'
-        )
+        include_name, helper = load_helper(spec)
+        marker = re.compile(rf'(?m)^\s*#\s*include\s+"{re.escape(include_name)}"\s*$')
         if not marker.search(source):
             raise ValueError(f"include {include_name!r} not found in source")
-        # Replace only the first occurrence. Some sphlib sources (notably
-        # SHAvite) contain an alternate helper include inside a block comment.
-        # Replacing that commented include injects helper comments containing
-        # */ and prematurely terminates the outer comment, activating the
-        # alternate AES_BIG_ENDIAN path in generated CUDA.
         source = marker.sub(
             f"/* begin generated inline {include_name} */\n{helper}\n/* end generated inline {include_name} */",
             source,
             count=1,
         )
+
+    # Some sphlib helpers are intentionally included several times with
+    # different macro definitions (WHIRLPOOL includes md_helper.c three times).
+    for spec in all_specs:
+        include_name, helper = load_helper(spec)
+        marker = re.compile(rf'(?m)^\s*#\s*include\s+"{re.escape(include_name)}"\s*$')
+        if not marker.search(source):
+            raise ValueError(f"include {include_name!r} not found in source")
+        source = marker.sub(
+            lambda _m: f"/* begin generated inline {include_name} */\n{helper}\n/* end generated inline {include_name} */",
+            source,
+        )
     return source
 
 
-def transform_source(source: str, stem: str, inline_specs: list[str]) -> str:
-    source = inline_helpers(source, inline_specs)
+def transform_source(source: str, stem: str, inline_specs: list[str], inline_all_specs: list[str]) -> str:
+    source = inline_helpers(source, inline_specs, inline_all_specs)
     source = strip_c_linkage_wrappers(source)
     source = re.sub(r'(?m)^\s*#\s*include\s+[<\"].*[>\"]\s*$', '', source)
+
+    # File-scope helpers become device functions.
     source = re.sub(r'(?m)^static\s+', '__device__ static ', source)
+
+    # Normal sphlib public entry points become private device functions.
     source = re.sub(
         rf'(?m)^void([ \t\r\n]+)(sph_{re.escape(stem)}[A-Za-z0-9_]*)',
         r'__device__ static void\1\2', source,
     )
+
+    if stem == "whirlpool":
+        # md_helper.c generates sph_HASH() through token-pasting, so there is
+        # no literal sph_whirlpool name for the generic regex above to see.
+        source = re.sub(
+            r'(?m)^void\s*\n(SPH_XCAT\(sph_,\s*HASH\)\s*\()',
+            r'__device__ static void\n\1',
+            source,
+        )
+        # MAKE_CLOSE is another macro-generated public wrapper.
+        source = re.sub(
+            r'(?m)^void\s*\\\s*$',
+            r'__device__ static void \\',
+            source,
+        )
+
     source = type_public_definitions(source, stem)
+
+    # C permits implicit conversion from void*. C++/nvcc does not.
     source = re.sub(
         r'(?m)^(\s*)out\s*=\s*dst\s*;',
         r'\1out = static_cast<unsigned char *>(dst);', source,
     )
+    source = re.sub(
+        r'(?m)^(\s*)sc\s*=\s*cc\s*;',
+        r'\1sc = static_cast<decltype(sc)>(cc);', source,
+    )
+    if stem == "simd":
+        source = re.sub(r'\bd\s*=\s*dst\b', 'd = static_cast<unsigned char *>(dst)', source)
 
     names: list[str] = []
     for m in re.finditer(r'(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)', source):
@@ -214,6 +258,7 @@ def main() -> int:
     p.add_argument('--out-source', required=True)
     p.add_argument('--out-header', required=True)
     p.add_argument('--inline-include', action='append', default=[])
+    p.add_argument('--inline-include-all', action='append', default=[])
     a = p.parse_args()
 
     source = pathlib.Path(a.source).read_text(encoding='utf-8')
@@ -228,7 +273,7 @@ def main() -> int:
         "/* Generated from pinned Yerbas Core sphlib source. Do not edit. */\n"
         + device_endian_helpers()
         + device_public_prototypes(header, a.stem)
-        + transform_source(source, a.stem, a.inline_include)
+        + transform_source(source, a.stem, a.inline_include, a.inline_include_all)
     )
 
     out_source = pathlib.Path(a.out_source)
