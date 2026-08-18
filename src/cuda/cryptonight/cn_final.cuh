@@ -11,9 +11,9 @@
 
 namespace yerbas::cuda::cryptonight {
 
-__device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
-                                                     const std::uint8_t state[200],
-                                                     std::uint8_t out[32])
+__device__ static __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
+                                                            const std::uint8_t state[200],
+                                                            std::uint8_t out[32])
 {
     switch (selector & 3U) {
     case 0:
