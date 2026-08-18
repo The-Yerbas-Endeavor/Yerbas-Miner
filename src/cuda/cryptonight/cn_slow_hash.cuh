@@ -55,9 +55,10 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
                                           std::uint8_t* scratchpad,
                                           std::uint8_t out[32])
 {
-    const VariantConfig* cfg = config(variant_index);
-    if (cfg == nullptr || scratchpad == nullptr || input == nullptr || length < 43)
+    if (variant_index >= 6 || scratchpad == nullptr || input == nullptr || length < 43)
         return false;
+
+    const VariantConfig cfg = config_value(variant_index);
 
     std::uint8_t state[200];
     keccak1600(input, length, state);
@@ -69,7 +70,7 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
     std::uint8_t expanded[240];
     aes256_expand_key(state, expanded);
 
-    const std::size_t init_rounds = cfg->page_size / 128U;
+    const std::size_t init_rounds = cfg.page_size / 128U;
     for (std::size_t i = 0; i < init_rounds; ++i) {
         #pragma unroll
         for (int block = 0; block < 8; ++block)
@@ -86,8 +87,8 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
 
     const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
 
-    for (std::uint32_t i = 0; i < cfg->iterations; ++i) {
-        std::size_t j = cn_index(a, cfg->aes_rounds);
+    for (std::uint32_t i = 0; i < cfg.iterations; ++i) {
+        std::size_t j = cn_index(a, cfg.aes_rounds);
         std::uint8_t* slot = scratchpad + j * 16U;
 
         aes_single_round(slot, c, a);
@@ -95,7 +96,7 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
         for (int k = 0; k < 16; ++k) slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
         variant1_mutate(slot);
 
-        j = cn_index(c, cfg->aes_rounds);
+        j = cn_index(c, cfg.aes_rounds);
         slot = scratchpad + j * 16U;
         copy16(t, slot);
 
