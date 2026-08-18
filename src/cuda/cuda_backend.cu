@@ -1,21 +1,28 @@
 #include "cuda/cuda_backend.h"
-#include "cuda/core/cubehash512.cuh"
-#include "cuda/core/keccak512.cuh"
+#include "cuda/core/stage_dispatch.cuh"
+#include "cuda/core_coverage.h"
+#include "ghostrider/ghostrider.h"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace yerbas::cuda {
 namespace {
 
 constexpr std::size_t kMaxCandidates = 64;
 constexpr std::size_t kStateBytes = 64;
+// Until all 18 selectable stages are native CUDA, keep fallback batches small.
+// This makes the bootstrap path useful for correctness/accepted-share testing
+// without spending seconds copying and reference-hashing a 65K state batch.
+constexpr std::size_t kBootstrapBatch = 256;
 
 struct DeviceJob {
     std::uint8_t header[80];
@@ -55,16 +62,18 @@ __global__ void initialize_nonce_batch(std::uint32_t start_nonce,
     }
 }
 
-__global__ void keccak512_stage(const DeviceJob* job,
-                                const std::uint32_t* nonces,
-                                std::uint8_t* states,
-                                std::size_t count,
-                                int stage_index)
+__global__ void core512_stage(const DeviceJob* job,
+                              const std::uint32_t* nonces,
+                              std::uint8_t* states,
+                              std::size_t count,
+                              int stage_index,
+                              std::uint8_t algorithm)
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
 
     std::uint8_t digest[64];
+    bool ok = false;
     if (stage_index == 0) {
         std::uint8_t header[80];
         #pragma unroll
@@ -74,40 +83,15 @@ __global__ void keccak512_stage(const DeviceJob* job,
         header[77] = static_cast<std::uint8_t>(nonce >> 8);
         header[78] = static_cast<std::uint8_t>(nonce >> 16);
         header[79] = static_cast<std::uint8_t>(nonce >> 24);
-        core::keccak512(header, 80, digest);
+        ok = core::dispatch_core512(algorithm, header, 80, digest);
     } else {
-        core::keccak512(states + index * kStateBytes, kStateBytes, digest);
+        ok = core::dispatch_core512(algorithm,
+                                    states + index * kStateBytes,
+                                    kStateBytes,
+                                    digest);
     }
 
-    std::uint8_t* output = states + index * kStateBytes;
-    #pragma unroll
-    for (int i = 0; i < 64; ++i) output[i] = digest[i];
-}
-
-__global__ void cubehash512_stage(const DeviceJob* job,
-                                  const std::uint32_t* nonces,
-                                  std::uint8_t* states,
-                                  std::size_t count,
-                                  int stage_index)
-{
-    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (index >= count) return;
-
-    std::uint8_t digest[64];
-    if (stage_index == 0) {
-        std::uint8_t header[80];
-        #pragma unroll
-        for (int i = 0; i < 80; ++i) header[i] = job->header[i];
-        const std::uint32_t nonce = nonces[index];
-        header[76] = static_cast<std::uint8_t>(nonce);
-        header[77] = static_cast<std::uint8_t>(nonce >> 8);
-        header[78] = static_cast<std::uint8_t>(nonce >> 16);
-        header[79] = static_cast<std::uint8_t>(nonce >> 24);
-        core::cubehash512(header, 80, digest);
-    } else {
-        core::cubehash512(states + index * kStateBytes, kStateBytes, digest);
-    }
-
+    if (!ok) return;
     std::uint8_t* output = states + index * kStateBytes;
     #pragma unroll
     for (int i = 0; i < 64; ++i) output[i] = digest[i];
@@ -207,10 +191,16 @@ struct BatchEngine::Impl {
     std::uint8_t* d_states{nullptr};
     DeviceCandidate* d_candidates{nullptr};
     unsigned int* d_candidate_count{nullptr};
+    JobDescriptor host_job{};
+    std::vector<std::uint8_t> host_states;
     bool job_loaded{false};
 
-    Impl(int id, std::size_t size)
-        : device_id(id), batch_size(size)
+    Impl(int id, std::size_t requested_size)
+        : device_id(id),
+          batch_size(full_ghostrider_cuda_coverage()
+                         ? requested_size
+                         : std::min(requested_size, kBootstrapBatch)),
+          host_states(batch_size * kStateBytes)
     {
         if (batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
@@ -250,6 +240,7 @@ BatchEngine& BatchEngine::operator=(BatchEngine&&) noexcept = default;
 
 void BatchEngine::upload_job(const JobDescriptor& job)
 {
+    impl_->host_job = job;
     DeviceJob device_job{};
     std::memcpy(device_job.header, job.header.data(), job.header.size());
     std::memcpy(device_job.target_le, job.target_le.data(), job.target_le.size());
@@ -278,8 +269,59 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                   impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Full 18-stage dispatcher remains disabled until every selectable core and
-    // CryptoNight variant has a validated device implementation.
+    // Bootstrap dispatcher: validated CUDA cores run on-device. Missing cores
+    // and CryptoNight variants run through the exact pinned Yerbas Core stage
+    // implementation on the host. As native kernels land, the fallback count
+    // shrinks without changing the final GhostRider result.
+    for (int stage_index = 0; stage_index < 18; ++stage_index) {
+        const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
+        const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
+        const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
+        const bool native_cuda = !is_cn && core::core512_implemented(algorithm);
+
+        if (native_cuda) {
+            core512_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_job,
+                                                                 impl_->d_nonces,
+                                                                 impl_->d_states,
+                                                                 impl_->batch_size,
+                                                                 stage_index,
+                                                                 algorithm);
+            check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
+            continue;
+        }
+
+        if (stage_index > 0) {
+            check_cuda(cudaMemcpyAsync(impl_->host_states.data(), impl_->d_states,
+                                       impl_->host_states.size(), cudaMemcpyDeviceToHost,
+                                       impl_->stream),
+                       "cudaMemcpyAsync fallback states failed");
+            check_cuda(cudaStreamSynchronize(impl_->stream),
+                       "cudaStreamSynchronize fallback read failed");
+        }
+
+        for (std::size_t i = 0; i < impl_->batch_size; ++i) {
+            ghostrider::Hash512 digest{};
+            if (stage_index == 0) {
+                std::array<std::uint8_t, 80> header = impl_->host_job.header;
+                const std::uint32_t nonce = start_nonce + static_cast<std::uint32_t>(i);
+                header[76] = static_cast<std::uint8_t>(nonce);
+                header[77] = static_cast<std::uint8_t>(nonce >> 8);
+                header[78] = static_cast<std::uint8_t>(nonce >> 16);
+                header[79] = static_cast<std::uint8_t>(nonce >> 24);
+                digest = ghostrider::stage_reference({header.data(), header.size()}, stage);
+            } else {
+                std::uint8_t* state = impl_->host_states.data() + i * kStateBytes;
+                digest = ghostrider::stage_reference({state, kStateBytes}, stage);
+            }
+            std::memcpy(impl_->host_states.data() + i * kStateBytes,
+                        digest.data(), kStateBytes);
+        }
+
+        check_cuda(cudaMemcpyAsync(impl_->d_states, impl_->host_states.data(),
+                                   impl_->host_states.size(), cudaMemcpyHostToDevice,
+                                   impl_->stream),
+                   "cudaMemcpyAsync fallback states upload failed");
+    }
 
     collect_candidates<<<blocks, threads, 0, impl_->stream>>>(impl_->d_nonces,
                                                                impl_->d_states,
@@ -316,7 +358,12 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 
 int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
-bool BatchEngine::hash_pipeline_ready() const noexcept { return false; }
+bool BatchEngine::hash_pipeline_ready() const noexcept
+{
+    // Native full-CUDA coverage is still the performance goal, but the hybrid
+    // stage fallback provides a complete, reference-correct mining pipeline.
+    return ghostrider::reference_ready();
+}
 
 Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length)
 {
