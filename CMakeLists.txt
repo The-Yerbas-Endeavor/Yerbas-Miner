@@ -205,6 +205,11 @@ if(BUILD_TESTING)
     add_executable(ghostrider-equivalence tests/ghostrider_equivalence.cpp)
     target_include_directories(ghostrider-equivalence PRIVATE src ${YERBAS_CORE_SRC})
     target_link_libraries(ghostrider-equivalence PRIVATE yerbas-ghostrider-reference)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_options(ghostrider-equivalence PRIVATE
+            -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
+        )
+    endif()
     add_test(NAME ghostrider-equivalence COMMAND ghostrider-equivalence)
 
     if(YERBAS_CUDA_AVAILABLE)
