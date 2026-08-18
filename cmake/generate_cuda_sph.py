@@ -12,14 +12,91 @@ import pathlib
 import re
 
 
-def strip_public_prototypes(header: str, stem: str) -> str:
-    # The implementation is included before its wrapper is called, so device
-    # prototypes are unnecessary. Removing them also lets each implementation
-    # live in a private C++ namespace without touching sphlib context types.
-    pattern = re.compile(
-        rf"(?ms)^\s*void\s+(sph_{re.escape(stem)}[A-Za-z0-9_]*)\s*\([^;]*?\);\s*"
+def public_function_pattern(stem: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?ms)^\s*void\s+(sph_{re.escape(stem)}[A-Za-z0-9_]*)\s*\(([^;]*?)\)\s*;"
     )
-    return pattern.sub("", header)
+
+
+def strip_public_prototypes(header: str, stem: str) -> str:
+    """Remove host sphlib public prototypes from the generated type header.
+
+    Device declarations are emitted separately inside the private CUDA
+    implementation namespace. Keeping the original host declarations would
+    make unqualified calls bind to host functions instead of the generated
+    device copies.
+    """
+    return public_function_pattern(stem).sub("", header)
+
+
+def context_type_for(function_name: str, stem: str) -> str | None:
+    """Return the concrete sphlib context type for a public entry point."""
+    if stem == "bmw":
+        if "224" in function_name or "256" in function_name:
+            return "sph_bmw_small_context"
+        if "384" in function_name or "512" in function_name:
+            return "sph_bmw_big_context"
+    elif stem == "groestl":
+        if "224" in function_name or "256" in function_name:
+            return "sph_groestl_small_context"
+        if "384" in function_name or "512" in function_name:
+            return "sph_groestl_big_context"
+    elif stem == "jh":
+        return "sph_jh_context"
+    elif stem == "luffa":
+        if "224" in function_name or "256" in function_name:
+            return "sph_luffa224_context"
+        if "384" in function_name:
+            return "sph_luffa384_context"
+        if "512" in function_name:
+            return "sph_luffa512_context"
+    return None
+
+
+def type_cc_parameter(signature: str, function_name: str, stem: str) -> str:
+    """Replace the public API's C-style void *cc with its concrete type.
+
+    sphlib is C and relies on implicit void-pointer conversion. nvcc compiles
+    the generated implementation as C++, where those conversions are invalid.
+    The CUDA wrappers already pass the matching concrete context type, so this
+    is a type-safety adaptation only; it does not change hashing behavior.
+    """
+    context_type = context_type_for(function_name, stem)
+    if context_type is None:
+        return signature
+    return re.sub(
+        r"\bvoid\s*\*\s*cc\b",
+        f"{context_type} *cc",
+        signature,
+        count=1,
+    )
+
+
+def device_public_prototypes(header: str, stem: str) -> str:
+    """Build forward declarations for generated public device functions."""
+    declarations: list[str] = []
+    for match in public_function_pattern(stem).finditer(header):
+        name = match.group(1)
+        params = type_cc_parameter(match.group(2), name, stem)
+        declarations.append(f"__device__ static void {name}({params});")
+    if not declarations:
+        return ""
+    return "/* generated device forward declarations */\n" + "\n".join(declarations) + "\n\n"
+
+
+def type_public_definitions(source: str, stem: str) -> str:
+    """Give generated public function definitions concrete context pointers."""
+    pattern = re.compile(
+        rf"(?ms)(__device__\s+static\s+void\s+)"
+        rf"(sph_{re.escape(stem)}[A-Za-z0-9_]*)"
+        rf"(\s*\()(.*?)(\)\s*\{{)"
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        params = type_cc_parameter(match.group(4), match.group(2), stem)
+        return match.group(1) + match.group(2) + match.group(3) + params + match.group(5)
+
+    return pattern.sub(repl, source)
 
 
 def transform_source(source: str, stem: str) -> str:
@@ -36,6 +113,16 @@ def transform_source(source: str, stem: str) -> str:
     source = re.sub(
         rf'(?m)^void([ \t\r\n]+)(sph_{re.escape(stem)}[A-Za-z0-9_]*)',
         r'__device__ static void\1\2',
+        source,
+    )
+    source = type_public_definitions(source, stem)
+
+    # C permits implicit conversion from void*; C++/nvcc does not. Luffa's
+    # close helpers assign their public void* destination to byte pointers.
+    # Make that conversion explicit without touching the algorithm itself.
+    source = re.sub(
+        r'(?m)^(\s*)out\s*=\s*dst\s*;',
+        r'\1out = static_cast<unsigned char *>(dst);',
         source,
     )
 
@@ -74,6 +161,7 @@ def main() -> int:
     )
     generated_source = (
         "/* Generated from pinned Yerbas Core sphlib source. Do not edit. */\n"
+        + device_public_prototypes(header, a.stem)
         + transform_source(source, a.stem)
     )
 
