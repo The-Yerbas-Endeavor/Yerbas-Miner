@@ -26,13 +26,13 @@ inline constexpr std::array<CoreCoverage, 15> kCoreCoverage{{
     {5,  "Skein-512",    true},
     {6,  "Luffa-512",    true},
     {7,  "CubeHash-512", true},
-    {8,  "Shavite-512",  false},
-    {9,  "SIMD-512",     false},
-    {10, "Echo-512",     false},
-    {11, "Hamsi-512",    false},
-    {12, "Fugue-512",    false},
-    {13, "Shabal-512",   false},
-    {14, "Whirlpool",    false},
+    {8,  "Shavite-512",  true},
+    {9,  "SIMD-512",     true},
+    {10, "Echo-512",     true},
+    {11, "Hamsi-512",    true},
+    {12, "Fugue-512",    true},
+    {13, "Shabal-512",   true},
+    {14, "Whirlpool",    true},
 }};
 
 inline constexpr std::array<CryptoNightCoverage, 6> kCryptoNightCoverage{{
