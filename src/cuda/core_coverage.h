@@ -36,12 +36,12 @@ inline constexpr std::array<CoreCoverage, 15> kCoreCoverage{{
 }};
 
 inline constexpr std::array<CryptoNightCoverage, 6> kCryptoNightCoverage{{
-    {0, "CN-Dark",       false},
-    {1, "CN-DarkLite",   false},
-    {2, "CN-Fast",       false},
-    {3, "CN-Lite",       false},
-    {4, "CN-Turtle",     false},
-    {5, "CN-TurtleLite", false},
+    {0, "CN-Dark",       true},
+    {1, "CN-DarkLite",   true},
+    {2, "CN-Fast",       true},
+    {3, "CN-Lite",       true},
+    {4, "CN-Turtle",     true},
+    {5, "CN-TurtleLite", true},
 }};
 
 inline constexpr unsigned int implemented_core_count()
