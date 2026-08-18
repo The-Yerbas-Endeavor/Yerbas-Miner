@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -299,23 +300,39 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                        "cudaStreamSynchronize fallback read failed");
         }
 
-        for (std::size_t i = 0; i < impl_->batch_size; ++i) {
-            ghostrider::Hash512 digest{};
-            if (stage_index == 0) {
-                std::array<std::uint8_t, 80> header = impl_->host_job.header;
-                const std::uint32_t nonce = start_nonce + static_cast<std::uint32_t>(i);
-                header[76] = static_cast<std::uint8_t>(nonce);
-                header[77] = static_cast<std::uint8_t>(nonce >> 8);
-                header[78] = static_cast<std::uint8_t>(nonce >> 16);
-                header[79] = static_cast<std::uint8_t>(nonce >> 24);
-                digest = ghostrider::stage_reference({header.data(), header.size()}, stage);
-            } else {
-                std::uint8_t* state = impl_->host_states.data() + i * kStateBytes;
-                digest = ghostrider::stage_reference({state, kStateBytes}, stage);
-            }
-            std::memcpy(impl_->host_states.data() + i * kStateBytes,
-                        digest.data(), kStateBytes);
+        const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
+        const std::size_t worker_count = std::min<std::size_t>(hw_threads, impl_->batch_size);
+        const std::size_t chunk = (impl_->batch_size + worker_count - 1) / worker_count;
+        std::vector<std::thread> fallback_workers;
+        fallback_workers.reserve(worker_count);
+
+        for (std::size_t worker = 0; worker < worker_count; ++worker) {
+            const std::size_t begin = worker * chunk;
+            const std::size_t end = std::min(impl_->batch_size, begin + chunk);
+            if (begin >= end) break;
+
+            fallback_workers.emplace_back([&, begin, end, stage_index, stage, start_nonce]() {
+                for (std::size_t i = begin; i < end; ++i) {
+                    ghostrider::Hash512 digest{};
+                    if (stage_index == 0) {
+                        std::array<std::uint8_t, 80> header = impl_->host_job.header;
+                        const std::uint32_t nonce = start_nonce + static_cast<std::uint32_t>(i);
+                        header[76] = static_cast<std::uint8_t>(nonce);
+                        header[77] = static_cast<std::uint8_t>(nonce >> 8);
+                        header[78] = static_cast<std::uint8_t>(nonce >> 16);
+                        header[79] = static_cast<std::uint8_t>(nonce >> 24);
+                        digest = ghostrider::stage_reference({header.data(), header.size()}, stage);
+                    } else {
+                        std::uint8_t* state = impl_->host_states.data() + i * kStateBytes;
+                        digest = ghostrider::stage_reference({state, kStateBytes}, stage);
+                    }
+                    std::memcpy(impl_->host_states.data() + i * kStateBytes,
+                                digest.data(), kStateBytes);
+                }
+            });
         }
+
+        for (auto& worker : fallback_workers) worker.join();
 
         check_cuda(cudaMemcpyAsync(impl_->d_states, impl_->host_states.data(),
                                    impl_->host_states.size(), cudaMemcpyHostToDevice,
