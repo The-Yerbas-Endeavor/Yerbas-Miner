@@ -201,6 +201,7 @@ if(YERBAS_ENABLE_CUDA)
     yerbas_generate_cuda_sph(bmw bmw.c sph_bmw.h)
     yerbas_generate_cuda_sph(groestl groestl.c sph_groestl.h)
     yerbas_generate_cuda_sph(jh jh.c sph_jh.h)
+    yerbas_generate_cuda_sph(skein skein.c sph_skein.h)
     yerbas_generate_cuda_sph(luffa luffa.c sph_luffa.h)
     yerbas_generate_cuda_sph(shavite shavite.c sph_shavite.h
         --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
