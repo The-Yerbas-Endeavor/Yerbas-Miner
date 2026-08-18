@@ -177,9 +177,6 @@ if(YERBAS_ENABLE_CUDA)
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
-    # Generate private CUDA-device copies directly from the exact sphlib files
-    # in the pinned Yerbas Core revision. Helper .c files used as textual
-    # includes are inlined by the generator before host-only includes are removed.
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(YERBAS_CUDA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cuda")
     file(MAKE_DIRECTORY "${YERBAS_CUDA_GENERATED_DIR}")
@@ -217,6 +214,26 @@ if(YERBAS_ENABLE_CUDA)
     yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h
         --inline-include-all "md_helper.c=${YERBAS_CORE_SRC}/crypto/md_helper.c")
 
+    function(yerbas_generate_cuda_cn_hash NAMESPACE SOURCE_FILE HEADER_FILE OUTPUT_FILE)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_cuda_cn_hash.py"
+                --namespace "${NAMESPACE}"
+                --source "${YERBAS_CORE_SRC}/cryptonote/${SOURCE_FILE}"
+                --header "${YERBAS_CORE_SRC}/cryptonote/${HEADER_FILE}"
+                --out "${YERBAS_CUDA_GENERATED_DIR}/${OUTPUT_FILE}"
+            RESULT_VARIABLE YERBAS_CUDA_CN_RESULT
+        )
+        if(NOT YERBAS_CUDA_CN_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed to generate CUDA CryptoNight primitive ${NAMESPACE}")
+        endif()
+    endfunction()
+
+    yerbas_generate_cuda_cn_hash(cn_blake256 c_blake256.c c_blake256.h cn_blake256_device.cuh)
+    yerbas_generate_cuda_cn_hash(cn_groestl c_groestl.c c_groestl.h cn_groestl_device.cuh)
+    yerbas_generate_cuda_cn_hash(cn_jh c_jh.c c_jh.h cn_jh_device.cuh)
+    yerbas_generate_cuda_cn_hash(cn_skein c_skein.c c_skein.h cn_skein_device.cuh)
+
     target_sources(yerbas-miner PRIVATE
         src/cuda/cuda_backend.cu
         src/cuda/blake_validation.cu
@@ -226,6 +243,7 @@ if(YERBAS_ENABLE_CUDA)
     target_include_directories(yerbas-miner PRIVATE
         "${YERBAS_CUDA_GENERATED_DIR}"
         "${YERBAS_CORE_SRC}/crypto"
+        "${YERBAS_CORE_SRC}/cryptonote"
     )
     target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
     set_target_properties(yerbas-miner PROPERTIES
@@ -259,12 +277,14 @@ if(BUILD_TESTING)
             src/cuda/blake_validation.cu
             src/cuda/skein_validation.cu
             src/cuda/sph_batch_validation.cu
+            src/cuda/cryptonight/cn_validation.cu
         )
         target_include_directories(cuda-keccak-validation PRIVATE
             src
             tests
             "${YERBAS_CUDA_GENERATED_DIR}"
             "${YERBAS_CORE_SRC}/crypto"
+            "${YERBAS_CORE_SRC}/cryptonote"
         )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
         set_target_properties(cuda-keccak-validation PROPERTIES
