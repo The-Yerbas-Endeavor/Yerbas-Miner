@@ -202,6 +202,11 @@ if(BUILD_TESTING)
     target_link_libraries(ghostrider-smoke PRIVATE yerbas-ghostrider-reference)
     add_test(NAME ghostrider-smoke COMMAND ghostrider-smoke)
 
+    add_executable(ghostrider-equivalence tests/ghostrider_equivalence.cpp)
+    target_include_directories(ghostrider-equivalence PRIVATE src ${YERBAS_CORE_SRC})
+    target_link_libraries(ghostrider-equivalence PRIVATE yerbas-ghostrider-reference)
+    add_test(NAME ghostrider-equivalence COMMAND ghostrider-equivalence)
+
     if(YERBAS_CUDA_AVAILABLE)
         add_executable(cuda-keccak-validation
             tests/cuda_keccak_validation.cpp
