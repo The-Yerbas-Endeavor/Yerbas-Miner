@@ -139,6 +139,7 @@ add_executable(yerbas-miner
     src/main.cpp
     src/miner.cpp
     src/config.cpp
+    src/cpu/cpu_worker_pool.cpp
     src/crypto/sha256.cpp
     src/stratum/stratum.cpp
 )
