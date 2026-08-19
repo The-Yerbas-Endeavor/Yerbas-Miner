@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "config.h"
-#include "cpu/cpu_worker_pool.h"
 
 #ifdef YERBAS_HAS_CUDA
 #include "cuda/cuda_backend.h"
@@ -55,7 +54,7 @@ private:
                       std::string& extranonce2_hex,
                       std::uint32_t nonce) const;
     bool mine_one(std::intptr_t socket_value);
-    bool mine_cpu_batch(std::intptr_t socket_value, unsigned int per_thread_override = 0);
+    bool mine_cpu_batch(std::intptr_t socket_value);
 #ifdef YERBAS_HAS_CUDA
     bool mine_gpu_batch(std::intptr_t socket_value);
     bool mine_hybrid_round(std::intptr_t socket_value);
@@ -73,7 +72,6 @@ private:
 
     AppConfig config_;
     Endpoint endpoint_;
-    std::unique_ptr<cpu::WorkerPool> cpu_pool_;
     std::uint64_t received_jobs_{0};
     std::uint64_t hashes_done_{0};
     std::uint64_t cpu_hashes_done_{0};
