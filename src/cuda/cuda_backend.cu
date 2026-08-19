@@ -106,8 +106,14 @@ __global__ void cryptonight_stage(std::uint8_t* states,
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
 
+    // Pack active CryptoNight scratchpads using the selected variant's real
+    // page size instead of spacing every hash at the 2 MiB CN-Fast maximum.
+    // This substantially reduces the memory/TLB working set for Dark/Lite/
+    // Turtle variants while preserving an isolated scratchpad per nonce.
+    const auto cfg = cryptonight::config_value(variant);
+    const std::size_t scratchpad_stride = static_cast<std::size_t>(cfg.page_size);
     std::uint8_t* state = states + index * kStateBytes;
-    std::uint8_t* scratchpad = scratchpads + index * kCnScratchpadStride;
+    std::uint8_t* scratchpad = scratchpads + index * scratchpad_stride;
     std::uint8_t digest[32];
 
     if (!cryptonight::slow_hash(variant, state, kStateBytes, scratchpad, digest)) return;
@@ -295,16 +301,19 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream),
                "cudaMemsetAsync candidate counter failed");
 
-    constexpr int threads = 256;
-    const int blocks = static_cast<int>((impl_->batch_size + threads - 1) / threads);
-    initialize_nonce_batch<<<blocks, threads, 0, impl_->stream>>>(start_nonce,
-                                                                  impl_->d_nonces,
-                                                                  impl_->batch_size);
+    constexpr int core_threads = 256;
+    constexpr int cn_threads = 64;
+    const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
+    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
+    initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
+                                                                           impl_->d_nonces,
+                                                                           impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Run all 18 GhostRider stages natively on the GPU. CryptoNight stages
-    // use one independent scratchpad slice per active nonce and produce the
-    // same zero-extended uint512 state used by Yerbas Core.
+    // Run all 18 GhostRider stages natively on the GPU. Conventional stages
+    // stay at 256 threads/block; CryptoNight uses a smaller 64-thread launch
+    // to reduce register/local-memory pressure on Pascal while retaining many
+    // resident warps for the latency-heavy scratchpad accesses.
     for (int stage_index = 0; stage_index < 18; ++stage_index) {
         const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
         const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
@@ -314,31 +323,31 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
             if (algorithm >= cryptonight::kVariantConfigs.size()) {
                 throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
             }
-            cryptonight_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_states,
-                                                                      impl_->batch_size,
-                                                                      algorithm,
-                                                                      impl_->d_cn_scratchpads);
+            cryptonight_stage<<<cn_blocks, cn_threads, 0, impl_->stream>>>(impl_->d_states,
+                                                                           impl_->batch_size,
+                                                                           algorithm,
+                                                                           impl_->d_cn_scratchpads);
             check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight stage launch failed");
         } else {
             if (!core::core512_implemented(algorithm)) {
                 throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
             }
-            core512_stage<<<blocks, threads, 0, impl_->stream>>>(impl_->d_job,
-                                                                 impl_->d_nonces,
-                                                                 impl_->d_states,
-                                                                 impl_->batch_size,
-                                                                 stage_index,
-                                                                 algorithm);
+            core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job,
+                                                                           impl_->d_nonces,
+                                                                           impl_->d_states,
+                                                                           impl_->batch_size,
+                                                                           stage_index,
+                                                                           algorithm);
             check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
         }
     }
 
-    collect_candidates<<<blocks, threads, 0, impl_->stream>>>(impl_->d_nonces,
-                                                               impl_->d_states,
-                                                               impl_->batch_size,
-                                                               impl_->d_job,
-                                                               impl_->d_candidates,
-                                                               impl_->d_candidate_count);
+    collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces,
+                                                                        impl_->d_states,
+                                                                        impl_->batch_size,
+                                                                        impl_->d_job,
+                                                                        impl_->d_candidates,
+                                                                        impl_->d_candidate_count);
     check_cuda(cudaGetLastError(), "collect_candidates launch failed");
 
     unsigned int count = 0;
