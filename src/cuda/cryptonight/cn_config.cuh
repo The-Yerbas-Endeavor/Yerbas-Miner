@@ -56,9 +56,8 @@ inline constexpr std::size_t max_scratchpad_bytes()
 }
 
 // A full mining batch cannot use the conventional-core 65536 nonce batch:
-// CN-Fast requires 2 MiB of scratchpad per active hash. Start conservatively
-// with at most 256 concurrent hashes (512 MiB scratchpad per GPU) and tune
-// upward later through the intensity policy once correctness is established.
-inline constexpr std::size_t kInitialMaxBatch = 256;
+// CN-Fast requires 2 MiB of scratchpad per active hash. Use 512 concurrent
+// hashes for the next hardware tuning step (~1 GiB worst-case scratchpad/GPU).
+inline constexpr std::size_t kInitialMaxBatch = 512;
 
 } // namespace yerbas::cuda::cryptonight
