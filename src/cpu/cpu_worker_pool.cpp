@@ -121,7 +121,25 @@ struct WorkerPool::Impl {
         for (auto& result : results) {
             combined.insert(combined.end(), result.begin(), result.end());
         }
-        return combined;
+        lock.unlock();
+
+        // The pinned Core GhostRider reference contains legacy code that was
+        // not written with a long-lived parallel worker pool in mind. A rare
+        // parallel false-positive here becomes an immediate pool error 23
+        // (low difficulty share). Re-hash only the tiny candidate set on the
+        // caller thread before submission. This is negligible work compared
+        // with the full batch and guarantees every CPU submission independently
+        // satisfies the exact target used by the pool job.
+        std::vector<Candidate> verified;
+        verified.reserve(combined.size());
+        for (const auto& candidate : combined) {
+            auto verify_header = header;
+            write_nonce(verify_header, candidate.nonce);
+            const ghostrider::Work work{verify_header.data(), verify_header.size()};
+            const auto hash = ghostrider::hash_reference(work);
+            if (hash_meets_target(hash, target)) verified.push_back(candidate);
+        }
+        return verified;
     }
 
     const unsigned int threads;
