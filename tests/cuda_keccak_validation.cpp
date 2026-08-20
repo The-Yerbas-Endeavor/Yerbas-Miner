@@ -7,6 +7,8 @@
 
 extern "C" {
 #include "c_keccak.h"
+#include "c_groestl.h"
+#include "sph_groestl.h"
 int aesb_single_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
 int aesb_pseudo_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
 }
@@ -256,11 +258,29 @@ int main()
     std::cout << "CryptoNight checkpoint OK: first memory-loop iteration matches Core\n";
 
     const std::uint8_t extra_selector = static_cast<std::uint8_t>(gpu_cp.post_keccak_state[0] & 3U);
+
+    std::array<std::uint8_t, 32> core_groestl{};
+    ::groestl(gpu_cp.post_keccak_state.data(),
+              static_cast<DataLength>(gpu_cp.post_keccak_state.size() * 8ULL),
+              core_groestl.data());
+
+    std::array<std::uint8_t, 32> sph_groestl{};
+    sph_groestl256_context sph_ctx{};
+    sph_groestl256_init(&sph_ctx);
+    sph_groestl256(&sph_ctx, gpu_cp.post_keccak_state.data(), gpu_cp.post_keccak_state.size());
+    sph_groestl256_close(&sph_ctx, sph_groestl.data());
+
     std::cout << "CryptoNight final extra-hash selector: "
               << static_cast<unsigned int>(extra_selector)
               << " (" << kExtraHashNames[extra_selector] << ")\n"
+              << "Core c_groestl CPU digest:        " << hex_string(core_groestl) << "\n"
+              << "sphlib Groestl-256 CPU digest:   " << hex_string(sph_groestl) << "\n"
               << "CryptoNight captured GPU finalizer: "
-              << hex_string(gpu_cp.final_extra_hash) << "\n";
+              << hex_string(gpu_cp.final_extra_hash) << "\n"
+              << "GPU matches Core c_groestl: "
+              << (gpu_cp.final_extra_hash == core_groestl ? "YES" : "NO") << "\n"
+              << "GPU matches sphlib Groestl-256: "
+              << (gpu_cp.final_extra_hash == sph_groestl ? "YES" : "NO") << "\n";
 
     std::cout << std::fixed << std::setprecision(3);
     for (std::uint8_t variant = 0; variant < 6; ++variant) {
