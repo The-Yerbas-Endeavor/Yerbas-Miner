@@ -34,28 +34,39 @@ def inline_core_dependencies(source: str, source_path: pathlib.Path) -> str:
     return source
 
 
-def rewrite_core_groestl_for_cuda(source: str) -> str:
-    """Remove c_groestl.c's byte-buffer -> uint32_t aliasing from Transform().
+def rewrite_groestl_word_aliasing(source: str, source_path: pathlib.Path) -> str:
+    """Remove x86-only uint32_t aliasing from the CryptoNote Groestl rounds.
 
-    Yerbas Core's CPU implementation casts arbitrary byte input directly to
-    uint32_t*. That works on the x86 consensus path but is undefined C aliasing
-    and can be optimized differently by NVCC. Reconstruct the 16 little-endian
-    message words explicitly before F512 so CUDA observes exactly the x86 byte
-    interpretation for both direct message blocks and ctx->buffer padding.
+    c_groestl.c mutates a byte buffer through ``uint32_t *x32``. That is fine
+    for the original x86 C build but is not a safe assumption for CUDA local
+    memory. Convert those fixed round-constant updates to explicit little-endian
+    loads/stores while leaving the Core round structure and T tables unchanged.
     """
-    needle = '    F512(ctx->chaining,(uint32_t*)input);'
-    replacement = '''    uint32_t m_words[2*COLS512];
-    for (int wi = 0; wi < 2*COLS512; ++wi) {
-      const uint8_t *p = input + 4 * wi;
-      m_words[wi] = ((uint32_t)p[0]) |
-                    ((uint32_t)p[1] << 8) |
-                    ((uint32_t)p[2] << 16) |
-                    ((uint32_t)p[3] << 24);
-    }
-    F512(ctx->chaining, m_words);'''
-    if needle not in source:
-        raise RuntimeError("could not locate Core Groestl Transform input cast")
-    return source.replace(needle, replacement, 1)
+    if source_path.name != "c_groestl.c":
+        return source
+
+    source = re.sub(r'(?m)^\s*uint32_t\s*\*\s*x32\s*=\s*\(uint32_t\s*\*\)x\s*;\s*$', '', source)
+
+    # x32[n] ^= expression;
+    source = re.sub(
+        r'(?m)^(\s*)x32\[\s*(\d+)\s*\]\s*\^=\s*([^;]+);',
+        lambda m: (
+            f"{m.group(1)}yerbas_cn_store32le(x + {int(m.group(2)) * 4}, "
+            f"yerbas_cn_load32le(x + {int(m.group(2)) * 4}) ^ ({m.group(3).strip()}));"
+        ),
+        source,
+    )
+
+    # x32[n] = ~x32[n];
+    source = re.sub(
+        r'(?m)^(\s*)x32\[\s*(\d+)\s*\]\s*=\s*~\s*x32\[\s*\2\s*\]\s*;',
+        lambda m: (
+            f"{m.group(1)}yerbas_cn_store32le(x + {int(m.group(2)) * 4}, "
+            f"~yerbas_cn_load32le(x + {int(m.group(2)) * 4}));"
+        ),
+        source,
+    )
+    return source
 
 
 def helpers() -> str:
@@ -63,6 +74,20 @@ def helpers() -> str:
 typedef unsigned char BitSequence;
 typedef unsigned long long DataLength;
 
+__device__ __forceinline__ uint32_t yerbas_cn_load32le(const unsigned char *p)
+{
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+__device__ __forceinline__ void yerbas_cn_store32le(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
 __device__ __forceinline__ void *yerbas_cn_memcpy(void *dst, const void *src, size_t n)
 {
     unsigned char *d = static_cast<unsigned char *>(dst);
@@ -117,8 +142,7 @@ def main() -> int:
     header = pathlib.Path(a.header).read_text(encoding='utf-8')
     source = source_path.read_text(encoding='utf-8')
     source = inline_core_dependencies(source, source_path)
-    if a.namespace == 'cn_groestl':
-        source = rewrite_core_groestl_for_cuda(source)
+    source = rewrite_groestl_word_aliasing(source, source_path)
     header = decorate_prototypes(strip_includes(strip_c_linkage(header)))
     source = decorate_source(strip_includes(strip_c_linkage(source)))
 
