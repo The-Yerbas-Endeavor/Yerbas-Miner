@@ -2,12 +2,14 @@
 #include "cuda/cryptonight/cn_validation.h"
 #include "ghostrider/ghostrider.h"
 #include "ghostrider_vectors.h"
+#include "slow-hash.h"
 
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 
 namespace {
 using Hook = yerbas::cuda::Hash512 (*)(int, const std::uint8_t*, std::size_t);
@@ -39,6 +41,16 @@ constexpr ValidationCase kCases[] = {
 constexpr const char* kCnNames[] = {
     "CN-Dark", "CN-DarkLite", "CN-Fast", "CN-Lite", "CN-Turtle", "CN-TurtleLite"
 };
+
+template <typename Container>
+std::string hex_string(const Container& value)
+{
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (const auto byte : value)
+        out << std::setw(2) << static_cast<unsigned int>(byte);
+    return out.str();
+}
 }
 
 int main()
@@ -74,6 +86,27 @@ int main()
     }
     std::cout << "CUDA cores 0-14 match pinned Yerbas Core for 80-byte and 64-byte inputs\n";
 
+    // Checkpoint 1: compare the exact 32-byte prefix produced by Core's
+    // cn_fast_hash()/hash_process() against CUDA's Keccak-1600 state before
+    // any AES expansion or scratchpad work occurs. If this fails, the bug is
+    // in Keccak/state initialization; if it passes, the first divergence is
+    // later in the CryptoNight slow-hash pipeline.
+    std::array<std::uint8_t, 32> cpu_keccak{};
+    crypto::cryptonight_dark_fast_hash(
+        reinterpret_cast<const char*>(stage_input.data()),
+        reinterpret_cast<char*>(cpu_keccak.data()),
+        static_cast<std::uint32_t>(stage_input.size()));
+    const auto gpu_keccak = yerbas::cuda::cryptonight::validation_keccak_prefix(
+        0, stage_input.data(), stage_input.size());
+
+    if (cpu_keccak != gpu_keccak) {
+        std::cerr << "CryptoNight checkpoint FAILED: initial Keccak/hash_process state diverges\n"
+                  << "  CPU: " << hex_string(cpu_keccak) << "\n"
+                  << "  GPU: " << hex_string(gpu_keccak) << "\n";
+        return 55;
+    }
+    std::cout << "CryptoNight checkpoint OK: initial Keccak/hash_process state matches Core\n";
+
     std::cout << std::fixed << std::setprecision(3);
     for (std::uint8_t variant = 0; variant < 6; ++variant) {
         std::cout << "Validating " << kCnNames[variant] << "..." << std::flush;
@@ -98,7 +131,10 @@ int main()
         }
         if (!match) {
             std::cerr << " FAILED\nCUDA " << kCnNames[variant]
-                      << " mismatch for 64-byte intermediate state\n";
+                      << " mismatch for 64-byte intermediate state\n"
+                      << "  CPU final: " << hex_string(cpu) << "\n"
+                      << "  GPU final: " << hex_string(gpu) << "\n"
+                      << "  Initial Keccak checkpoint already matched; divergence is after hash_process\n";
             return 60 + variant;
         }
         std::cout << " OK | kernel " << kernel_ms << " ms"
@@ -130,7 +166,9 @@ int main()
         return 80;
     }
     if (candidates.front().hash != cpu_full) {
-        std::cerr << "CUDA full GhostRider pipeline DOES NOT match CPU reference for nonce 0\n";
+        std::cerr << "CUDA full GhostRider pipeline DOES NOT match CPU reference for nonce 0\n"
+                  << "  CPU: " << hex_string(cpu_full) << "\n"
+                  << "  GPU: " << hex_string(candidates.front().hash) << "\n";
         return 81;
     }
     std::cout << "CUDA full 18-stage GhostRider pipeline matches CPU reference for nonce 0\n";
