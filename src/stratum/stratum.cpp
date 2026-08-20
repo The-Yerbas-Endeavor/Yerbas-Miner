@@ -68,11 +68,6 @@ const char* gpu_color(int device_id)
     return kGpuColors[index];
 }
 
-struct CpuCandidate {
-    std::uint32_t nonce{0};
-    std::string extranonce2;
-};
-
 void close_socket(SocketHandle socket)
 {
     if (socket == kInvalidSocket) return;
@@ -352,7 +347,7 @@ int Client::run(std::atomic_bool& stop_requested)
         if (config_.miner.cpu_enabled)
             std::cout << "[hybrid] CPU workers will mine; GPU workers remain idle until validated CUDA stages are complete.\n";
         else {
-            std::cerr << "No usable mining backend: CPU is disabled and CUDA pipeline is incomplete.\n";
+            std::cerr << "No usable mining backend: CPU is disabled and CUDA pipeline incomplete.\n";
             return 3;
         }
     }
@@ -576,9 +571,20 @@ bool Client::mine_one(std::intptr_t socket_value)
 bool Client::mine_cpu_batch(std::intptr_t socket_value)
 {
     if (!config_.miner.cpu_enabled) return true;
-    const unsigned int threads = config_.miner.threads == 0 ? std::max(1u, std::thread::hardware_concurrency()) : std::max(1u, config_.miner.threads);
-    const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 8U : config_.miner.cpu_batch;
+    const unsigned int threads = config_.miner.threads == 0
+        ? std::max(1u, std::thread::hardware_concurrency())
+        : std::max(1u, config_.miner.threads);
+    const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 16U : config_.miner.cpu_batch;
     const std::uint64_t total = static_cast<std::uint64_t>(threads) * per_thread;
+
+    static std::unique_ptr<cpu::WorkerPool> worker_pool;
+    static unsigned int worker_pool_threads = 0;
+    if (!worker_pool || worker_pool_threads != threads) {
+        worker_pool = std::make_unique<cpu::WorkerPool>(threads);
+        worker_pool_threads = threads;
+        std::cout << "[CPU] persistent worker pool initialized | threads=" << threads << '\n';
+    }
+
 #ifdef YERBAS_HAS_CUDA
     const bool hybrid_nonce_partition = gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty();
 #else
@@ -586,36 +592,25 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
 #endif
     const std::uint64_t cpu_region_start = hybrid_nonce_partition ? kHybridCpuStart : 0ULL;
     if (static_cast<std::uint64_t>(nonce_) < cpu_region_start) nonce_ = static_cast<std::uint32_t>(cpu_region_start);
-    if (static_cast<std::uint64_t>(nonce_) + total > kNonceSpace) { ++extranonce2_counter_; nonce_ = static_cast<std::uint32_t>(cpu_region_start); }
+    if (static_cast<std::uint64_t>(nonce_) + total > kNonceSpace) {
+        ++extranonce2_counter_;
+        nonce_ = static_cast<std::uint32_t>(cpu_region_start);
+    }
+
     std::array<std::uint8_t, 80> base_header{};
     std::string extranonce2;
     if (!build_header(base_header, extranonce2, nonce_)) return true;
     const std::uint32_t batch_start = nonce_;
     nonce_ = static_cast<std::uint32_t>(static_cast<std::uint64_t>(nonce_) + total);
-    std::vector<std::future<std::vector<CpuCandidate>>> futures;
-    futures.reserve(threads);
-    for (unsigned int t = 0; t < threads; ++t) {
-        const std::uint32_t start = batch_start + t * per_thread;
-        futures.emplace_back(std::async(std::launch::async, [this, base_header, extranonce2, start, per_thread]() mutable {
-            std::vector<CpuCandidate> found;
-            for (unsigned int i = 0; i < per_thread; ++i) {
-                const std::uint32_t nonce = start + i;
-                auto header = base_header; write_nonce(header, nonce);
-                const ghostrider::Work work{header.data(), header.size()};
-                const auto hash = ghostrider::hash_reference(work);
-                if (hash_meets_target(hash, target_le_)) found.push_back({nonce, extranonce2});
-            }
-            return found;
-        }));
+
+    const auto candidates = worker_pool->run(base_header, target_le_, batch_start, per_thread);
+    for (const auto& candidate : candidates) {
+        std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
     }
-    for (auto& future : futures) {
-        const auto candidates = future.get();
-        for (const auto& candidate : candidates) {
-            std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-            if (!submit_share(socket_value, candidate.extranonce2, candidate.nonce, "CPU")) return false;
-        }
-    }
-    cpu_hashes_done_ += total; hashes_done_ += total;
+
+    cpu_hashes_done_ += total;
+    hashes_done_ += total;
     return true;
 }
 
@@ -695,7 +690,22 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         const std::uint32_t start = worker.next_nonce; worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count); auto* engine = worker.engine.get();
         pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
     }
-    if (!mine_cpu_batch(socket_value)) return false;
+
+    // Keep the persistent CPU pool fed for the full duration of the GPU round.
+    // Previously the CPU executed exactly one small batch and then sat idle
+    // waiting for the much longer CUDA scan, which produced ~20% utilization.
+    bool gpu_ready = false;
+    do {
+        if (!mine_cpu_batch(socket_value)) return false;
+        gpu_ready = true;
+        for (auto& task : pending) {
+            if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+                gpu_ready = false;
+                break;
+            }
+        }
+    } while (!gpu_ready);
+
     for (auto& task : pending) {
         const auto candidates = task.future.get(); const auto count = task.worker->engine->batch_size(); task.worker->hashes_done += count; hashes_done_ += count;
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
