@@ -53,6 +53,7 @@ void apply_json(AppConfig& cfg, const json& root)
         if (g.contains("enabled")) cfg.gpu.enabled = g.at("enabled").get<bool>();
         if (g.contains("devices")) cfg.gpu.devices = g.at("devices").get<std::vector<int>>();
         if (g.contains("intensity")) cfg.gpu.intensity = g.at("intensity").get<int>();
+        if (g.contains("skip_validation")) cfg.gpu.skip_validation = g.at("skip_validation").get<bool>();
     }
     if (root.contains("logging")) {
         const auto& l = root.at("logging");
@@ -92,14 +93,12 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--devices") cfg.gpu.devices = parse_devices(require_value(argc, argv, i, "--devices"));
         else if (arg == "--intensity") cfg.gpu.intensity = std::stoi(require_value(argc, argv, i, "--intensity"));
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
+        else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
         else if (arg == "--help" || arg == "-h") {}
         else throw std::runtime_error("Unknown option: " + arg);
     }
 
-    // Auto CPU batching is normalized here so all scheduler paths see the same
-    // tuned chunk size. 16 hashes/thread cuts launch overhead roughly in half
-    // versus the old automatic value while preserving quick Stratum job swaps.
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
     return cfg;
 }
@@ -119,6 +118,7 @@ void print_config_help(const char* program)
         << "  --devices 0,1       GPU device ids\n"
         << "  --intensity N       GPU intensity (0 = auto)\n"
         << "  --no-gpu            Disable GPU backend\n"
+        << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
         << "  -h, --help          Show this help\n";
 }
