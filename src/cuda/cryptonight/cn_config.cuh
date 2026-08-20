@@ -56,8 +56,8 @@ inline constexpr std::size_t max_scratchpad_bytes()
 }
 
 // Hardware testing on GTX 1080 Ti (Pascal, CC 6.1) showed 1024 active hashes
-// materially outperforming 2048. CN-Fast remains the worst case at ~2 GiB
-// of scratchpad per GPU for a 1024-hash batch.
-inline constexpr std::size_t kInitialMaxBatch = 1024;
+// far ahead of the original small batches, while 2048 regressed. Test the
+// midpoint at 1536; CN-Fast uses ~3 GiB of scratchpad per GPU at this size.
+inline constexpr std::size_t kInitialMaxBatch = 1536;
 
 } // namespace yerbas::cuda::cryptonight
