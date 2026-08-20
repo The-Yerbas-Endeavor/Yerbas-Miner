@@ -17,7 +17,7 @@ struct ValidationCheckpoints {
     std::array<std::uint8_t, 64> loop1024_state{};
     std::array<std::uint8_t, 64> final_loop_state{};
     std::array<std::uint8_t, 128> collapsed_text{};
-    std::array<std::uint8_t, 64> post_keccak_state{};
+    std::array<std::uint8_t, 200> post_keccak_state{};
     std::array<std::uint8_t, 32> final_extra_hash{};
     std::uint8_t extra_hash_selector{0};
 };
