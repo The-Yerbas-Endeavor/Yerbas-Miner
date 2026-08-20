@@ -27,6 +27,9 @@ struct GpuConfig {
     // that device 0 is always the GPU the user intended to mine with.
     std::vector<int> devices{};
     int intensity{0};
+    // Skip the startup CUDA readiness probe after the backend has already been
+    // validated on the machine. Full mining coverage is still required.
+    bool skip_validation{false};
 };
 
 struct LoggingConfig {
