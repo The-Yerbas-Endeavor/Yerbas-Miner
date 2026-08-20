@@ -63,8 +63,10 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
 
     std::uint8_t expanded[240];
     aes256_expand_key(state, expanded);
+
+    auto* expanded_key_prefix = reinterpret_cast<std::uint8_t*>(&output->expanded_key_prefix);
     #pragma unroll
-    for (int i = 0; i < 64; ++i) output->expanded_key_prefix[i] = expanded[i];
+    for (int i = 0; i < 64; ++i) expanded_key_prefix[i] = expanded[i];
 
     const std::size_t init_rounds = cfg.page_size / 128U;
     for (std::size_t i = 0; i < init_rounds; ++i) {
@@ -74,8 +76,10 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
         for (int b = 0; b < 128; ++b)
             scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
     }
+
+    auto* scratchpad_prefix = reinterpret_cast<std::uint8_t*>(&output->scratchpad_prefix);
     #pragma unroll
-    for (int i = 0; i < 128; ++i) output->scratchpad_prefix[i] = scratchpad[i];
+    for (int i = 0; i < 128; ++i) scratchpad_prefix[i] = scratchpad[i];
 
     std::uint8_t a[16], b[16], c[16], t[16];
     #pragma unroll
@@ -113,12 +117,13 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
     cn_store64(a + 8, a1);
     copy16(b, c);
 
+    auto* first_loop_state = reinterpret_cast<std::uint8_t*>(&output->first_loop_state);
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
-        output->first_loop_state[i] = a[i];
-        output->first_loop_state[16 + i] = b[i];
-        output->first_loop_state[32 + i] = c[i];
-        output->first_loop_state[48 + i] = t[i];
+        first_loop_state[i] = a[i];
+        first_loop_state[16 + i] = b[i];
+        first_loop_state[32 + i] = c[i];
+        first_loop_state[48 + i] = t[i];
     }
     *ok = 1;
 }
