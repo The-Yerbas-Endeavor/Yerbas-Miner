@@ -186,6 +186,10 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
     #pragma unroll
     for (int i = 0; i < 64; ++i) post_keccak[i] = state[i];
 
+    output->extra_hash_selector = static_cast<std::uint8_t>(state[0] & 3U);
+    auto* final_hash = reinterpret_cast<std::uint8_t*>(&output->final_extra_hash);
+    dispatch_extra_hash(output->extra_hash_selector, state, final_hash);
+
     *ok = 1;
 }
 
@@ -331,6 +335,7 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
     std::memcpy(state.data() + 64, text.data(), 128);
     ::keccakf(reinterpret_cast<std::uint64_t*>(state.data()), 24);
     std::memcpy(out.post_keccak_state.data(), state.data(), out.post_keccak_state.size());
+    out.extra_hash_selector = static_cast<std::uint8_t>(state[0] & 3U);
 
     oaes_free(&raw_ctx);
     return out;
