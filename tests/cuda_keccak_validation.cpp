@@ -4,7 +4,9 @@
 #include "ghostrider_vectors.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 
 namespace {
@@ -72,13 +74,24 @@ int main()
     }
     std::cout << "CUDA cores 0-14 match pinned Yerbas Core for 80-byte and 64-byte inputs\n";
 
+    std::cout << std::fixed << std::setprecision(3);
     for (std::uint8_t variant = 0; variant < 6; ++variant) {
         std::cout << "Validating " << kCnNames[variant] << "..." << std::flush;
         const std::uint8_t encoded_stage = static_cast<std::uint8_t>(
             yerbas::ghostrider::kCryptoNightStageFlag | variant);
+
+        const auto cpu_start = std::chrono::steady_clock::now();
         const auto cpu = yerbas::ghostrider::stage_reference(stage_work, encoded_stage);
+        const auto cpu_stop = std::chrono::steady_clock::now();
+        const double cpu_ms = std::chrono::duration<double, std::milli>(cpu_stop - cpu_start).count();
+
+        float kernel_ms = 0.0F;
+        const auto gpu_start = std::chrono::steady_clock::now();
         const auto gpu = yerbas::cuda::cryptonight::validation_hash(
-            0, variant, stage_input.data(), stage_input.size());
+            0, variant, stage_input.data(), stage_input.size(), &kernel_ms);
+        const auto gpu_stop = std::chrono::steady_clock::now();
+        const double gpu_total_ms = std::chrono::duration<double, std::milli>(gpu_stop - gpu_start).count();
+
         bool match = true;
         for (std::size_t i = 0; i < gpu.size(); ++i) {
             if (gpu[i] != cpu[i]) { match = false; break; }
@@ -88,9 +101,12 @@ int main()
                       << " mismatch for 64-byte intermediate state\n";
             return 60 + variant;
         }
-        std::cout << " OK\n";
+        std::cout << " OK | kernel " << kernel_ms << " ms"
+                  << " | GPU total " << gpu_total_ms << " ms"
+                  << " | CPU " << cpu_ms << " ms\n";
     }
 
     std::cout << "CUDA CryptoNight variants 0-5 match pinned Yerbas Core\n";
+    std::cout << "CryptoNight profiling baseline complete; kernel time excludes allocation/copy overhead.\n";
     return 0;
 }
