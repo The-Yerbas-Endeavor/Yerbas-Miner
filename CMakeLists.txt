@@ -172,8 +172,17 @@ if(YERBAS_ENABLE_CUDA)
     enable_language(CUDA)
     set(YERBAS_CUDA_AVAILABLE ON)
 
-    set(YERBAS_CUDA_ARCHITECTURES "52;60;61;70;75;80;86;89;90" CACHE STRING
-        "CUDA compute capabilities built into Yerbas-Miner")
+    # Local developer builds compile only for GPUs present on the machine so
+    # CUDA iteration stays fast. CI/release builds produce a portable fat
+    # binary spanning the supported NVIDIA generations. Either mode can be
+    # overridden explicitly with -DYERBAS_CUDA_ARCHITECTURES=...
+    if(DEFINED ENV{CI} AND NOT "$ENV{CI}" STREQUAL "" AND NOT "$ENV{CI}" STREQUAL "false")
+        set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "52;60;61;70;75;80;86;89;90")
+    else()
+        set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "native")
+    endif()
+    set(YERBAS_CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES_DEFAULT}" CACHE STRING
+        "CUDA compute capabilities built into Yerbas-Miner (native locally; broad set in CI)")
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
@@ -285,7 +294,7 @@ if(BUILD_TESTING)
             tests
             "${YERBAS_CUDA_GENERATED_DIR}"
             "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonote"
+            "${YERBAS_CORE_SRC}/cryptonight"
         )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
         set_target_properties(cuda-keccak-validation PROPERTIES
