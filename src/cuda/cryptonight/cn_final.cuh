@@ -1,26 +1,14 @@
 #pragma once
 
-// BLAKE-256 is generated directly from pinned Yerbas Core c_blake256.c.
-// Groestl-256, JH-256 and Skein-256 reuse the already generated sphlib device
-// implementations from the same pinned Yerbas Core revision. This avoids
-// dragging the cryptonote headers' host-only include graph into CUDA while
-// preserving the same standardized 256-bit primitives used by cn_slow_hash.
+// CryptoNight's four final extra hashes must match the exact implementations
+// used by pinned Yerbas Core. Use mechanically generated device versions of
+// the Core cryptonote primitives rather than substituting sphlib variants.
 #include "cn_blake256_device.cuh"
-#include "groestl_device_types.cuh"
-#include "jh_device_types.cuh"
-#include "skein_device_types.cuh"
+#include "cn_groestl_device.cuh"
+#include "cn_jh_device.cuh"
+#include "cn_skein_device.cuh"
 
 #include <cstdint>
-
-namespace yerbas::cuda::cryptonight::cn_groestl_sph {
-#include "groestl_device_impl.cuh"
-}
-namespace yerbas::cuda::cryptonight::cn_jh_sph {
-#include "jh_device_impl.cuh"
-}
-namespace yerbas::cuda::cryptonight::cn_skein_sph {
-#include "skein_device_impl.cuh"
-}
 
 namespace yerbas::cuda::cryptonight {
 
@@ -32,27 +20,18 @@ __device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
     case 0:
         cn_blake256::blake256_hash(out, state, 200);
         break;
-    case 1: {
-        sph_groestl256_context ctx;
-        cn_groestl_sph::sph_groestl256_init(&ctx);
-        cn_groestl_sph::sph_groestl256(&ctx, state, 200);
-        cn_groestl_sph::sph_groestl256_close(&ctx, out);
+    case 1:
+        // Core slow-hash.c calls groestl(input, len * 8, output).
+        cn_groestl::groestl(state, 200ULL * 8ULL, out);
         break;
-    }
-    case 2: {
-        sph_jh256_context ctx;
-        cn_jh_sph::sph_jh256_init(&ctx);
-        cn_jh_sph::sph_jh256(&ctx, state, 200);
-        cn_jh_sph::sph_jh256_close(&ctx, out);
+    case 2:
+        // Core slow-hash.c calls jh_hash(HASH_SIZE * 8, input, 8 * len, output).
+        (void)cn_jh::jh_hash(256, state, 200ULL * 8ULL, out);
         break;
-    }
-    default: {
-        sph_skein256_context ctx;
-        cn_skein_sph::sph_skein256_init(&ctx);
-        cn_skein_sph::sph_skein256(&ctx, state, 200);
-        cn_skein_sph::sph_skein256_close(&ctx, out);
+    default:
+        // Core slow-hash.c calls c_skein_hash(8 * HASH_SIZE, input, 8 * len, output).
+        (void)cn_skein::c_skein_hash(256, state, 200ULL * 8ULL, out);
         break;
-    }
     }
 }
 
