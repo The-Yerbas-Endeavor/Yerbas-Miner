@@ -29,7 +29,52 @@ __global__ void validation_kernel(std::uint8_t variant,
     *ok = success ? 1 : 0;
 }
 
+__global__ void keccak_prefix_kernel(const std::uint8_t* input,
+                                     std::size_t length,
+                                     std::uint8_t* output)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    std::uint8_t state[200];
+    keccak1600(input, length, state);
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) output[i] = state[i];
+}
+
 } // namespace
+
+Hash256 validation_keccak_prefix(int device_id,
+                                 const std::uint8_t* input,
+                                 std::size_t length)
+{
+    if (input == nullptr || length == 0)
+        throw std::invalid_argument("CryptoNight Keccak validation input must not be empty");
+
+    check(cudaSetDevice(device_id), "cudaSetDevice failed");
+    std::uint8_t* d_input = nullptr;
+    std::uint8_t* d_output = nullptr;
+
+    try {
+        check(cudaMalloc(reinterpret_cast<void**>(&d_input), length), "cudaMalloc CN Keccak input failed");
+        check(cudaMalloc(reinterpret_cast<void**>(&d_output), 32), "cudaMalloc CN Keccak output failed");
+        check(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice), "cudaMemcpy CN Keccak input failed");
+
+        keccak_prefix_kernel<<<1, 1>>>(d_input, length, d_output);
+        check(cudaGetLastError(), "CryptoNight Keccak checkpoint kernel launch failed");
+        check(cudaDeviceSynchronize(), "CryptoNight Keccak checkpoint kernel failed");
+
+        Hash256 out{};
+        check(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost),
+              "cudaMemcpy CN Keccak checkpoint failed");
+
+        cudaFree(d_output);
+        cudaFree(d_input);
+        return out;
+    } catch (...) {
+        if (d_output) cudaFree(d_output);
+        if (d_input) cudaFree(d_input);
+        throw;
+    }
+}
 
 Hash256 validation_hash(int device_id,
                         std::uint8_t variant,
