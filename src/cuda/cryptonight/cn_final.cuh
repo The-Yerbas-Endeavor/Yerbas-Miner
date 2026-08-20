@@ -1,19 +1,15 @@
 #pragma once
 
-// BLAKE-256 uses the exact CryptoNote implementation from pinned Yerbas Core.
-// Groestl/JH/Skein use the already validated sphlib device implementations.
-// The Core c_groestl.c translation is not byte-for-byte equivalent on CUDA,
-// despite receiving the exact matching 200-byte post-Keccak state.
+// BLAKE-256 and Groestl-256 use the exact CryptoNote implementations from
+// pinned Yerbas Core. JH/Skein retain the already generated sphlib device
+// implementations for now.
 #include "cn_blake256_device.cuh"
-#include "groestl_device_types.cuh"
+#include "cn_groestl_device.cuh"
 #include "jh_device_types.cuh"
 #include "skein_device_types.cuh"
 
 #include <cstdint>
 
-namespace yerbas::cuda::cryptonight::cn_groestl_sph {
-#include "groestl_device_impl.cuh"
-}
 namespace yerbas::cuda::cryptonight::cn_jh_sph {
 #include "jh_device_impl.cuh"
 }
@@ -32,10 +28,17 @@ __device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
         cn_blake256::blake256_hash(out, state, 200);
         break;
     case 1: {
-        sph_groestl256_context ctx;
-        cn_groestl_sph::sph_groestl256_init(&ctx);
-        cn_groestl_sph::sph_groestl256(&ctx, state, 200);
-        cn_groestl_sph::sph_groestl256_close(&ctx, out);
+        // Core c_groestl.c repeatedly views the input as uint32_t*. On x86
+        // unaligned accesses are tolerated, but a byte-aligned CUDA local
+        // array can produce different device behavior. Stage all 200 bytes in
+        // explicitly 32-bit-aligned storage before entering the exact Core
+        // implementation so those loads have the same little-endian word view.
+        std::uint32_t aligned_words[50];
+        auto* aligned = reinterpret_cast<std::uint8_t*>(aligned_words);
+        #pragma unroll
+        for (int i = 0; i < 200; ++i)
+            aligned[i] = state[i];
+        cn_groestl::groestl(aligned, 200ULL * 8ULL, out);
         break;
     }
     case 2: {
