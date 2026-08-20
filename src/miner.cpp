@@ -93,8 +93,13 @@ int Miner::run()
             }
             std::cout << '\n';
 
-            cuda::BatchEngine readiness_probe(devices.front().id, 1);
-            const bool pipeline_ready = readiness_probe.hash_pipeline_ready();
+            bool pipeline_ready = cuda::full_ghostrider_cuda_coverage();
+            if (!config_.gpu.skip_validation) {
+                cuda::BatchEngine readiness_probe(devices.front().id, 1);
+                pipeline_ready = readiness_probe.hash_pipeline_ready();
+            } else {
+                std::cout << "CUDA startup validation: skipped by configuration\n";
+            }
             const bool native_ready = cuda::full_ghostrider_cuda_coverage();
             for (const auto& device : devices) {
                 std::cout << "[GPU " << device.id << "] CUDA ready | CC "
