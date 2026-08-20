@@ -5,8 +5,19 @@
 
 #include <cuda_runtime.h>
 
+extern "C" {
+#include "c_keccak.h"
+#include "oaes_lib.h"
+int aesb_single_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
+int aesb_pseudo_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
+}
+
+#include <array>
+#include <cstring>
+#include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace yerbas::cuda::cryptonight {
 namespace {
@@ -15,6 +26,21 @@ void check(cudaError_t status, const char* what)
 {
     if (status != cudaSuccess)
         throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(status));
+}
+
+__device__ __forceinline__ void checkpoint_state(std::uint8_t* dst,
+                                                 const std::uint8_t a[16],
+                                                 const std::uint8_t b[16],
+                                                 const std::uint8_t c[16],
+                                                 const std::uint8_t t[16])
+{
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        dst[i] = a[i];
+        dst[16 + i] = b[i];
+        dst[32 + i] = c[i];
+        dst[48 + i] = t[i];
+    }
 }
 
 __global__ void validation_kernel(std::uint8_t variant,
@@ -86,46 +112,253 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
+        c[i] = 0;
+        t[i] = 0;
     }
 
     const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
 
-    std::size_t j = cn_index(a, cfg.aes_rounds);
-    std::uint8_t* slot = scratchpad + j * 16U;
-    aes_single_round(slot, c, a);
-    #pragma unroll
-    for (int k = 0; k < 16; ++k) slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
-    variant1_mutate(slot);
+    for (std::uint32_t iteration = 0; iteration < cfg.iterations; ++iteration) {
+        std::size_t j = cn_index(a, cfg.aes_rounds);
+        std::uint8_t* slot = scratchpad + j * 16U;
 
-    j = cn_index(c, cfg.aes_rounds);
-    slot = scratchpad + j * 16U;
-    copy16(t, slot);
+        aes_single_round(slot, c, a);
+        #pragma unroll
+        for (int k = 0; k < 16; ++k) slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
+        variant1_mutate(slot);
 
-    const std::uint64_t c0 = cn_load64(c);
-    const std::uint64_t t0 = cn_load64(t);
-    const std::uint64_t lo = c0 * t0;
-    const std::uint64_t hi = __umul64hi(c0, t0);
+        j = cn_index(c, cfg.aes_rounds);
+        slot = scratchpad + j * 16U;
+        copy16(t, slot);
 
-    std::uint64_t a0 = cn_load64(a) + hi;
-    std::uint64_t a1 = cn_load64(a + 8) + lo;
-    cn_store64(slot, a0);
-    cn_store64(slot + 8, a1 ^ tweak);
+        const std::uint64_t c0 = cn_load64(c);
+        const std::uint64_t t0 = cn_load64(t);
+        const std::uint64_t lo = c0 * t0;
+        const std::uint64_t hi = __umul64hi(c0, t0);
 
-    a0 ^= t0;
-    a1 ^= cn_load64(t + 8);
-    cn_store64(a, a0);
-    cn_store64(a + 8, a1);
-    copy16(b, c);
+        std::uint64_t a0 = cn_load64(a) + hi;
+        std::uint64_t a1 = cn_load64(a + 8) + lo;
+        cn_store64(slot, a0);
+        cn_store64(slot + 8, a1 ^ tweak);
 
-    auto* first_loop_state = reinterpret_cast<std::uint8_t*>(&output->first_loop_state);
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        first_loop_state[i] = a[i];
-        first_loop_state[16 + i] = b[i];
-        first_loop_state[32 + i] = c[i];
-        first_loop_state[48 + i] = t[i];
+        a0 ^= t0;
+        a1 ^= cn_load64(t + 8);
+        cn_store64(a, a0);
+        cn_store64(a + 8, a1);
+        copy16(b, c);
+
+        std::uint8_t* snapshot = nullptr;
+        if (iteration == 0)
+            snapshot = reinterpret_cast<std::uint8_t*>(&output->first_loop_state);
+        else if (iteration == 1)
+            snapshot = reinterpret_cast<std::uint8_t*>(&output->second_loop_state);
+        else if (iteration == 15)
+            snapshot = reinterpret_cast<std::uint8_t*>(&output->loop16_state);
+        else if (iteration == 1023)
+            snapshot = reinterpret_cast<std::uint8_t*>(&output->loop1024_state);
+        else if (iteration + 1U == cfg.iterations)
+            snapshot = reinterpret_cast<std::uint8_t*>(&output->final_loop_state);
+
+        if (snapshot != nullptr) checkpoint_state(snapshot, a, b, c, t);
     }
+
+    #pragma unroll
+    for (int i = 0; i < 128; ++i) text[i] = state[64 + i];
+    aes256_expand_key(state + 32, expanded);
+    for (std::size_t i = 0; i < init_rounds; ++i) {
+        #pragma unroll
+        for (int block = 0; block < 8; ++block) {
+            std::uint8_t* x = text + block * 16;
+            xor16(x, scratchpad + i * 128U + static_cast<std::size_t>(block * 16));
+            aes_pseudo_round(x, expanded);
+        }
+    }
+
+    auto* collapsed = reinterpret_cast<std::uint8_t*>(&output->collapsed_text);
+    #pragma unroll
+    for (int i = 0; i < 128; ++i) collapsed[i] = text[i];
+
+    #pragma unroll
+    for (int i = 0; i < 128; ++i) state[64 + i] = text[i];
+    keccak_permute_state(state);
+
+    auto* post_keccak = reinterpret_cast<std::uint8_t*>(&output->post_keccak_state);
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) post_keccak[i] = state[i];
+
     *ok = 1;
+}
+
+std::uint64_t host_load64(const std::uint8_t* p)
+{
+    std::uint64_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+void host_store64(std::uint8_t* p, std::uint64_t v)
+{
+    std::memcpy(p, &v, sizeof(v));
+}
+
+void host_variant1_mutate(std::uint8_t block[16])
+{
+    const std::uint8_t tmp = block[11];
+    constexpr std::uint32_t table = 0x75310U;
+    const std::uint8_t index = static_cast<std::uint8_t>((((tmp >> 3) & 6U) | (tmp & 1U)) << 1);
+    block[11] = static_cast<std::uint8_t>(tmp ^ ((table >> index) & 0x30U));
+}
+
+void host_mul128(std::uint64_t a, std::uint64_t b, std::uint64_t& hi, std::uint64_t& lo)
+{
+#if defined(__SIZEOF_INT128__)
+    const unsigned __int128 product = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+    lo = static_cast<std::uint64_t>(product);
+    hi = static_cast<std::uint64_t>(product >> 64);
+#else
+    const std::uint64_t a0 = static_cast<std::uint32_t>(a);
+    const std::uint64_t a1 = a >> 32;
+    const std::uint64_t b0 = static_cast<std::uint32_t>(b);
+    const std::uint64_t b1 = b >> 32;
+    const std::uint64_t p0 = a0 * b0;
+    const std::uint64_t p1 = a0 * b1;
+    const std::uint64_t p2 = a1 * b0;
+    const std::uint64_t p3 = a1 * b1;
+    const std::uint64_t middle = (p0 >> 32) + static_cast<std::uint32_t>(p1) + static_cast<std::uint32_t>(p2);
+    lo = (middle << 32) | static_cast<std::uint32_t>(p0);
+    hi = p3 + (p1 >> 32) + (p2 >> 32) + (middle >> 32);
+#endif
+}
+
+void host_snapshot(std::array<std::uint8_t, 64>& dst,
+                   const std::uint8_t a[16],
+                   const std::uint8_t b[16],
+                   const std::uint8_t c[16],
+                   const std::uint8_t t[16])
+{
+    std::memcpy(dst.data(), a, 16);
+    std::memcpy(dst.data() + 16, b, 16);
+    std::memcpy(dst.data() + 32, c, 16);
+    std::memcpy(dst.data() + 48, t, 16);
+}
+
+ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size_t length)
+{
+    constexpr std::size_t page_size = 524288U;
+    constexpr std::uint32_t iterations = 131072U;
+    constexpr std::size_t aes_rounds = 32768U;
+
+    ValidationCheckpoints out{};
+    std::array<std::uint8_t, 200> state{};
+    ::keccak1600(input, static_cast<int>(length), state.data());
+
+    OAES_CTX* raw_ctx = oaes_alloc();
+    if (raw_ctx == nullptr) throw std::runtime_error("oaes_alloc failed for Core checkpoint reference");
+    auto* ctx = reinterpret_cast<oaes_ctx*>(raw_ctx);
+
+    if (oaes_key_import_data(raw_ctx, state.data(), 32) != OAES_RET_SUCCESS) {
+        oaes_free(&raw_ctx);
+        throw std::runtime_error("oaes_key_import_data failed for Core checkpoint reference");
+    }
+    std::memcpy(out.expanded_key_prefix.data(), ctx->key->exp_data, out.expanded_key_prefix.size());
+
+    std::array<std::uint8_t, 128> text{};
+    std::memcpy(text.data(), state.data() + 64, text.size());
+    std::vector<std::uint8_t> scratchpad(page_size);
+    const std::size_t init_rounds = page_size / 128U;
+    for (std::size_t i = 0; i < init_rounds; ++i) {
+        for (int block = 0; block < 8; ++block) {
+            std::uint8_t* x = text.data() + block * 16;
+            aesb_pseudo_round(x, x, ctx->key->exp_data);
+        }
+        std::memcpy(scratchpad.data() + i * 128U, text.data(), 128);
+    }
+    std::memcpy(out.scratchpad_prefix.data(), scratchpad.data(), out.scratchpad_prefix.size());
+
+    std::uint8_t a[16], b[16], c[16]{}, t[16]{};
+    for (int i = 0; i < 16; ++i) {
+        a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
+        b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
+    }
+    const std::uint64_t tweak = host_load64(input + 35) ^ host_load64(state.data() + 192);
+
+    for (std::uint32_t iteration = 0; iteration < iterations; ++iteration) {
+        std::size_t j = static_cast<std::size_t>((host_load64(a) >> 4) & (aes_rounds - 1));
+        std::uint8_t* slot = scratchpad.data() + j * 16U;
+
+        aesb_single_round(slot, c, a);
+        for (int k = 0; k < 16; ++k) slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
+        host_variant1_mutate(slot);
+
+        j = static_cast<std::size_t>((host_load64(c) >> 4) & (aes_rounds - 1));
+        slot = scratchpad.data() + j * 16U;
+        std::memcpy(t, slot, 16);
+
+        std::uint64_t hi = 0, lo = 0;
+        host_mul128(host_load64(c), host_load64(t), hi, lo);
+        std::uint64_t a0 = host_load64(a) + hi;
+        std::uint64_t a1 = host_load64(a + 8) + lo;
+        host_store64(slot, a0);
+        host_store64(slot + 8, a1 ^ tweak);
+        a0 ^= host_load64(t);
+        a1 ^= host_load64(t + 8);
+        host_store64(a, a0);
+        host_store64(a + 8, a1);
+        std::memcpy(b, c, 16);
+
+        if (iteration == 0) host_snapshot(out.first_loop_state, a, b, c, t);
+        else if (iteration == 1) host_snapshot(out.second_loop_state, a, b, c, t);
+        else if (iteration == 15) host_snapshot(out.loop16_state, a, b, c, t);
+        else if (iteration == 1023) host_snapshot(out.loop1024_state, a, b, c, t);
+        else if (iteration + 1U == iterations) host_snapshot(out.final_loop_state, a, b, c, t);
+    }
+
+    std::memcpy(text.data(), state.data() + 64, 128);
+    if (oaes_key_import_data(raw_ctx, state.data() + 32, 32) != OAES_RET_SUCCESS) {
+        oaes_free(&raw_ctx);
+        throw std::runtime_error("second oaes_key_import_data failed for Core checkpoint reference");
+    }
+    for (std::size_t i = 0; i < init_rounds; ++i) {
+        for (int block = 0; block < 8; ++block) {
+            std::uint8_t* x = text.data() + block * 16;
+            const std::uint8_t* s = scratchpad.data() + i * 128U + static_cast<std::size_t>(block * 16);
+            for (int k = 0; k < 16; ++k) x[k] ^= s[k];
+            aesb_pseudo_round(x, x, ctx->key->exp_data);
+        }
+    }
+    std::memcpy(out.collapsed_text.data(), text.data(), 128);
+
+    std::memcpy(state.data() + 64, text.data(), 128);
+    ::keccakf(reinterpret_cast<std::uint64_t*>(state.data()), 24);
+    std::memcpy(out.post_keccak_state.data(), state.data(), out.post_keccak_state.size());
+
+    oaes_free(&raw_ctx);
+    return out;
+}
+
+template <typename T>
+const char* first_mismatch_name(const ValidationCheckpoints& cpu,
+                                const ValidationCheckpoints& gpu,
+                                const T ValidationCheckpoints::* member,
+                                const char* name)
+{
+    return cpu.*member == gpu.*member ? nullptr : name;
+}
+
+void report_dark_checkpoint_result(const ValidationCheckpoints& cpu,
+                                   const ValidationCheckpoints& gpu)
+{
+    const char* mismatch = nullptr;
+    if ((mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::second_loop_state, "memory-loop iteration 2")) ||
+        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::loop16_state, "memory-loop iteration 16")) ||
+        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::loop1024_state, "memory-loop iteration 1024")) ||
+        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::final_loop_state, "final memory-loop iteration")) ||
+        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::collapsed_text, "post-scratchpad collapse")) ||
+        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::post_keccak_state, "post-final Keccak state"))) {
+        std::cout << "CryptoNight extended checkpoint FAILED: first divergence at " << mismatch << "\n";
+        return;
+    }
+    std::cout << "CryptoNight extended checkpoints OK through final Keccak state\n";
 }
 
 } // namespace
@@ -186,6 +419,7 @@ ValidationCheckpoints validation_checkpoints(int device_id,
         check(cudaMalloc(reinterpret_cast<void**>(&d_output), sizeof(ValidationCheckpoints)), "cudaMalloc CN checkpoint output failed");
         check(cudaMalloc(reinterpret_cast<void**>(&d_ok), sizeof(int)), "cudaMalloc CN checkpoint status failed");
         check(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice), "cudaMemcpy CN checkpoint input failed");
+        check(cudaMemset(d_output, 0, sizeof(ValidationCheckpoints)), "cudaMemset CN checkpoint output failed");
         check(cudaMemset(d_ok, 0, sizeof(int)), "cudaMemset CN checkpoint status failed");
 
         checkpoint_kernel<<<1, 1>>>(variant, d_input, length, d_scratchpad, d_output, d_ok);
@@ -200,6 +434,11 @@ ValidationCheckpoints validation_checkpoints(int device_id,
         check(cudaMemcpy(&out, d_output, sizeof(out), cudaMemcpyDeviceToHost), "cudaMemcpy CN checkpoints failed");
 
         cudaFree(d_ok); cudaFree(d_output); cudaFree(d_scratchpad); cudaFree(d_input);
+
+        if (variant == 0) {
+            const auto cpu = core_dark_checkpoints(input, length);
+            report_dark_checkpoint_result(cpu, out);
+        }
         return out;
     } catch (...) {
         if (d_ok) cudaFree(d_ok);
