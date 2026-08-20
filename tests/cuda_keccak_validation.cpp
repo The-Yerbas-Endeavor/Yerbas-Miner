@@ -270,17 +270,38 @@ int main()
     sph_groestl256(&sph_ctx, gpu_cp.post_keccak_state.data(), gpu_cp.post_keccak_state.size());
     sph_groestl256_close(&sph_ctx, sph_groestl.data());
 
+    std::array<std::uint8_t, 32> raw_core_cn{};
+    crypto::cryptonight_dark_hash(
+        reinterpret_cast<const char*>(stage_input.data()),
+        reinterpret_cast<char*>(raw_core_cn.data()),
+        static_cast<std::uint32_t>(stage_input.size()), 1);
+    const auto stage_core_cn = yerbas::ghostrider::stage_reference(
+        stage_work, static_cast<std::uint8_t>(yerbas::ghostrider::kCryptoNightStageFlag | 0U));
+
     std::cout << "CryptoNight final extra-hash selector: "
               << static_cast<unsigned int>(extra_selector)
               << " (" << kExtraHashNames[extra_selector] << ")\n"
               << "Core c_groestl CPU digest:        " << hex_string(core_groestl) << "\n"
               << "sphlib Groestl-256 CPU digest:   " << hex_string(sph_groestl) << "\n"
+              << "Raw Core CN-Dark digest:         " << hex_string(raw_core_cn) << "\n"
+              << "stage_reference CN-Dark first32: "
+              << hex_string(std::array<std::uint8_t, 32>{
+                    stage_core_cn[0], stage_core_cn[1], stage_core_cn[2], stage_core_cn[3],
+                    stage_core_cn[4], stage_core_cn[5], stage_core_cn[6], stage_core_cn[7],
+                    stage_core_cn[8], stage_core_cn[9], stage_core_cn[10], stage_core_cn[11],
+                    stage_core_cn[12], stage_core_cn[13], stage_core_cn[14], stage_core_cn[15],
+                    stage_core_cn[16], stage_core_cn[17], stage_core_cn[18], stage_core_cn[19],
+                    stage_core_cn[20], stage_core_cn[21], stage_core_cn[22], stage_core_cn[23],
+                    stage_core_cn[24], stage_core_cn[25], stage_core_cn[26], stage_core_cn[27],
+                    stage_core_cn[28], stage_core_cn[29], stage_core_cn[30], stage_core_cn[31]}) << "\n"
               << "CryptoNight captured GPU finalizer: "
               << hex_string(gpu_cp.final_extra_hash) << "\n"
               << "GPU matches Core c_groestl: "
               << (gpu_cp.final_extra_hash == core_groestl ? "YES" : "NO") << "\n"
               << "GPU matches sphlib Groestl-256: "
-              << (gpu_cp.final_extra_hash == sph_groestl ? "YES" : "NO") << "\n";
+              << (gpu_cp.final_extra_hash == sph_groestl ? "YES" : "NO") << "\n"
+              << "Raw Core CN-Dark matches GPU: "
+              << (raw_core_cn == gpu_cp.final_extra_hash ? "YES" : "NO") << "\n";
 
     std::cout << std::fixed << std::setprecision(3);
     for (std::uint8_t variant = 0; variant < 6; ++variant) {
@@ -310,8 +331,8 @@ int main()
                       << "  CPU final: " << hex_string(cpu) << "\n"
                       << "  GPU final: " << hex_string(gpu) << "\n"
                       << "  Captured finalizer: " << hex_string(gpu_cp.final_extra_hash) << "\n"
-                      << "  All slow-hash state checkpoints matched; inspect final "
-                      << kExtraHashNames[extra_selector] << " implementation\n";
+                      << "  Raw Core CN-Dark: " << hex_string(raw_core_cn) << "\n"
+                      << "  Slow-hash reconstruction/finalizer path matches; inspect raw Core cn_slow_hash state\n";
             return 60 + variant;
         }
         std::cout << " OK | kernel " << kernel_ms << " ms"
