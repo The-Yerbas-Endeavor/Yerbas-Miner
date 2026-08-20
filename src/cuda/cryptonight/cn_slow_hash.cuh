@@ -78,11 +78,16 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
         for (int b = 0; b < 128; ++b) scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
     }
 
-    std::uint8_t a[16], b[16], c[16], t[16];
+    // Yerbas Core keeps two 16-byte b blocks. The upper half preserves the
+    // previous b value before the lower half is replaced with c at the end of
+    // every CryptoNight iteration. Keep that state exactly instead of
+    // collapsing b to a single block.
+    std::uint8_t a[16], b[32], c[16], t[16];
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
+        b[16 + i] = 0;
     }
 
     const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
@@ -114,6 +119,9 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
         a1 ^= cn_load64(t + 8);
         cn_store64(a, a0);
         cn_store64(a + 8, a1);
+
+        // Core: copy_block(b + AES_BLOCK_SIZE, b); copy_block(b, c);
+        copy16(b + 16, b);
         copy16(b, c);
     }
 
