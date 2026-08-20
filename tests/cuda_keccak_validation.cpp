@@ -52,6 +52,10 @@ constexpr const char* kCnNames[] = {
     "CN-Dark", "CN-DarkLite", "CN-Fast", "CN-Lite", "CN-Turtle", "CN-TurtleLite"
 };
 
+constexpr const char* kExtraHashNames[] = {
+    "BLAKE-256", "Groestl-256", "JH-256", "Skein-256"
+};
+
 template <typename Container>
 std::string hex_string(const Container& value)
 {
@@ -251,6 +255,11 @@ int main()
     }
     std::cout << "CryptoNight checkpoint OK: first memory-loop iteration matches Core\n";
 
+    const std::uint8_t extra_selector = static_cast<std::uint8_t>(gpu_cp.post_keccak_state[0] & 3U);
+    std::cout << "CryptoNight final extra-hash selector: "
+              << static_cast<unsigned int>(extra_selector)
+              << " (" << kExtraHashNames[extra_selector] << ")\n";
+
     std::cout << std::fixed << std::setprecision(3);
     for (std::uint8_t variant = 0; variant < 6; ++variant) {
         std::cout << "Validating " << kCnNames[variant] << "..." << std::flush;
@@ -278,7 +287,8 @@ int main()
                       << " mismatch for 64-byte intermediate state\n"
                       << "  CPU final: " << hex_string(cpu) << "\n"
                       << "  GPU final: " << hex_string(gpu) << "\n"
-                      << "  Early checkpoints matched; divergence occurs after first memory-loop iteration\n";
+                      << "  All slow-hash state checkpoints matched; inspect final "
+                      << kExtraHashNames[extra_selector] << " implementation\n";
             return 60 + variant;
         }
         std::cout << " OK | kernel " << kernel_ms << " ms"
