@@ -184,7 +184,7 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
 
     auto* post_keccak = reinterpret_cast<std::uint8_t*>(&output->post_keccak_state);
     #pragma unroll
-    for (int i = 0; i < 64; ++i) post_keccak[i] = state[i];
+    for (int i = 0; i < 200; ++i) post_keccak[i] = state[i];
 
     output->extra_hash_selector = static_cast<std::uint8_t>(state[0] & 3U);
     auto* final_hash = reinterpret_cast<std::uint8_t*>(&output->final_extra_hash);
@@ -359,11 +359,11 @@ void report_dark_checkpoint_result(const ValidationCheckpoints& cpu,
         (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::loop1024_state, "memory-loop iteration 1024")) ||
         (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::final_loop_state, "final memory-loop iteration")) ||
         (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::collapsed_text, "post-scratchpad collapse")) ||
-        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::post_keccak_state, "post-final Keccak state"))) {
+        (mismatch = first_mismatch_name(cpu, gpu, &ValidationCheckpoints::post_keccak_state, "full 200-byte post-final Keccak state"))) {
         std::cout << "CryptoNight extended checkpoint FAILED: first divergence at " << mismatch << "\n";
         return;
     }
-    std::cout << "CryptoNight extended checkpoints OK through final Keccak state\n";
+    std::cout << "CryptoNight extended checkpoints OK through full 200-byte final Keccak state\n";
 }
 
 } // namespace
