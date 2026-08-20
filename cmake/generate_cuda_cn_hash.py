@@ -23,14 +23,7 @@ def strip_c_linkage(text: str) -> str:
 
 
 def inline_core_dependencies(source: str, source_path: pathlib.Path) -> str:
-    """Inline small local headers whose data definitions are required on device.
-
-    c_groestl.c keeps its 512-entry T table in groestl_tables.h. The normal
-    include-stripping pass used by this generator previously discarded that
-    table, which made the exact Core Groestl-256 device translation invalid.
-    Keep the dependency mechanical by loading the header from the same pinned
-    Core source directory before CUDA decoration.
-    """
+    """Inline small local headers whose data definitions are required on device."""
     for name in ("groestl_tables.h",):
         include_re = re.compile(rf'(?m)^\s*#\s*include\s+[\"]{re.escape(name)}[\"]\s*$')
         if include_re.search(source):
@@ -39,6 +32,30 @@ def inline_core_dependencies(source: str, source_path: pathlib.Path) -> str:
                 raise FileNotFoundError(f"required Core dependency not found: {dependency}")
             source = include_re.sub(dependency.read_text(encoding="utf-8"), source)
     return source
+
+
+def rewrite_core_groestl_for_cuda(source: str) -> str:
+    """Remove c_groestl.c's byte-buffer -> uint32_t aliasing from Transform().
+
+    Yerbas Core's CPU implementation casts arbitrary byte input directly to
+    uint32_t*. That works on the x86 consensus path but is undefined C aliasing
+    and can be optimized differently by NVCC. Reconstruct the 16 little-endian
+    message words explicitly before F512 so CUDA observes exactly the x86 byte
+    interpretation for both direct message blocks and ctx->buffer padding.
+    """
+    needle = '    F512(ctx->chaining,(uint32_t*)input);'
+    replacement = '''    uint32_t m_words[2*COLS512];
+    for (int wi = 0; wi < 2*COLS512; ++wi) {
+      const uint8_t *p = input + 4 * wi;
+      m_words[wi] = ((uint32_t)p[0]) |
+                    ((uint32_t)p[1] << 8) |
+                    ((uint32_t)p[2] << 16) |
+                    ((uint32_t)p[3] << 24);
+    }
+    F512(ctx->chaining, m_words);'''
+    if needle not in source:
+        raise RuntimeError("could not locate Core Groestl Transform input cast")
+    return source.replace(needle, replacement, 1)
 
 
 def helpers() -> str:
@@ -66,9 +83,6 @@ __device__ __forceinline__ void *yerbas_cn_memset(void *dst, int value, size_t n
 
 
 def decorate_prototypes(header: str) -> str:
-    # C headers used here expose ordinary free-function prototypes. Keep type,
-    # struct and macro declarations but make prototypes device-local so calls
-    # bind to the generated implementations rather than host Core symbols.
     pattern = re.compile(
         r'(?m)^(?!\s*(?:typedef|struct|enum|union|#))'
         r'(\s*(?:void|int|uint8_t|uint32_t|uint64_t|size_t|HashReturn)\s+\**\s*)'
@@ -79,18 +93,12 @@ def decorate_prototypes(header: str) -> str:
 
 def decorate_source(source: str) -> str:
     source = re.sub(r'(?m)^static\s+', '__device__ static ', source)
-
-    # Non-static file-scope function definitions. The selected Core files use
-    # this conventional C declaration style; local variables are indented and
-    # therefore do not match the column-zero anchor.
     pattern = re.compile(
         r'(?m)^(?!__device__)'
         r'((?:void|int|uint8_t|uint32_t|uint64_t|size_t|HashReturn)\s+\**\s*)'
         r'([A-Za-z_][A-Za-z0-9_]*)\s*(\([^;]*\)\s*\{)'
     )
     source = pattern.sub(r'__device__ static \1\2\3', source)
-
-    # File-scope const lookup tables must reside in device address space.
     source = re.sub(
         r'(?m)^(?!__device__)(const\s+(?:uint8_t|uint32_t|uint64_t|int|unsigned char|unsigned int)\s+[A-Za-z_][A-Za-z0-9_]*\s*\[)',
         r'__device__ static \1', source)
@@ -109,6 +117,8 @@ def main() -> int:
     header = pathlib.Path(a.header).read_text(encoding='utf-8')
     source = source_path.read_text(encoding='utf-8')
     source = inline_core_dependencies(source, source_path)
+    if a.namespace == 'cn_groestl':
+        source = rewrite_core_groestl_for_cuda(source)
     header = decorate_prototypes(strip_includes(strip_c_linkage(header)))
     source = decorate_source(strip_includes(strip_c_linkage(source)))
 
