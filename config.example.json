@@ -14,7 +14,8 @@
   "gpu": {
     "enabled": true,
     "devices": [],
-    "intensity": 0
+    "intensity": 0,
+    "skip_validation": false
   },
   "logging": {
     "level": "info"
