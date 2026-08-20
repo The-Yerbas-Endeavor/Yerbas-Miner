@@ -30,7 +30,7 @@ void check(cudaError_t status, const char* what)
 
 __device__ __forceinline__ void checkpoint_state(std::uint8_t* dst,
                                                  const std::uint8_t a[16],
-                                                 const std::uint8_t b[16],
+                                                 const std::uint8_t b[32],
                                                  const std::uint8_t c[16],
                                                  const std::uint8_t t[16])
 {
@@ -38,8 +38,9 @@ __device__ __forceinline__ void checkpoint_state(std::uint8_t* dst,
     for (int i = 0; i < 16; ++i) {
         dst[i] = a[i];
         dst[16 + i] = b[i];
-        dst[32 + i] = c[i];
-        dst[48 + i] = t[i];
+        dst[32 + i] = b[16 + i];
+        dst[48 + i] = c[i];
+        dst[64 + i] = t[i];
     }
 }
 
@@ -99,19 +100,20 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
         #pragma unroll
         for (int block = 0; block < 8; ++block)
             aes_pseudo_round(text + block * 16, expanded);
-        for (int b = 0; b < 128; ++b)
-            scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
+        for (int x = 0; x < 128; ++x)
+            scratchpad[i * 128U + static_cast<std::size_t>(x)] = text[x];
     }
 
     auto* scratchpad_prefix = reinterpret_cast<std::uint8_t*>(&output->scratchpad_prefix);
     #pragma unroll
     for (int i = 0; i < 128; ++i) scratchpad_prefix[i] = scratchpad[i];
 
-    std::uint8_t a[16], b[16], c[16], t[16];
+    std::uint8_t a[16], b[32], c[16], t[16];
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
+        b[16 + i] = 0;
         c[i] = 0;
         t[i] = 0;
     }
@@ -145,6 +147,7 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
         a1 ^= cn_load64(t + 8);
         cn_store64(a, a0);
         cn_store64(a + 8, a1);
+        copy16(b + 16, b);
         copy16(b, c);
 
         std::uint8_t* snapshot = nullptr;
@@ -234,16 +237,16 @@ void host_mul128(std::uint64_t a, std::uint64_t b, std::uint64_t& hi, std::uint6
 #endif
 }
 
-void host_snapshot(std::array<std::uint8_t, 64>& dst,
+void host_snapshot(std::array<std::uint8_t, 80>& dst,
                    const std::uint8_t a[16],
-                   const std::uint8_t b[16],
+                   const std::uint8_t b[32],
                    const std::uint8_t c[16],
                    const std::uint8_t t[16])
 {
     std::memcpy(dst.data(), a, 16);
-    std::memcpy(dst.data() + 16, b, 16);
-    std::memcpy(dst.data() + 32, c, 16);
-    std::memcpy(dst.data() + 48, t, 16);
+    std::memcpy(dst.data() + 16, b, 32);
+    std::memcpy(dst.data() + 48, c, 16);
+    std::memcpy(dst.data() + 64, t, 16);
 }
 
 ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size_t length)
@@ -279,7 +282,7 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
     }
     std::memcpy(out.scratchpad_prefix.data(), scratchpad.data(), out.scratchpad_prefix.size());
 
-    std::uint8_t a[16], b[16], c[16]{}, t[16]{};
+    std::uint8_t a[16], b[32]{}, c[16]{}, t[16]{};
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
@@ -308,6 +311,7 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
         a1 ^= host_load64(t + 8);
         host_store64(a, a0);
         host_store64(a + 8, a1);
+        std::memcpy(b + 16, b, 16);
         std::memcpy(b, c, 16);
 
         if (iteration == 0) host_snapshot(out.first_loop_state, a, b, c, t);
