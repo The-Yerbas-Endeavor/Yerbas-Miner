@@ -294,7 +294,7 @@ if(BUILD_TESTING)
             tests
             "${YERBAS_CUDA_GENERATED_DIR}"
             "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonight"
+            "${YERBAS_CORE_SRC}/cryptonote"
         )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
         set_target_properties(cuda-keccak-validation PROPERTIES
