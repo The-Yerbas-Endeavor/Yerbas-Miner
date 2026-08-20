@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "config.h"
+#include "cpu/cpu_worker_pool.h"
 
 #ifdef YERBAS_HAS_CUDA
 #include "cuda/cuda_backend.h"
