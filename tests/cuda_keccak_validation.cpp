@@ -3,8 +3,13 @@
 #include "ghostrider/ghostrider.h"
 #include "ghostrider_vectors.h"
 #include "slow-hash.h"
-#include "c_keccak.h"
 #include "oaes_lib.h"
+
+extern "C" {
+#include "c_keccak.h"
+int aesb_single_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
+int aesb_pseudo_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
+}
 
 #include <array>
 #include <chrono>
@@ -15,11 +20,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
-
-extern "C" {
-int aesb_single_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
-int aesb_pseudo_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
-}
 
 namespace {
 using Hook = yerbas::cuda::Hash512 (*)(int, const std::uint8_t*, std::size_t);
