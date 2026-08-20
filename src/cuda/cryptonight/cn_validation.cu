@@ -34,7 +34,8 @@ __global__ void validation_kernel(std::uint8_t variant,
 Hash256 validation_hash(int device_id,
                         std::uint8_t variant,
                         const std::uint8_t* input,
-                        std::size_t length)
+                        std::size_t length,
+                        float* kernel_ms)
 {
     const VariantConfig* cfg = config(variant);
     if (cfg == nullptr) throw std::invalid_argument("invalid CryptoNight CUDA variant");
@@ -46,6 +47,8 @@ Hash256 validation_hash(int device_id,
     std::uint8_t* d_scratchpad = nullptr;
     std::uint8_t* d_output = nullptr;
     int* d_ok = nullptr;
+    cudaEvent_t start_event = nullptr;
+    cudaEvent_t stop_event = nullptr;
 
     try {
         check(cudaMalloc(reinterpret_cast<void**>(&d_input), length), "cudaMalloc CN input failed");
@@ -55,9 +58,22 @@ Hash256 validation_hash(int device_id,
         check(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice), "cudaMemcpy CN input failed");
         check(cudaMemset(d_ok, 0, sizeof(int)), "cudaMemset CN status failed");
 
+        if (kernel_ms != nullptr) {
+            check(cudaEventCreate(&start_event), "cudaEventCreate start failed");
+            check(cudaEventCreate(&stop_event), "cudaEventCreate stop failed");
+            check(cudaEventRecord(start_event), "cudaEventRecord start failed");
+        }
+
         validation_kernel<<<1, 1>>>(variant, d_input, length, d_scratchpad, d_output, d_ok);
         check(cudaGetLastError(), "CryptoNight validation kernel launch failed");
-        check(cudaDeviceSynchronize(), "CryptoNight validation kernel failed");
+
+        if (kernel_ms != nullptr) {
+            check(cudaEventRecord(stop_event), "cudaEventRecord stop failed");
+            check(cudaEventSynchronize(stop_event), "cudaEventSynchronize stop failed");
+            check(cudaEventElapsedTime(kernel_ms, start_event, stop_event), "cudaEventElapsedTime failed");
+        } else {
+            check(cudaDeviceSynchronize(), "CryptoNight validation kernel failed");
+        }
 
         int ok = 0;
         check(cudaMemcpy(&ok, d_ok, sizeof(ok), cudaMemcpyDeviceToHost), "cudaMemcpy CN status failed");
@@ -66,9 +82,13 @@ Hash256 validation_hash(int device_id,
         Hash256 out{};
         check(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost), "cudaMemcpy CN output failed");
 
+        if (stop_event) cudaEventDestroy(stop_event);
+        if (start_event) cudaEventDestroy(start_event);
         cudaFree(d_ok); cudaFree(d_output); cudaFree(d_scratchpad); cudaFree(d_input);
         return out;
     } catch (...) {
+        if (stop_event) cudaEventDestroy(stop_event);
+        if (start_event) cudaEventDestroy(start_event);
         if (d_ok) cudaFree(d_ok);
         if (d_output) cudaFree(d_output);
         if (d_scratchpad) cudaFree(d_scratchpad);
