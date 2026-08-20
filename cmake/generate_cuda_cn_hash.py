@@ -22,8 +22,30 @@ def strip_c_linkage(text: str) -> str:
     return text
 
 
+def inline_core_dependencies(source: str, source_path: pathlib.Path) -> str:
+    """Inline small local headers whose data definitions are required on device.
+
+    c_groestl.c keeps its 512-entry T table in groestl_tables.h. The normal
+    include-stripping pass used by this generator previously discarded that
+    table, which made the exact Core Groestl-256 device translation invalid.
+    Keep the dependency mechanical by loading the header from the same pinned
+    Core source directory before CUDA decoration.
+    """
+    for name in ("groestl_tables.h",):
+        include_re = re.compile(rf'(?m)^\s*#\s*include\s+[\"]{re.escape(name)}[\"]\s*$')
+        if include_re.search(source):
+            dependency = source_path.parent / name
+            if not dependency.exists():
+                raise FileNotFoundError(f"required Core dependency not found: {dependency}")
+            source = include_re.sub(dependency.read_text(encoding="utf-8"), source)
+    return source
+
+
 def helpers() -> str:
     return r'''
+typedef unsigned char BitSequence;
+typedef unsigned long long DataLength;
+
 __device__ __forceinline__ void *yerbas_cn_memcpy(void *dst, const void *src, size_t n)
 {
     unsigned char *d = static_cast<unsigned char *>(dst);
@@ -83,8 +105,10 @@ def main() -> int:
     p.add_argument('--out', required=True)
     a = p.parse_args()
 
+    source_path = pathlib.Path(a.source)
     header = pathlib.Path(a.header).read_text(encoding='utf-8')
-    source = pathlib.Path(a.source).read_text(encoding='utf-8')
+    source = source_path.read_text(encoding='utf-8')
+    source = inline_core_dependencies(source, source_path)
     header = decorate_prototypes(strip_includes(strip_c_linkage(header)))
     source = decorate_source(strip_includes(strip_c_linkage(source)))
 
