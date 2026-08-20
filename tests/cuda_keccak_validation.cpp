@@ -108,5 +108,31 @@ int main()
 
     std::cout << "CUDA CryptoNight variants 0-5 match pinned Yerbas Core\n";
     std::cout << "CryptoNight profiling baseline complete; kernel time excludes allocation/copy overhead.\n";
+
+    std::array<std::uint8_t, 80> full_header = header;
+    full_header[76] = 0;
+    full_header[77] = 0;
+    full_header[78] = 0;
+    full_header[79] = 0;
+    const yerbas::ghostrider::Work full_work{full_header.data(), full_header.size()};
+    const auto cpu_full = yerbas::ghostrider::hash_reference(full_work);
+
+    yerbas::cuda::JobDescriptor job{};
+    job.header = full_header;
+    job.target_le.fill(0xff);
+    job.stages = yerbas::ghostrider::stage_schedule(full_work);
+
+    yerbas::cuda::BatchEngine engine(0, 1);
+    engine.upload_job(job);
+    const auto candidates = engine.scan(0);
+    if (candidates.empty() || candidates.front().nonce != 0) {
+        std::cerr << "CUDA full-pipeline validation failed to return nonce 0\n";
+        return 80;
+    }
+    if (candidates.front().hash != cpu_full) {
+        std::cerr << "CUDA full GhostRider pipeline DOES NOT match CPU reference for nonce 0\n";
+        return 81;
+    }
+    std::cout << "CUDA full 18-stage GhostRider pipeline matches CPU reference for nonce 0\n";
     return 0;
 }
