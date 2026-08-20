@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <iomanip>
+#include <iostream>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -28,6 +31,22 @@ bool hash_meets_target(const ghostrider::Hash256& hash,
         if (hash[index] > target_le[index]) return false;
     }
     return true;
+}
+
+std::string display_hex(const std::array<std::uint8_t, 32>& value_le)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (auto it = value_le.rbegin(); it != value_le.rend(); ++it)
+        ss << std::setw(2) << static_cast<unsigned int>(*it);
+    return ss.str();
+}
+
+std::string nonce_hex(std::uint32_t nonce)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(8) << nonce;
+    return ss.str();
 }
 
 } // namespace
@@ -123,13 +142,10 @@ struct WorkerPool::Impl {
         }
         lock.unlock();
 
-        // The pinned Core GhostRider reference contains legacy code that was
-        // not written with a long-lived parallel worker pool in mind. A rare
-        // parallel false-positive here becomes an immediate pool error 23
-        // (low difficulty share). Re-hash only the tiny candidate set on the
-        // caller thread before submission. This is negligible work compared
-        // with the full batch and guarantees every CPU submission independently
-        // satisfies the exact target used by the pool job.
+        // Re-hash every candidate after all worker threads are idle, then log
+        // the exact final 256-bit hash and target in conventional big-endian
+        // display order. This gives us a direct record for pool error-23 cases
+        // without adding overhead to ordinary non-candidate hashes.
         std::vector<Candidate> verified;
         verified.reserve(combined.size());
         for (const auto& candidate : combined) {
@@ -137,7 +153,12 @@ struct WorkerPool::Impl {
             write_nonce(verify_header, candidate.nonce);
             const ghostrider::Work work{verify_header.data(), verify_header.size()};
             const auto hash = ghostrider::hash_reference(work);
-            if (hash_meets_target(hash, target)) verified.push_back(candidate);
+            const bool local_pass = hash_meets_target(hash, target);
+            std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
+                      << " | hash=" << display_hex(hash)
+                      << " | target=" << display_hex(target)
+                      << " | local=" << (local_pass ? "PASS" : "FAIL") << '\n';
+            if (local_pass) verified.push_back(candidate);
         }
         return verified;
     }
