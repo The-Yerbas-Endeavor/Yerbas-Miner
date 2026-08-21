@@ -106,10 +106,6 @@ __global__ void cryptonight_stage(std::uint8_t* states,
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
 
-    // Pack active CryptoNight scratchpads using the selected variant's real
-    // page size instead of spacing every hash at the 2 MiB CN-Fast maximum.
-    // This substantially reduces the memory/TLB working set for Dark/Lite/
-    // Turtle variants while preserving an isolated scratchpad per nonce.
     const auto cfg = cryptonight::config_value(variant);
     const std::size_t scratchpad_stride = static_cast<std::size_t>(cfg.page_size);
     std::uint8_t* state = states + index * kStateBytes;
@@ -118,9 +114,6 @@ __global__ void cryptonight_stage(std::uint8_t* states,
 
     if (!cryptonight::slow_hash(variant, state, kStateBytes, scratchpad, digest)) return;
 
-    // Yerbas Core writes the 256-bit CryptoNight result into a uint512 that
-    // is zero initialized. Preserve that exact 64-byte state representation
-    // for the conventional core that follows this CN stage.
     #pragma unroll
     for (int i = 0; i < 32; ++i) state[i] = digest[i];
     #pragma unroll
@@ -310,10 +303,6 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                            impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Run all 18 GhostRider stages natively on the GPU. Conventional stages
-    // stay at 256 threads/block; CryptoNight uses a smaller 64-thread launch
-    // to reduce register/local-memory pressure on Pascal while retaining many
-    // resident warps for the latency-heavy scratchpad accesses.
     for (int stage_index = 0; stage_index < 18; ++stage_index) {
         const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
         const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
@@ -373,6 +362,131 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         out.push_back(candidate);
     }
     return out;
+}
+
+std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, BatchProfile& profile)
+{
+    if (!impl_->job_loaded) throw std::runtime_error("CUDA profiled batch scan requested before upload_job");
+    if (!hash_pipeline_ready()) {
+        throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
+    }
+
+    profile = BatchProfile{};
+    profile.hashes = impl_->batch_size;
+
+    check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
+    check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream),
+               "cudaMemsetAsync candidate counter failed");
+
+    constexpr int core_threads = 256;
+    constexpr int cn_threads = 64;
+    const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
+    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
+
+    cudaEvent_t total_start{}, total_stop{}, section_start{}, section_stop{};
+    check_cuda(cudaEventCreate(&total_start), "cudaEventCreate total_start failed");
+    check_cuda(cudaEventCreate(&total_stop), "cudaEventCreate total_stop failed");
+    check_cuda(cudaEventCreate(&section_start), "cudaEventCreate section_start failed");
+    check_cuda(cudaEventCreate(&section_stop), "cudaEventCreate section_stop failed");
+
+    auto elapsed = [&](float& out) {
+        check_cuda(cudaEventRecord(section_stop, impl_->stream), "cudaEventRecord section stop failed");
+        check_cuda(cudaEventSynchronize(section_stop), "cudaEventSynchronize section stop failed");
+        check_cuda(cudaEventElapsedTime(&out, section_start, section_stop), "cudaEventElapsedTime failed");
+    };
+
+    try {
+        check_cuda(cudaEventRecord(total_start, impl_->stream), "cudaEventRecord total start failed");
+        check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord nonce start failed");
+        initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
+                                                                               impl_->d_nonces,
+                                                                               impl_->batch_size);
+        check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
+        elapsed(profile.nonce_init_ms);
+
+        for (int stage_index = 0; stage_index < 18; ++stage_index) {
+            const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
+            const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
+            const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
+
+            check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord stage start failed");
+            if (is_cn) {
+                if (algorithm >= cryptonight::kVariantConfigs.size()) {
+                    throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+                }
+                cryptonight_stage<<<cn_blocks, cn_threads, 0, impl_->stream>>>(impl_->d_states,
+                                                                               impl_->batch_size,
+                                                                               algorithm,
+                                                                               impl_->d_cn_scratchpads);
+                check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight stage launch failed");
+            } else {
+                if (!core::core512_implemented(algorithm)) {
+                    throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
+                }
+                core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job,
+                                                                               impl_->d_nonces,
+                                                                               impl_->d_states,
+                                                                               impl_->batch_size,
+                                                                               stage_index,
+                                                                               algorithm);
+                check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
+            }
+
+            float stage_ms = 0.0F;
+            elapsed(stage_ms);
+            profile.stages[static_cast<std::size_t>(stage_index)] = StageTiming{stage_index, stage, stage_ms};
+            profile.stage_total_ms += stage_ms;
+        }
+
+        check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord candidate start failed");
+        collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces,
+                                                                            impl_->d_states,
+                                                                            impl_->batch_size,
+                                                                            impl_->d_job,
+                                                                            impl_->d_candidates,
+                                                                            impl_->d_candidate_count);
+        check_cuda(cudaGetLastError(), "collect_candidates launch failed");
+        elapsed(profile.candidate_ms);
+
+        check_cuda(cudaEventRecord(total_stop, impl_->stream), "cudaEventRecord total stop failed");
+        check_cuda(cudaEventSynchronize(total_stop), "cudaEventSynchronize total stop failed");
+        check_cuda(cudaEventElapsedTime(&profile.total_gpu_ms, total_start, total_stop),
+                   "cudaEventElapsedTime total failed");
+
+        unsigned int count = 0;
+        check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count),
+                                   cudaMemcpyDeviceToHost, impl_->stream),
+                   "cudaMemcpyAsync candidate count failed");
+        check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize profiled scan failed");
+
+        count = std::min<unsigned int>(count, static_cast<unsigned int>(kMaxCandidates));
+        std::vector<Candidate> out;
+        if (count != 0) {
+            std::vector<DeviceCandidate> raw(count);
+            check_cuda(cudaMemcpy(raw.data(), impl_->d_candidates,
+                                  count * sizeof(DeviceCandidate), cudaMemcpyDeviceToHost),
+                       "cudaMemcpy candidates failed");
+            out.reserve(count);
+            for (const auto& item : raw) {
+                Candidate candidate;
+                candidate.nonce = item.nonce;
+                std::copy(std::begin(item.hash), std::end(item.hash), candidate.hash.begin());
+                out.push_back(candidate);
+            }
+        }
+
+        cudaEventDestroy(section_stop);
+        cudaEventDestroy(section_start);
+        cudaEventDestroy(total_stop);
+        cudaEventDestroy(total_start);
+        return out;
+    } catch (...) {
+        cudaEventDestroy(section_stop);
+        cudaEventDestroy(section_start);
+        cudaEventDestroy(total_stop);
+        cudaEventDestroy(total_start);
+        throw;
+    }
 }
 
 int BatchEngine::device_id() const noexcept { return impl_->device_id; }
