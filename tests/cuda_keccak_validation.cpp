@@ -141,10 +141,11 @@ yerbas::cuda::cryptonight::ValidationCheckpoints cpu_dark_checkpoints(
     }
     std::memcpy(out.scratchpad_prefix.data(), scratchpad.data(), out.scratchpad_prefix.size());
 
-    std::uint8_t a[16], b[16], c[16], t[16];
+    std::uint8_t a[16], b[32]{}, c[16]{}, t[16]{};
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
+        b[16 + i] = b[i];
     }
     const std::uint64_t tweak = load64le(input.data() + 35) ^ load64le(state.data() + 192);
 
@@ -168,12 +169,13 @@ yerbas::cuda::cryptonight::ValidationCheckpoints cpu_dark_checkpoints(
     a1 ^= load64le(t + 8);
     store64le(a, a0);
     store64le(a + 8, a1);
+    std::memcpy(b + 16, b, 16);
     std::memcpy(b, c, 16);
 
     std::memcpy(out.first_loop_state.data(), a, 16);
-    std::memcpy(out.first_loop_state.data() + 16, b, 16);
-    std::memcpy(out.first_loop_state.data() + 32, c, 16);
-    std::memcpy(out.first_loop_state.data() + 48, t, 16);
+    std::memcpy(out.first_loop_state.data() + 16, b, 32);
+    std::memcpy(out.first_loop_state.data() + 48, c, 16);
+    std::memcpy(out.first_loop_state.data() + 64, t, 16);
 
     oaes_free(&raw_ctx);
     return out;
@@ -251,8 +253,8 @@ int main()
 
     if (cpu_cp.first_loop_state != gpu_cp.first_loop_state) {
         std::cerr << "CryptoNight checkpoint FAILED: first memory-loop iteration diverges\n"
-                  << "  CPU a|b|c|t: " << hex_string(cpu_cp.first_loop_state) << "\n"
-                  << "  GPU a|b|c|t: " << hex_string(gpu_cp.first_loop_state) << "\n";
+                  << "  CPU a|b32|c|t: " << hex_string(cpu_cp.first_loop_state) << "\n"
+                  << "  GPU a|b32|c|t: " << hex_string(gpu_cp.first_loop_state) << "\n";
         return 58;
     }
     std::cout << "CryptoNight checkpoint OK: first memory-loop iteration matches Core\n";
