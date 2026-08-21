@@ -225,6 +225,14 @@ if(YERBAS_ENABLE_CUDA)
     enable_language(CUDA)
     set(YERBAS_CUDA_AVAILABLE ON)
 
+    # Let nvcc parallelize expensive device compilation inside each .cu file.
+    # This complements `cmake --build --parallel`, which only schedules separate
+    # translation units and otherwise leaves a large CUDA file on one CPU core.
+    set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+        list(APPEND YERBAS_NVCC_PARALLEL_FLAGS --split-compile=0)
+    endif()
+
     # Local developer builds compile only for GPUs present on the machine so
     # CUDA iteration stays fast. CI/release builds produce a portable fat
     # binary spanning the supported NVIDIA generations. Either mode can be
@@ -250,52 +258,18 @@ if(YERBAS_ENABLE_CUDA)
                 --stem "${STEM}"
                 --source "${YERBAS_CORE_SRC}/crypto/${SOURCE_FILE}"
                 --header "${YERBAS_CORE_SRC}/crypto/${HEADER_FILE}"
-                --out-source "${YERBAS_CUDA_GENERATED_DIR}/${STEM}_device_impl.cuh"
-                --out-header "${YERBAS_CUDA_GENERATED_DIR}/${STEM}_device_types.cuh"
-                ${ARGN}
-            RESULT_VARIABLE YERBAS_CUDA_SPH_RESULT
+                --output "${YERBAS_CUDA_GENERATED_DIR}/${STEM}_device_impl.cuh"
+            RESULT_VARIABLE YERBAS_CUDA_GEN_RESULT
         )
-        if(NOT YERBAS_CUDA_SPH_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to generate CUDA ${STEM} device source")
+        if(NOT YERBAS_CUDA_GEN_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed generating CUDA ${STEM} device implementation")
         endif()
     endfunction()
 
-    yerbas_generate_cuda_sph(bmw bmw.c sph_bmw.h)
+    yerbas_generate_cuda_sph(blake blake.c sph_blake.h)
     yerbas_generate_cuda_sph(groestl groestl.c sph_groestl.h)
     yerbas_generate_cuda_sph(jh jh.c sph_jh.h)
     yerbas_generate_cuda_sph(skein skein.c sph_skein.h)
-    yerbas_generate_cuda_sph(luffa luffa.c sph_luffa.h)
-    yerbas_generate_cuda_sph(shavite shavite.c sph_shavite.h
-        --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
-    yerbas_generate_cuda_sph(simd simd.c sph_simd.h)
-    yerbas_generate_cuda_sph(echo echo.c sph_echo.h
-        --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
-    yerbas_generate_cuda_sph(hamsi sph_hamsi.c sph_hamsi.h
-        --inline-include "sph_hamsi_helper.c=${YERBAS_CORE_SRC}/crypto/sph_hamsi_helper.c")
-    yerbas_generate_cuda_sph(fugue sph_fugue.c sph_fugue.h)
-    yerbas_generate_cuda_sph(shabal sph_shabal.c sph_shabal.h)
-    yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h
-        --inline-include-all "md_helper.c=${YERBAS_CORE_SRC}/crypto/md_helper.c")
-
-    function(yerbas_generate_cuda_cn_hash NAMESPACE SOURCE_FILE HEADER_FILE OUTPUT_FILE)
-        execute_process(
-            COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_cuda_cn_hash.py"
-                --namespace "${NAMESPACE}"
-                --source "${YERBAS_CORE_SRC}/cryptonote/${SOURCE_FILE}"
-                --header "${YERBAS_CORE_SRC}/cryptonote/${HEADER_FILE}"
-                --out "${YERBAS_CUDA_GENERATED_DIR}/${OUTPUT_FILE}"
-            RESULT_VARIABLE YERBAS_CUDA_CN_RESULT
-        )
-        if(NOT YERBAS_CUDA_CN_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to generate CUDA CryptoNight primitive ${NAMESPACE}")
-        endif()
-    endfunction()
-
-    yerbas_generate_cuda_cn_hash(cn_blake256 c_blake256.c c_blake256.h cn_blake256_device.cuh)
-    yerbas_generate_cuda_cn_hash(cn_groestl c_groestl.c c_groestl.h cn_groestl_device.cuh)
-    yerbas_generate_cuda_cn_hash(cn_jh c_jh.c c_jh.h cn_jh_device.cuh)
-    yerbas_generate_cuda_cn_hash(cn_skein c_skein.c c_skein.h cn_skein_device.cuh)
 
     target_sources(yerbas-miner PRIVATE
         src/cuda/cuda_backend.cu
@@ -309,6 +283,9 @@ if(YERBAS_ENABLE_CUDA)
         "${YERBAS_CORE_SRC}/cryptonote"
     )
     target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
+    target_compile_options(yerbas-miner PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
+    )
     set_target_properties(yerbas-miner PROPERTIES
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
@@ -350,6 +327,9 @@ if(BUILD_TESTING)
             "${YERBAS_CORE_SRC}/cryptonote"
         )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
+        target_compile_options(cuda-keccak-validation PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
+        )
         set_target_properties(cuda-keccak-validation PROPERTIES
             CUDA_STANDARD 17
             CUDA_STANDARD_REQUIRED ON
