@@ -15,15 +15,15 @@ __device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
                                                     std::uint8_t out[32]);
 
 // Generic little-endian load retained for the intentionally unaligned
-// variant-1 input tweak at input+35.
+// variant-1 input tweak at input+35 and validator scratch state.
 __device__ __forceinline__ std::uint64_t cn_load64(const std::uint8_t* p)
 {
     return load64le(p);
 }
 
-// All hot-loop state blocks and scratchpad slots are explicitly 16-byte
-// aligned. Use native 64-bit accesses there instead of eight byte loads,
-// shifts and stores per word.
+// All production hot-loop state blocks and scratchpad slots are explicitly
+// 16-byte aligned. Use native 64-bit accesses there instead of eight byte
+// loads, shifts and stores per word.
 __device__ __forceinline__ std::uint64_t cn_load64_aligned(const std::uint8_t* p)
 {
     return *reinterpret_cast<const std::uint64_t*>(p);
@@ -49,6 +49,14 @@ __device__ __forceinline__ void xor16(std::uint8_t* dst, const std::uint8_t* src
 __device__ __forceinline__ std::size_t cn_index_masked(const std::uint8_t block[16], std::size_t mask)
 {
     return static_cast<std::size_t>((cn_load64_aligned(block) >> 4) & mask);
+}
+
+// Generic validator/reference helper. Validation scratch arrays are not
+// guaranteed to have the production path's explicit 16-byte alignment, so
+// keep this helper on the safe byte-oriented load path.
+__device__ __forceinline__ std::size_t cn_index(const std::uint8_t block[16], std::size_t aes_rounds)
+{
+    return static_cast<std::size_t>((cn_load64(block) >> 4) & (aes_rounds - 1U));
 }
 
 __device__ __forceinline__ void variant1_mutate(std::uint8_t block[16])
