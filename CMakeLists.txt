@@ -45,6 +45,23 @@ endif()
 
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
+
+# FetchContent reuses the pinned Core checkout across configure runs. The CUDA
+# validator temporarily instruments slow-hash.c in-place, so restore that one
+# file before applying the current instrumentation. Otherwise an older debug
+# hook can make the idempotence guard below skip newer checkpoint tracing.
+execute_process(
+    COMMAND git checkout -- src/cryptonote/slow-hash.c
+    WORKING_DIRECTORY "${yerbas_core_SOURCE_DIR}"
+    RESULT_VARIABLE YERBAS_SLOW_HASH_RESTORE_RESULT
+    OUTPUT_QUIET
+    ERROR_VARIABLE YERBAS_SLOW_HASH_RESTORE_ERROR
+)
+if(NOT YERBAS_SLOW_HASH_RESTORE_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "Could not restore pinned Core slow-hash.c before validator instrumentation: ${YERBAS_SLOW_HASH_RESTORE_ERROR}")
+endif()
+
 file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
 
 # Validation-only diagnostic hook: capture checkpoints from the actual pinned
