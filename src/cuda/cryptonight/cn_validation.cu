@@ -113,7 +113,7 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
-        b[16 + i] = 0;
+        b[16 + i] = b[i];
         c[i] = 0;
         t[i] = 0;
     }
@@ -286,6 +286,7 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
+        b[16 + i] = b[i];
     }
     const std::uint64_t tweak = host_load64(input + 35) ^ host_load64(state.data() + 192);
 
