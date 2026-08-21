@@ -44,9 +44,31 @@ if(NOT yerbas_core_POPULATED)
 endif()
 
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
+set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
+file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
+
+# Validation-only diagnostic hook: capture the exact 200-byte state produced by
+# the pinned Core cn_slow_hash immediately before its final extra hash.  The
+# capture is disabled unless the CUDA validator explicitly enables it, so the
+# normal miner path only pays one predictable branch.
+string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "yerbas_cn_debug_get_last_state" YERBAS_CN_DEBUG_POS)
+if(YERBAS_CN_DEBUG_POS EQUAL -1)
+    string(REPLACE
+        "static void (* const extra_hashes[4])(const void *, size_t, char *) = {\n    do_blake_hash, do_groestl_hash, do_jh_hash, do_skein_hash\n};"
+        "static void (* const extra_hashes[4])(const void *, size_t, char *) = {\n    do_blake_hash, do_groestl_hash, do_jh_hash, do_skein_hash\n};\n\nstatic int g_yerbas_cn_debug_capture = 0;\nstatic uint8_t g_yerbas_cn_debug_last_state[200];\n\nvoid yerbas_cn_debug_enable_capture(int enabled) {\n  g_yerbas_cn_debug_capture = enabled != 0;\n}\n\nvoid yerbas_cn_debug_get_last_state(uint8_t out[200]) {\n  memcpy(out, g_yerbas_cn_debug_last_state, 200);\n}"
+        YERBAS_SLOW_HASH_CONTENT
+        "${YERBAS_SLOW_HASH_CONTENT}"
+    )
+    string(REPLACE
+        "  extra_hashes[state.hs.b[0] & 3](&state, 200, output);"
+        "  if (g_yerbas_cn_debug_capture) memcpy(g_yerbas_cn_debug_last_state, &state, 200);\n  extra_hashes[state.hs.b[0] & 3](&state, 200, output);"
+        YERBAS_SLOW_HASH_CONTENT
+        "${YERBAS_SLOW_HASH_CONTENT}"
+    )
+    file(WRITE "${YERBAS_SLOW_HASH}" "${YERBAS_SLOW_HASH_CONTENT}")
+endif()
 
 if(WIN32)
-    set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
     file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
     string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "  free(long_state);" YERBAS_FREE_POS)
     if(YERBAS_FREE_POS EQUAL -1)
