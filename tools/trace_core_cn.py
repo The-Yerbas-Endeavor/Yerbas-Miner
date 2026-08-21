@@ -32,24 +32,18 @@ def main() -> None:
         raise SystemExit(f"missing fetched Core source: {path}")
 
     text = path.read_text()
-    marker = "YERBAS_CN_FIRST_ITER_TRACE_V1"
+    marker = "YERBAS_CN_FIRST_ITER_TRACE_V2"
     if marker in text:
         print(f"Core first-iteration trace already installed in {path}")
         return
 
-    # Reuse the validator's existing debug-enable global/helper installed by CMake.
     anchor = "static void yerbas_cn_debug_print_hex(const char* label, const uint8_t* p, size_t n) {"
     if anchor not in text:
         raise SystemExit(
             "current CMake validator instrumentation is missing; run `cmake -S . -B build-cuda` first"
         )
 
-    text = replace_once(
-        text,
-        anchor,
-        "/* YERBAS_CN_FIRST_ITER_TRACE_V1 */\n" + anchor,
-        "marker",
-    )
+    text = replace_once(text, anchor, "/* YERBAS_CN_FIRST_ITER_TRACE_V2 */\n" + anchor, "marker")
 
     text = replace_once(
         text,
@@ -72,8 +66,14 @@ def main() -> None:
         "      yerbas_cn_debug_print_hex(\"Raw Core slot1 before AES:      \", &long_state[j * AES_BLOCK_SIZE], 16);\n"
         "    }\n"
         "    aesb_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);\n"
-        "    if (g_yerbas_cn_debug_capture && i == 0)\n"
-        "      yerbas_cn_debug_print_hex(\"Raw Core c after AES:            \", c, 16);",
+        "    if (g_yerbas_cn_debug_capture && i == 0) {\n"
+        "      uint8_t expected_xor[16];\n"
+        "      size_t xk;\n"
+        "      yerbas_cn_debug_print_hex(\"Raw Core c after AES:            \", c, 16);\n"
+        "      yerbas_cn_debug_print_hex(\"Raw Core b immediately pre-XOR: \", b, 16);\n"
+        "      for (xk = 0; xk < 16; ++xk) expected_xor[xk] = c[xk] ^ b[xk];\n"
+        "      yerbas_cn_debug_print_hex(\"Raw Core bytewise c xor b:      \", expected_xor, 16);\n"
+        "    }",
         "first AES",
     )
 
@@ -82,7 +82,7 @@ def main() -> None:
         "    xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);\n    VARIANT1_1((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);",
         "    xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);\n"
         "    if (g_yerbas_cn_debug_capture && i == 0)\n"
-        "      yerbas_cn_debug_print_hex(\"Raw Core slot1 after c xor b:   \", &long_state[j * AES_BLOCK_SIZE], 16);\n"
+        "      yerbas_cn_debug_print_hex(\"Raw Core xor_blocks_dst result: \", &long_state[j * AES_BLOCK_SIZE], 16);\n"
         "    VARIANT1_1((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);\n"
         "    if (g_yerbas_cn_debug_capture && i == 0)\n"
         "      yerbas_cn_debug_print_hex(\"Raw Core slot1 after VARIANT1_1: \", &long_state[j * AES_BLOCK_SIZE], 16);",
