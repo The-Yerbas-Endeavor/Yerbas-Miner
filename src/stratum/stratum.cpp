@@ -691,9 +691,6 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
     }
 
-    // Keep the persistent CPU pool fed for the full duration of the GPU round.
-    // Previously the CPU executed exactly one small batch and then sat idle
-    // waiting for the much longer CUDA scan, which produced ~20% utilization.
     bool gpu_ready = false;
     do {
         if (!mine_cpu_batch(socket_value)) return false;
@@ -754,6 +751,10 @@ void Client::report_stats(bool force)
         }
     }
 #endif
+    const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
+    std::cout << "🌿 Proof of Grass | " << format_rate(total_hps)
+              << " | Shares " << shares_accepted_ << '/' << resolved_shares
+              << " | Uptime " << format_duration(uptime) << '\n';
     std::cout << "[TOTAL] " << format_rate(total_hps) << " | avg " << format_rate(average_hps) << " | hashes " << hashes_done_ << " | jobs " << received_jobs_ << " | shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_;
     if (difficulty_ > 0.0) {
         const double expected_hashes = difficulty_ * kStratumDiffOneHashes;
