@@ -31,15 +31,20 @@ std::string stage_name(std::uint8_t encoded)
     return index < 15 ? kCoreNames[index] : "Core-?";
 }
 
+std::vector<std::size_t> default_sizes()
+{
+    return {256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096};
+}
+
 std::vector<std::size_t> benchmark_sizes(int argc, char** argv)
 {
-    if (argc <= 2) return {256, 512, 768, 1024, 1280, 1536};
+    if (argc <= 2) return default_sizes();
     std::vector<std::size_t> sizes;
     for (int i = 2; i < argc; ++i) {
         const unsigned long value = std::strtoul(argv[i], nullptr, 10);
         if (value != 0) sizes.push_back(static_cast<std::size_t>(value));
     }
-    return sizes.empty() ? std::vector<std::size_t>{256, 512, 768, 1024, 1280, 1536} : sizes;
+    return sizes.empty() ? default_sizes() : sizes;
 }
 
 } // namespace
