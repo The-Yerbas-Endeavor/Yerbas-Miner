@@ -8,9 +8,7 @@ CORE_DIR="$BUILD_DIR/_deps/yerbas_core-src"
 SLOW_HASH="$CORE_DIR/src/cryptonote/slow-hash.c"
 
 # Configure only when the build tree does not exist. CMake installs the base
-# validator instrumentation into the fetched Core slow-hash.c. Do NOT git
-# checkout that file here: doing so removes the instrumentation that
-# trace_core_cn.py extends.
+# validator instrumentation into the fetched Core slow-hash.c.
 if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
   cmake -S . -B "$BUILD_DIR"
 fi
@@ -20,15 +18,17 @@ if [[ ! -f "$SLOW_HASH" ]]; then
   cmake -S . -B "$BUILD_DIR"
 fi
 
-# If the base hook is absent (for example after a manual git checkout inside
-# _deps), repair it automatically with one configure instead of making the
-# user diagnose the build tree.
-if ! grep -q "yerbas_cn_debug_get_last_state" "$SLOW_HASH"; then
+# If the detailed trace from a previous run is still present, keep it. If the
+# base CMake hook is missing entirely, reconfigure once to restore it.
+if grep -q "YERBAS_CN_FIRST_ITER_TRACE_V2" "$SLOW_HASH"; then
+  echo "Core first-iteration trace already installed"
+elif grep -q "yerbas_cn_debug_get_last_state" "$SLOW_HASH"; then
+  python3 tools/trace_core_cn.py "$SLOW_HASH"
+else
   echo "Restoring validator instrumentation with CMake..."
   cmake -S . -B "$BUILD_DIR"
+  python3 tools/trace_core_cn.py "$SLOW_HASH"
 fi
-
-python3 tools/trace_core_cn.py "$SLOW_HASH"
 
 # Ninja handles file-level parallelism with $(nproc). NVCC is configured with
 # --threads=0 for its own supported internal parallel work.
