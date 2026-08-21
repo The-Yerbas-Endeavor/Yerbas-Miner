@@ -47,18 +47,32 @@ set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
 file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
 
-# Validation-only diagnostic hook: capture the exact 200-byte state produced by
-# the pinned Core cn_slow_hash immediately before its final extra hash.  The
-# capture is disabled unless the CUDA validator explicitly enables it, so the
-# normal miner path only pays one predictable branch.
+# Validation-only diagnostic hook: capture checkpoints from the actual pinned
+# Core cn_slow_hash implementation. This is enabled only around the validator's
+# explicit raw-Core call and does not alter normal mining behavior.
 string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "yerbas_cn_debug_get_last_state" YERBAS_CN_DEBUG_POS)
 if(YERBAS_CN_DEBUG_POS EQUAL -1)
     string(REPLACE
         "static void (* const extra_hashes[4])(const void *, size_t, char *) = {\n    do_blake_hash, do_groestl_hash, do_jh_hash, do_skein_hash\n};"
-        "static void (* const extra_hashes[4])(const void *, size_t, char *) = {\n    do_blake_hash, do_groestl_hash, do_jh_hash, do_skein_hash\n};\n\nstatic int g_yerbas_cn_debug_capture = 0;\nstatic uint8_t g_yerbas_cn_debug_last_state[200];\n\nvoid yerbas_cn_debug_enable_capture(int enabled) {\n  g_yerbas_cn_debug_capture = enabled != 0;\n}\n\nvoid yerbas_cn_debug_get_last_state(uint8_t out[200]) {\n  memcpy(out, g_yerbas_cn_debug_last_state, 200);\n}"
+        "static void (* const extra_hashes[4])(const void *, size_t, char *) = {\n    do_blake_hash, do_groestl_hash, do_jh_hash, do_skein_hash\n};\n\nstatic int g_yerbas_cn_debug_capture = 0;\nstatic uint8_t g_yerbas_cn_debug_last_state[200];\nstatic uint8_t g_yerbas_cn_debug_loop1[80];\nstatic uint8_t g_yerbas_cn_debug_loop2[80];\nstatic uint8_t g_yerbas_cn_debug_loop16[80];\nstatic uint8_t g_yerbas_cn_debug_loop1024[80];\nstatic uint8_t g_yerbas_cn_debug_loop_final[80];\nstatic uint8_t g_yerbas_cn_debug_collapsed[128];\n\nstatic void yerbas_cn_debug_snapshot(uint8_t out[80], const uint8_t a[16], const uint8_t b[32], const uint8_t c[16], const uint8_t t[16]) {\n  memcpy(out, a, 16);\n  memcpy(out + 16, b, 32);\n  memcpy(out + 48, c, 16);\n  memcpy(out + 64, t, 16);\n}\n\nstatic void yerbas_cn_debug_print_hex(const char* label, const uint8_t* p, size_t n) {\n  size_t k;\n  printf(\"%s\", label);\n  for (k = 0; k < n; ++k) printf(\"%02x\", p[k]);\n  printf(\"\\n\");\n}\n\nvoid yerbas_cn_debug_enable_capture(int enabled) {\n  g_yerbas_cn_debug_capture = enabled != 0;\n}\n\nvoid yerbas_cn_debug_get_last_state(uint8_t out[200]) {\n  memcpy(out, g_yerbas_cn_debug_last_state, 200);\n  if (g_yerbas_cn_debug_capture) {\n    yerbas_cn_debug_print_hex(\"Raw Core loop 1 a|b32|c|t:    \", g_yerbas_cn_debug_loop1, 80);\n    yerbas_cn_debug_print_hex(\"Raw Core loop 2 a|b32|c|t:    \", g_yerbas_cn_debug_loop2, 80);\n    yerbas_cn_debug_print_hex(\"Raw Core loop 16 a|b32|c|t:   \", g_yerbas_cn_debug_loop16, 80);\n    yerbas_cn_debug_print_hex(\"Raw Core loop 1024 a|b32|c|t: \", g_yerbas_cn_debug_loop1024, 80);\n    yerbas_cn_debug_print_hex(\"Raw Core final loop a|b32|c|t:\", g_yerbas_cn_debug_loop_final, 80);\n    yerbas_cn_debug_print_hex(\"Raw Core collapsed text:        \", g_yerbas_cn_debug_collapsed, 128);\n    printf(\"Raw Core final selector: %u\\n\", (unsigned)(g_yerbas_cn_debug_last_state[0] & 3));\n  }\n}"
         YERBAS_SLOW_HASH_CONTENT
         "${YERBAS_SLOW_HASH_CONTENT}"
     )
+
+    string(REPLACE
+        "    copy_block(b + AES_BLOCK_SIZE, b);\n    copy_block(b, c);"
+        "    copy_block(b + AES_BLOCK_SIZE, b);\n    copy_block(b, c);\n    if (g_yerbas_cn_debug_capture) {\n      if (i == 0) yerbas_cn_debug_snapshot(g_yerbas_cn_debug_loop1, a, b, c, (const uint8_t*)t);\n      else if (i == 1) yerbas_cn_debug_snapshot(g_yerbas_cn_debug_loop2, a, b, c, (const uint8_t*)t);\n      else if (i == 15) yerbas_cn_debug_snapshot(g_yerbas_cn_debug_loop16, a, b, c, (const uint8_t*)t);\n      else if (i == 1023) yerbas_cn_debug_snapshot(g_yerbas_cn_debug_loop1024, a, b, c, (const uint8_t*)t);\n      else if (i + 1 == iterations) yerbas_cn_debug_snapshot(g_yerbas_cn_debug_loop_final, a, b, c, (const uint8_t*)t);\n    }"
+        YERBAS_SLOW_HASH_CONTENT
+        "${YERBAS_SLOW_HASH_CONTENT}"
+    )
+
+    string(REPLACE
+        "  memcpy(state.init, text, INIT_SIZE_BYTE);\n  hash_permutation(&state.hs);"
+        "  memcpy(state.init, text, INIT_SIZE_BYTE);\n  if (g_yerbas_cn_debug_capture) memcpy(g_yerbas_cn_debug_collapsed, text, INIT_SIZE_BYTE);\n  hash_permutation(&state.hs);"
+        YERBAS_SLOW_HASH_CONTENT
+        "${YERBAS_SLOW_HASH_CONTENT}"
+    )
+
     string(REPLACE
         "  extra_hashes[state.hs.b[0] & 3](&state, 200, output);"
         "  if (g_yerbas_cn_debug_capture) memcpy(g_yerbas_cn_debug_last_state, &state, 200);\n  extra_hashes[state.hs.b[0] & 3](&state, 200, output);"
