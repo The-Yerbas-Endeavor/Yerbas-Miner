@@ -154,7 +154,10 @@ add_library(yerbas-ghostrider-reference STATIC
     src/ghostrider/ghostrider.cpp
     ${YERBAS_GR_CORE_SOURCES}
 )
-target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE ${YERBAS_CORE_SRC})
+target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE
+    ${YERBAS_CORE_SRC}
+    ${YERBAS_CORE_SRC}/cryptonote
+)
 
 if(YERBAS_IPO_SUPPORTED)
     set_property(TARGET yerbas-ghostrider-reference PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
@@ -334,7 +337,10 @@ if(BUILD_TESTING)
 
     if(YERBAS_CUDA_AVAILABLE)
         add_library(yerbas-ghostrider-debug OBJECT "${YERBAS_SLOW_HASH}")
-        target_include_directories(yerbas-ghostrider-debug PRIVATE ${YERBAS_CORE_SRC})
+        target_include_directories(yerbas-ghostrider-debug PRIVATE
+            ${YERBAS_CORE_SRC}
+            ${YERBAS_CORE_SRC}/cryptonote
+        )
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             target_compile_options(yerbas-ghostrider-debug PRIVATE
                 -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
