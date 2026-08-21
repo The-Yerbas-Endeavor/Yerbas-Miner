@@ -14,32 +14,41 @@ __device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
                                                     const std::uint8_t state[200],
                                                     std::uint8_t out[32]);
 
+// Generic little-endian load retained for the intentionally unaligned
+// variant-1 input tweak at input+35.
 __device__ __forceinline__ std::uint64_t cn_load64(const std::uint8_t* p)
 {
     return load64le(p);
 }
 
-__device__ __forceinline__ void cn_store64(std::uint8_t* p, std::uint64_t v)
+// All hot-loop state blocks and scratchpad slots are explicitly 16-byte
+// aligned. Use native 64-bit accesses there instead of eight byte loads,
+// shifts and stores per word.
+__device__ __forceinline__ std::uint64_t cn_load64_aligned(const std::uint8_t* p)
 {
-    #pragma unroll
-    for (int i = 0; i < 8; ++i) p[i] = static_cast<std::uint8_t>(v >> (i * 8));
+    return *reinterpret_cast<const std::uint64_t*>(p);
+}
+
+__device__ __forceinline__ void cn_store64_aligned(std::uint8_t* p, std::uint64_t v)
+{
+    *reinterpret_cast<std::uint64_t*>(p) = v;
 }
 
 __device__ __forceinline__ void copy16(std::uint8_t* dst, const std::uint8_t* src)
 {
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) dst[i] = src[i];
+    reinterpret_cast<std::uint64_t*>(dst)[0] = reinterpret_cast<const std::uint64_t*>(src)[0];
+    reinterpret_cast<std::uint64_t*>(dst)[1] = reinterpret_cast<const std::uint64_t*>(src)[1];
 }
 
 __device__ __forceinline__ void xor16(std::uint8_t* dst, const std::uint8_t* src)
 {
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) dst[i] ^= src[i];
+    reinterpret_cast<std::uint64_t*>(dst)[0] ^= reinterpret_cast<const std::uint64_t*>(src)[0];
+    reinterpret_cast<std::uint64_t*>(dst)[1] ^= reinterpret_cast<const std::uint64_t*>(src)[1];
 }
 
 __device__ __forceinline__ std::size_t cn_index_masked(const std::uint8_t block[16], std::size_t mask)
 {
-    return static_cast<std::size_t>((cn_load64(block) >> 4) & mask);
+    return static_cast<std::size_t>((cn_load64_aligned(block) >> 4) & mask);
 }
 
 __device__ __forceinline__ void variant1_mutate(std::uint8_t block[16])
@@ -67,14 +76,14 @@ __device__ __forceinline__ bool slow_hash_specialized(const std::uint8_t* input,
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
     constexpr std::size_t init_rounds = cfg.page_size / 128U;
 
-    std::uint8_t state[200];
+    alignas(16) std::uint8_t state[200];
     keccak1600(input, length, state);
 
-    std::uint8_t text[128];
+    alignas(16) std::uint8_t text[128];
     #pragma unroll
     for (int i = 0; i < 128; ++i) text[i] = state[64 + i];
 
-    std::uint8_t expanded[240];
+    alignas(16) std::uint8_t expanded[240];
     aes256_expand_key(state, expanded);
 
     for (std::size_t i = 0; i < init_rounds; ++i) {
@@ -86,7 +95,10 @@ __device__ __forceinline__ bool slow_hash_specialized(const std::uint8_t* input,
             scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
     }
 
-    std::uint8_t a[16], b[32], c[16], t[16];
+    alignas(16) std::uint8_t a[16];
+    alignas(16) std::uint8_t b[32];
+    alignas(16) std::uint8_t c[16];
+    alignas(16) std::uint8_t t[16];
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
@@ -94,7 +106,7 @@ __device__ __forceinline__ bool slow_hash_specialized(const std::uint8_t* input,
         b[16 + i] = 0;
     }
 
-    const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
+    const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64_aligned(state + 192);
 
     #pragma unroll 1
     for (std::uint32_t i = 0; i < cfg.iterations; ++i) {
@@ -102,29 +114,30 @@ __device__ __forceinline__ bool slow_hash_specialized(const std::uint8_t* input,
         std::uint8_t* slot = scratchpad + j * 16U;
 
         aes_single_round(slot, c, a);
-        #pragma unroll
-        for (int k = 0; k < 16; ++k)
-            slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
+        reinterpret_cast<std::uint64_t*>(slot)[0] =
+            reinterpret_cast<const std::uint64_t*>(c)[0] ^ reinterpret_cast<const std::uint64_t*>(b)[0];
+        reinterpret_cast<std::uint64_t*>(slot)[1] =
+            reinterpret_cast<const std::uint64_t*>(c)[1] ^ reinterpret_cast<const std::uint64_t*>(b)[1];
         variant1_mutate(slot);
 
         j = cn_index_masked(c, address_mask);
         slot = scratchpad + j * 16U;
         copy16(t, slot);
 
-        const std::uint64_t c0 = cn_load64(c);
-        const std::uint64_t t0 = cn_load64(t);
+        const std::uint64_t c0 = cn_load64_aligned(c);
+        const std::uint64_t t0 = cn_load64_aligned(t);
         const std::uint64_t lo = c0 * t0;
         const std::uint64_t hi = __umul64hi(c0, t0);
 
-        std::uint64_t a0 = cn_load64(a) + hi;
-        std::uint64_t a1 = cn_load64(a + 8) + lo;
-        cn_store64(slot, a0);
-        cn_store64(slot + 8, a1 ^ tweak);
+        std::uint64_t a0 = cn_load64_aligned(a) + hi;
+        std::uint64_t a1 = cn_load64_aligned(a + 8) + lo;
+        cn_store64_aligned(slot, a0);
+        cn_store64_aligned(slot + 8, a1 ^ tweak);
 
         a0 ^= t0;
-        a1 ^= cn_load64(t + 8);
-        cn_store64(a, a0);
-        cn_store64(a + 8, a1);
+        a1 ^= cn_load64_aligned(t + 8);
+        cn_store64_aligned(a, a0);
+        cn_store64_aligned(a + 8, a1);
 
         copy16(b + 16, b);
         copy16(b, c);
