@@ -44,6 +44,8 @@ int Miner::run()
 #endif
 
     std::cout << "Yerbas Miner 0.5.2\n";
+    std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
+    std::cout << "------------------------------------------------------------\n";
     std::cout << "Config: " << config_.config_path << "\n";
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
@@ -127,6 +129,7 @@ int Miner::run()
                 std::cout << "Validated CUDA cores run on GPU; pending stages use the pinned CPU reference fallback\n";
             } else {
                 std::cout << "CUDA GhostRider pipeline: full native CUDA mining enabled\n";
+                std::cout << "🌿 Proof of Grass: growing on CUDA\n";
             }
         }
     } else {
