@@ -55,9 +55,12 @@ inline constexpr std::size_t max_scratchpad_bytes()
     return value;
 }
 
-// Hardware testing on GTX 1080 Ti (Pascal, CC 6.1) showed 1024 active hashes
-// far ahead of the original small batches, while 2048 regressed. Test the
-// midpoint at 1536; CN-Fast uses ~3 GiB of scratchpad per GPU at this size.
-inline constexpr std::size_t kInitialMaxBatch = 1536;
+// Constant-memory AES moved the Pascal CryptoNight path from ~50 H/s to
+// ~228 H/s and throughput was still increasing at the old 1536-hash ceiling.
+// A GTX 1080 Ti has ~11 GiB; CN-Fast needs 2 MiB/hash, so 4096 hashes consume
+// ~8 GiB of scratchpad and leave practical headroom for states and CUDA
+// runtime allocations. Benchmark up to this ceiling before changing the
+// kernel architecture.
+inline constexpr std::size_t kInitialMaxBatch = 4096;
 
 } // namespace yerbas::cuda::cryptonight
