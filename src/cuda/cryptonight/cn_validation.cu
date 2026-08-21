@@ -28,6 +28,12 @@ void check(cudaError_t status, const char* what)
         throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(status));
 }
 
+__device__ __forceinline__ void checkpoint16(std::uint8_t* dst, const std::uint8_t src[16])
+{
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) dst[i] = src[i];
+}
+
 __device__ __forceinline__ void checkpoint_state(std::uint8_t* dst,
                                                  const std::uint8_t a[16],
                                                  const std::uint8_t b[32],
@@ -124,35 +130,70 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
         t[i] = 0;
     }
 
+    checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_initial_a), a);
+    checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_initial_b), b);
+
     const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
 
     for (std::uint32_t iteration = 0; iteration < cfg.iterations; ++iteration) {
         std::size_t j = cn_index(a, cfg.aes_rounds);
         std::uint8_t* slot = scratchpad + j * 16U;
 
+        if (iteration == 0) {
+            output->first_j1 = static_cast<std::uint32_t>(j);
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_slot1_before_aes), slot);
+        }
+
         aes_single_round(slot, c, a);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_c_after_aes), c);
+
         #pragma unroll
         for (int k = 0; k < 16; ++k) slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_slot1_after_xor), slot);
+
         variant1_mutate(slot);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_slot1_after_variant1), slot);
 
         j = cn_index(c, cfg.aes_rounds);
         slot = scratchpad + j * 16U;
+        if (iteration == 0) {
+            output->first_j2 = static_cast<std::uint32_t>(j);
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_slot2_before_mul), slot);
+        }
+
         copy16(t, slot);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_t), t);
 
         const std::uint64_t c0 = cn_load64(c);
         const std::uint64_t t0 = cn_load64(t);
         const std::uint64_t lo = c0 * t0;
         const std::uint64_t hi = __umul64hi(c0, t0);
+        if (iteration == 0) {
+            output->first_mul_hi = hi;
+            output->first_mul_lo = lo;
+        }
 
         std::uint64_t a0 = cn_load64(a) + hi;
         std::uint64_t a1 = cn_load64(a + 8) + lo;
         cn_store64(slot, a0);
-        cn_store64(slot + 8, a1 ^ tweak);
+        cn_store64(slot + 8, a1);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_slot2_after_add), slot);
 
         a0 ^= t0;
         a1 ^= cn_load64(t + 8);
         cn_store64(a, a0);
         cn_store64(a + 8, a1);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_a_after_xor), a);
+
+        cn_store64(slot + 8, cn_load64(slot + 8) ^ tweak);
+        if (iteration == 0)
+            checkpoint16(reinterpret_cast<std::uint8_t*>(&output->first_slot2_after_variant1_2), slot);
 
         if (iteration == 0)
             checkpoint_b32(reinterpret_cast<std::uint8_t*>(&output->first_loop_b_before_copy), b);
@@ -318,11 +359,12 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
         std::uint64_t a0 = host_load64(a) + hi;
         std::uint64_t a1 = host_load64(a + 8) + lo;
         host_store64(slot, a0);
-        host_store64(slot + 8, a1 ^ tweak);
+        host_store64(slot + 8, a1);
         a0 ^= host_load64(t);
         a1 ^= host_load64(t + 8);
         host_store64(a, a0);
         host_store64(a + 8, a1);
+        host_store64(slot + 8, host_load64(slot + 8) ^ tweak);
 
         if (iteration == 0)
             std::memcpy(out.first_loop_b_before_copy.data(), b, 32);
