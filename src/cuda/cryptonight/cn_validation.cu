@@ -44,6 +44,12 @@ __device__ __forceinline__ void checkpoint_state(std::uint8_t* dst,
     }
 }
 
+__device__ __forceinline__ void checkpoint_b32(std::uint8_t* dst, const std::uint8_t b[32])
+{
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) dst[i] = b[i];
+}
+
 __global__ void validation_kernel(std::uint8_t variant,
                                   const std::uint8_t* input,
                                   std::size_t length,
@@ -147,8 +153,13 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
         a1 ^= cn_load64(t + 8);
         cn_store64(a, a0);
         cn_store64(a + 8, a1);
+
+        if (iteration == 0)
+            checkpoint_b32(reinterpret_cast<std::uint8_t*>(&output->first_loop_b_before_copy), b);
         copy16(b + 16, b);
         copy16(b, c);
+        if (iteration == 0)
+            checkpoint_b32(reinterpret_cast<std::uint8_t*>(&output->first_loop_b_after_copy), b);
 
         std::uint8_t* snapshot = nullptr;
         if (iteration == 0)
@@ -312,8 +323,13 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
         a1 ^= host_load64(t + 8);
         host_store64(a, a0);
         host_store64(a + 8, a1);
+
+        if (iteration == 0)
+            std::memcpy(out.first_loop_b_before_copy.data(), b, 32);
         std::memcpy(b + 16, b, 16);
         std::memcpy(b, c, 16);
+        if (iteration == 0)
+            std::memcpy(out.first_loop_b_after_copy.data(), b, 32);
 
         if (iteration == 0) host_snapshot(out.first_loop_state, a, b, c, t);
         else if (iteration == 1) host_snapshot(out.second_loop_state, a, b, c, t);
@@ -448,6 +464,12 @@ ValidationCheckpoints validation_checkpoints(int device_id,
         if (variant == 0) {
             const auto cpu = core_dark_checkpoints(input, length);
             report_dark_checkpoint_result(cpu, out);
+            if (cpu.first_loop_b_before_copy != out.first_loop_b_before_copy ||
+                cpu.first_loop_b_after_copy != out.first_loop_b_after_copy) {
+                std::cout << "CryptoNight first-loop b transition FAILED\n";
+            } else {
+                std::cout << "CryptoNight first-loop b transition OK\n";
+            }
         }
         return out;
     } catch (...) {
