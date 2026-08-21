@@ -21,6 +21,7 @@ __device__ __forceinline__ std::uint64_t cn_load64(const std::uint8_t* p)
 
 __device__ __forceinline__ void cn_store64(std::uint8_t* p, std::uint64_t v)
 {
+    #pragma unroll
     for (int i = 0; i < 8; ++i) p[i] = static_cast<std::uint8_t>(v >> (i * 8));
 }
 
@@ -36,9 +37,9 @@ __device__ __forceinline__ void xor16(std::uint8_t* dst, const std::uint8_t* src
     for (int i = 0; i < 16; ++i) dst[i] ^= src[i];
 }
 
-__device__ __forceinline__ std::size_t cn_index(const std::uint8_t block[16], std::size_t aes_rounds)
+__device__ __forceinline__ std::size_t cn_index_masked(const std::uint8_t block[16], std::size_t mask)
 {
-    return static_cast<std::size_t>((cn_load64(block) >> 4) & (aes_rounds - 1));
+    return static_cast<std::size_t>((cn_load64(block) >> 4) & mask);
 }
 
 __device__ __forceinline__ void variant1_mutate(std::uint8_t block[16])
@@ -49,16 +50,22 @@ __device__ __forceinline__ void variant1_mutate(std::uint8_t block[16])
     block[11] = static_cast<std::uint8_t>(tmp ^ ((table >> index) & 0x30U));
 }
 
-__device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
-                                          const std::uint8_t* input,
-                                          std::size_t length,
-                                          std::uint8_t* scratchpad,
-                                          std::uint8_t out[32])
+// GhostRider's six CryptoNight flavors are fixed per stage. Specializing the
+// full slow-hash path at compile time lets NVCC constant-fold page sizing,
+// address masks and iteration counts instead of carrying a runtime config
+// through the hottest memory-dependent loop.
+template <std::uint8_t VariantIndex>
+__device__ __forceinline__ bool slow_hash_specialized(const std::uint8_t* input,
+                                                       std::size_t length,
+                                                       std::uint8_t* scratchpad,
+                                                       std::uint8_t out[32])
 {
-    if (variant_index >= 6 || scratchpad == nullptr || input == nullptr || length < 43)
-        return false;
+    static_assert(VariantIndex < 6, "invalid CryptoNight variant");
+    if (scratchpad == nullptr || input == nullptr || length < 43) return false;
 
-    const VariantConfig cfg = config_value(variant_index);
+    constexpr VariantConfig cfg = config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::size_t init_rounds = cfg.page_size / 128U;
 
     std::uint8_t state[200];
     keccak1600(input, length, state);
@@ -70,18 +77,15 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
     std::uint8_t expanded[240];
     aes256_expand_key(state, expanded);
 
-    const std::size_t init_rounds = cfg.page_size / 128U;
     for (std::size_t i = 0; i < init_rounds; ++i) {
         #pragma unroll
         for (int block = 0; block < 8; ++block)
             aes_pseudo_round(text + block * 16, expanded);
-        for (int b = 0; b < 128; ++b) scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
+        #pragma unroll 16
+        for (int b = 0; b < 128; ++b)
+            scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
     }
 
-    // Yerbas Core keeps two 16-byte b blocks. The upper half preserves the
-    // previous b value before the lower half is replaced with c at the end of
-    // every CryptoNight iteration. Keep that state exactly instead of
-    // collapsing b to a single block.
     std::uint8_t a[16], b[32], c[16], t[16];
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
@@ -92,16 +96,18 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
 
     const std::uint64_t tweak = cn_load64(input + 35) ^ cn_load64(state + 192);
 
+    #pragma unroll 1
     for (std::uint32_t i = 0; i < cfg.iterations; ++i) {
-        std::size_t j = cn_index(a, cfg.aes_rounds);
+        std::size_t j = cn_index_masked(a, address_mask);
         std::uint8_t* slot = scratchpad + j * 16U;
 
         aes_single_round(slot, c, a);
         #pragma unroll
-        for (int k = 0; k < 16; ++k) slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
+        for (int k = 0; k < 16; ++k)
+            slot[k] = static_cast<std::uint8_t>(c[k] ^ b[k]);
         variant1_mutate(slot);
 
-        j = cn_index(c, cfg.aes_rounds);
+        j = cn_index_masked(c, address_mask);
         slot = scratchpad + j * 16U;
         copy16(t, slot);
 
@@ -120,7 +126,6 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
         cn_store64(a, a0);
         cn_store64(a + 8, a1);
 
-        // Core: copy_block(b + AES_BLOCK_SIZE, b); copy_block(b, c);
         copy16(b + 16, b);
         copy16(b, c);
     }
@@ -142,6 +147,23 @@ __device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
     keccak_permute_state(state);
     dispatch_extra_hash(static_cast<std::uint8_t>(state[0] & 3U), state, out);
     return true;
+}
+
+__device__ __forceinline__ bool slow_hash(std::uint8_t variant_index,
+                                          const std::uint8_t* input,
+                                          std::size_t length,
+                                          std::uint8_t* scratchpad,
+                                          std::uint8_t out[32])
+{
+    switch (variant_index) {
+    case 0: return slow_hash_specialized<0>(input, length, scratchpad, out);
+    case 1: return slow_hash_specialized<1>(input, length, scratchpad, out);
+    case 2: return slow_hash_specialized<2>(input, length, scratchpad, out);
+    case 3: return slow_hash_specialized<3>(input, length, scratchpad, out);
+    case 4: return slow_hash_specialized<4>(input, length, scratchpad, out);
+    case 5: return slow_hash_specialized<5>(input, length, scratchpad, out);
+    default: return false;
+    }
 }
 
 } // namespace yerbas::cuda::cryptonight
