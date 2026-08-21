@@ -11,6 +11,8 @@ using Hash256 = std::array<std::uint8_t, 32>;
 struct ValidationCheckpoints {
     std::array<std::uint8_t, 64> expanded_key_prefix{};
     std::array<std::uint8_t, 128> scratchpad_prefix{};
+    std::array<std::uint8_t, 32> first_loop_b_before_copy{};
+    std::array<std::uint8_t, 32> first_loop_b_after_copy{};
     std::array<std::uint8_t, 80> first_loop_state{};
     std::array<std::uint8_t, 80> second_loop_state{};
     std::array<std::uint8_t, 80> loop16_state{};
