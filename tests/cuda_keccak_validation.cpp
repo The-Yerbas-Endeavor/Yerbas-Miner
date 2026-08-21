@@ -237,6 +237,22 @@ int main()
     const auto gpu_cp = yerbas::cuda::cryptonight::validation_checkpoints(
         0, 0, stage_input.data(), stage_input.size());
 
+    std::cout << "CUDA initial a:                " << hex_string(gpu_cp.first_initial_a) << "\n"
+              << "CUDA initial b[0..15]:         " << hex_string(gpu_cp.first_initial_b) << "\n"
+              << "CUDA j1: " << gpu_cp.first_j1 << "\n"
+              << "CUDA slot1 before AES:         " << hex_string(gpu_cp.first_slot1_before_aes) << "\n"
+              << "CUDA c after AES:              " << hex_string(gpu_cp.first_c_after_aes) << "\n"
+              << "CUDA slot1 after c xor b:      " << hex_string(gpu_cp.first_slot1_after_xor) << "\n"
+              << "CUDA slot1 after VARIANT1_1:   " << hex_string(gpu_cp.first_slot1_after_variant1) << "\n"
+              << "CUDA j2: " << gpu_cp.first_j2 << "\n"
+              << "CUDA slot2 before MUL:         " << hex_string(gpu_cp.first_slot2_before_mul) << "\n"
+              << "CUDA t:                        " << hex_string(gpu_cp.first_t) << "\n"
+              << "CUDA mul hi|lo: " << std::hex << std::setfill('0')
+              << std::setw(16) << gpu_cp.first_mul_hi << std::setw(16) << gpu_cp.first_mul_lo << std::dec << "\n"
+              << "CUDA slot2 after add:          " << hex_string(gpu_cp.first_slot2_after_add) << "\n"
+              << "CUDA a after xor t:            " << hex_string(gpu_cp.first_a_after_xor) << "\n"
+              << "CUDA slot2 after VARIANT1_2:   " << hex_string(gpu_cp.first_slot2_after_variant1_2) << "\n";
+
     if (cpu_cp.expanded_key_prefix != gpu_cp.expanded_key_prefix) {
         std::cerr << "CryptoNight checkpoint FAILED: AES-256 expanded key diverges\n"
                   << "  CPU: " << hex_string(cpu_cp.expanded_key_prefix) << "\n"
