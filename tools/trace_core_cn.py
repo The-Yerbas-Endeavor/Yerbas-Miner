@@ -32,7 +32,7 @@ def main() -> None:
         raise SystemExit(f"missing fetched Core source: {path}")
 
     text = path.read_text()
-    marker = "YERBAS_CN_FIRST_ITER_TRACE_V2"
+    marker = "YERBAS_CN_FIRST_ITER_TRACE_V3"
     if marker in text:
         print(f"Core first-iteration trace already installed in {path}")
         return
@@ -43,7 +43,7 @@ def main() -> None:
             "current CMake validator instrumentation is missing; run `cmake -S . -B build-cuda` first"
         )
 
-    text = replace_once(text, anchor, "/* YERBAS_CN_FIRST_ITER_TRACE_V2 */\n" + anchor, "marker")
+    text = replace_once(text, anchor, "/* YERBAS_CN_FIRST_ITER_TRACE_V3 */\n" + anchor, "marker")
 
     text = replace_once(
         text,
@@ -71,6 +71,9 @@ def main() -> None:
         "      size_t xk;\n"
         "      yerbas_cn_debug_print_hex(\"Raw Core c after AES:            \", c, 16);\n"
         "      yerbas_cn_debug_print_hex(\"Raw Core b immediately pre-XOR: \", b, 16);\n"
+        "      printf(\"Raw Core c ptr: %p b ptr: %p dst ptr: %p\\n\", (void*)c, (void*)b, (void*)&long_state[j * AES_BLOCK_SIZE]);\n"
+        "      printf(\"Raw Core c64: %016llx %016llx\\n\", (unsigned long long)((uint64_t*)c)[0], (unsigned long long)((uint64_t*)c)[1]);\n"
+        "      printf(\"Raw Core b64: %016llx %016llx\\n\", (unsigned long long)((uint64_t*)b)[0], (unsigned long long)((uint64_t*)b)[1]);\n"
         "      for (xk = 0; xk < 16; ++xk) expected_xor[xk] = c[xk] ^ b[xk];\n"
         "      yerbas_cn_debug_print_hex(\"Raw Core bytewise c xor b:      \", expected_xor, 16);\n"
         "    }",
@@ -80,9 +83,18 @@ def main() -> None:
     text = replace_once(
         text,
         "    xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);\n    VARIANT1_1((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);",
+        "    if (g_yerbas_cn_debug_capture && i == 0) {\n"
+        "      uint64_t dbg_c0 = ((uint64_t*)c)[0];\n"
+        "      uint64_t dbg_c1 = ((uint64_t*)c)[1];\n"
+        "      uint64_t dbg_b0 = ((uint64_t*)b)[0];\n"
+        "      uint64_t dbg_b1 = ((uint64_t*)b)[1];\n"
+        "      printf(\"Raw Core xor64 expected: %016llx %016llx\\n\", (unsigned long long)(dbg_c0 ^ dbg_b0), (unsigned long long)(dbg_c1 ^ dbg_b1));\n"
+        "    }\n"
         "    xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);\n"
-        "    if (g_yerbas_cn_debug_capture && i == 0)\n"
+        "    if (g_yerbas_cn_debug_capture && i == 0) {\n"
+        "      printf(\"Raw Core dst64 actual:  %016llx %016llx\\n\", (unsigned long long)((uint64_t*)&long_state[j * AES_BLOCK_SIZE])[0], (unsigned long long)((uint64_t*)&long_state[j * AES_BLOCK_SIZE])[1]);\n"
         "      yerbas_cn_debug_print_hex(\"Raw Core xor_blocks_dst result: \", &long_state[j * AES_BLOCK_SIZE], 16);\n"
+        "    }\n"
         "    VARIANT1_1((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);\n"
         "    if (g_yerbas_cn_debug_capture && i == 0)\n"
         "      yerbas_cn_debug_print_hex(\"Raw Core slot1 after VARIANT1_1: \", &long_state[j * AES_BLOCK_SIZE], 16);",
