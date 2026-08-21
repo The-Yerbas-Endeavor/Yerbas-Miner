@@ -30,6 +30,21 @@ struct Candidate {
     std::array<std::uint8_t, 32> hash{};
 };
 
+struct StageTiming {
+    int stage_index{-1};
+    std::uint8_t encoded_stage{0};
+    float milliseconds{0.0F};
+};
+
+struct BatchProfile {
+    std::size_t hashes{0};
+    float nonce_init_ms{0.0F};
+    float stage_total_ms{0.0F};
+    float candidate_ms{0.0F};
+    float total_gpu_ms{0.0F};
+    std::array<StageTiming, 18> stages{};
+};
+
 class BatchEngine {
 public:
     explicit BatchEngine(int device_id,
@@ -44,6 +59,7 @@ public:
 
     void upload_job(const JobDescriptor& job);
     std::vector<Candidate> scan(std::uint32_t start_nonce);
+    std::vector<Candidate> scan_profiled(std::uint32_t start_nonce, BatchProfile& profile);
 
     int device_id() const noexcept;
     std::size_t batch_size() const noexcept;
