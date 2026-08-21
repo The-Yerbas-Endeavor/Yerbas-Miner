@@ -45,6 +45,8 @@ endif()
 
 set(YERBAS_CORE_SRC "${yerbas_core_SOURCE_DIR}/src")
 set(YERBAS_SLOW_HASH "${YERBAS_CORE_SRC}/cryptonote/slow-hash.c")
+set(YERBAS_SLOW_HASH_PRISTINE "${CMAKE_CURRENT_BINARY_DIR}/yerbas_core_pristine/slow-hash.c")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/yerbas_core_pristine")
 
 execute_process(
     COMMAND git checkout -- src/cryptonote/slow-hash.c
@@ -57,6 +59,11 @@ if(NOT YERBAS_SLOW_HASH_RESTORE_RESULT EQUAL 0)
     message(FATAL_ERROR
         "Could not restore pinned Core slow-hash.c before validator instrumentation: ${YERBAS_SLOW_HASH_RESTORE_ERROR}")
 endif()
+
+# Preserve a pristine copy for consensus/reference hashing. The fetched Core
+# checkout below is instrumented only for validator diagnostics, so debug
+# hooks can never perturb stage_reference/hash_reference behavior.
+configure_file("${YERBAS_SLOW_HASH}" "${YERBAS_SLOW_HASH_PRISTINE}" COPYONLY)
 
 file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
 string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "yerbas_cn_debug_get_last_state" YERBAS_CN_DEBUG_POS)
@@ -89,18 +96,20 @@ if(YERBAS_CN_DEBUG_POS EQUAL -1)
 endif()
 
 if(WIN32)
-    file(READ "${YERBAS_SLOW_HASH}" YERBAS_SLOW_HASH_CONTENT)
-    string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "  free(long_state);" YERBAS_FREE_POS)
-    if(YERBAS_FREE_POS EQUAL -1)
-        message(FATAL_ERROR "Could not locate CryptoNight long_state cleanup in pinned slow-hash.c")
-    endif()
-    string(REPLACE
-        "  free(long_state);"
-        "#if defined(_MSC_VER)\n  _freea(long_state);\n#else\n  free(long_state);\n#endif"
-        YERBAS_SLOW_HASH_CONTENT
-        "${YERBAS_SLOW_HASH_CONTENT}"
-    )
-    file(WRITE "${YERBAS_SLOW_HASH}" "${YERBAS_SLOW_HASH_CONTENT}")
+    foreach(YERBAS_SLOW_HASH_WIN IN ITEMS "${YERBAS_SLOW_HASH}" "${YERBAS_SLOW_HASH_PRISTINE}")
+        file(READ "${YERBAS_SLOW_HASH_WIN}" YERBAS_SLOW_HASH_CONTENT)
+        string(FIND "${YERBAS_SLOW_HASH_CONTENT}" "  free(long_state);" YERBAS_FREE_POS)
+        if(YERBAS_FREE_POS EQUAL -1)
+            message(FATAL_ERROR "Could not locate CryptoNight long_state cleanup in pinned slow-hash.c")
+        endif()
+        string(REPLACE
+            "  free(long_state);"
+            "#if defined(_MSC_VER)\n  _freea(long_state);\n#else\n  free(long_state);\n#endif"
+            YERBAS_SLOW_HASH_CONTENT
+            "${YERBAS_SLOW_HASH_CONTENT}"
+        )
+        file(WRITE "${YERBAS_SLOW_HASH_WIN}" "${YERBAS_SLOW_HASH_CONTENT}")
+    endforeach()
 endif()
 
 set(YERBAS_GR_CORE_SOURCES
@@ -132,7 +141,7 @@ set(YERBAS_GR_CORE_SOURCES
     ${YERBAS_CORE_SRC}/cryptonote/c_skein.c
     ${YERBAS_CORE_SRC}/cryptonote/hash-ops.c
     ${YERBAS_CORE_SRC}/cryptonote/oaes_lib.c
-    ${YERBAS_CORE_SRC}/cryptonote/slow-hash.c
+    ${YERBAS_SLOW_HASH_PRISTINE}
 )
 
 foreach(source IN LISTS YERBAS_GR_CORE_SOURCES)
@@ -224,9 +233,6 @@ if(YERBAS_ENABLE_CUDA)
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
-    # --threads=0 is supported by nvcc and parallelizes internal compilation.
-    # Do not pass --split-compile here: some CUDA installations route it to
-    # LLVM llc, where it is rejected even though nvcc accepts --threads.
     set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -327,6 +333,19 @@ if(BUILD_TESTING)
     add_test(NAME ghostrider-equivalence COMMAND ghostrider-equivalence)
 
     if(YERBAS_CUDA_AVAILABLE)
+        add_library(yerbas-ghostrider-debug OBJECT "${YERBAS_SLOW_HASH}")
+        target_include_directories(yerbas-ghostrider-debug PRIVATE ${YERBAS_CORE_SRC})
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            target_compile_options(yerbas-ghostrider-debug PRIVATE
+                -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
+            )
+        endif()
+        if(WIN32)
+            target_include_directories(yerbas-ghostrider-debug BEFORE PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/compat/windows"
+            )
+        endif()
+
         add_executable(cuda-keccak-validation
             tests/cuda_keccak_validation.cpp
             src/cuda/cuda_backend.cu
@@ -334,6 +353,7 @@ if(BUILD_TESTING)
             src/cuda/skein_validation.cu
             src/cuda/sph_batch_validation.cu
             src/cuda/cryptonight/cn_validation.cu
+            $<TARGET_OBJECTS:yerbas-ghostrider-debug>
         )
         target_include_directories(cuda-keccak-validation PRIVATE
             src
