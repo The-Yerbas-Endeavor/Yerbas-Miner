@@ -125,7 +125,10 @@ __global__ void checkpoint_kernel(std::uint8_t variant,
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
-        b[16 + i] = b[i];
+        // Core variant 1 leaves b[16..31] untouched until the first loop-tail
+        // copy. Keep the CUDA checkpoint model consistent with the production
+        // slow hash rather than pre-filling the upper half with b[0..15].
+        b[16 + i] = 0;
         c[i] = 0;
         t[i] = 0;
     }
@@ -338,7 +341,6 @@ ValidationCheckpoints core_dark_checkpoints(const std::uint8_t* input, std::size
     for (int i = 0; i < 16; ++i) {
         a[i] = static_cast<std::uint8_t>(state[i] ^ state[32 + i]);
         b[i] = static_cast<std::uint8_t>(state[16 + i] ^ state[48 + i]);
-        b[16 + i] = b[i];
     }
     const std::uint64_t tweak = host_load64(input + 35) ^ host_load64(state.data() + 192);
 
@@ -539,8 +541,8 @@ Hash256 validation_hash(int device_id,
     std::uint8_t* d_scratchpad = nullptr;
     std::uint8_t* d_output = nullptr;
     int* d_ok = nullptr;
-    cudaEvent_t start_event = nullptr;
-    cudaEvent_t stop_event = nullptr;
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
 
     try {
         check(cudaMalloc(reinterpret_cast<void**>(&d_input), length), "cudaMalloc CN input failed");
@@ -551,20 +553,19 @@ Hash256 validation_hash(int device_id,
         check(cudaMemset(d_ok, 0, sizeof(int)), "cudaMemset CN status failed");
 
         if (kernel_ms != nullptr) {
-            check(cudaEventCreate(&start_event), "cudaEventCreate start failed");
-            check(cudaEventCreate(&stop_event), "cudaEventCreate stop failed");
-            check(cudaEventRecord(start_event), "cudaEventRecord start failed");
+            check(cudaEventCreate(&start), "cudaEventCreate start failed");
+            check(cudaEventCreate(&stop), "cudaEventCreate stop failed");
+            check(cudaEventRecord(start), "cudaEventRecord start failed");
         }
 
         validation_kernel<<<1, 1>>>(variant, d_input, length, d_scratchpad, d_output, d_ok);
         check(cudaGetLastError(), "CryptoNight validation kernel launch failed");
+        if (kernel_ms != nullptr)
+            check(cudaEventRecord(stop), "cudaEventRecord stop failed");
+        check(cudaDeviceSynchronize(), "CryptoNight validation kernel failed");
 
         if (kernel_ms != nullptr) {
-            check(cudaEventRecord(stop_event), "cudaEventRecord stop failed");
-            check(cudaEventSynchronize(stop_event), "cudaEventSynchronize stop failed");
-            check(cudaEventElapsedTime(kernel_ms, start_event, stop_event), "cudaEventElapsedTime failed");
-        } else {
-            check(cudaDeviceSynchronize(), "CryptoNight validation kernel failed");
+            check(cudaEventElapsedTime(kernel_ms, start, stop), "cudaEventElapsedTime failed");
         }
 
         int ok = 0;
@@ -574,13 +575,13 @@ Hash256 validation_hash(int device_id,
         Hash256 out{};
         check(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost), "cudaMemcpy CN output failed");
 
-        if (stop_event) cudaEventDestroy(stop_event);
-        if (start_event) cudaEventDestroy(start_event);
+        if (stop) cudaEventDestroy(stop);
+        if (start) cudaEventDestroy(start);
         cudaFree(d_ok); cudaFree(d_output); cudaFree(d_scratchpad); cudaFree(d_input);
         return out;
     } catch (...) {
-        if (stop_event) cudaEventDestroy(stop_event);
-        if (start_event) cudaEventDestroy(start_event);
+        if (stop) cudaEventDestroy(stop);
+        if (start) cudaEventDestroy(start);
         if (d_ok) cudaFree(d_ok);
         if (d_output) cudaFree(d_output);
         if (d_scratchpad) cudaFree(d_scratchpad);
