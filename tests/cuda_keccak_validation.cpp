@@ -11,6 +11,8 @@ extern "C" {
 #include "sph_groestl.h"
 int aesb_single_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
 int aesb_pseudo_round(const std::uint8_t* in, std::uint8_t* out, const std::uint8_t* expandedKey);
+void yerbas_cn_debug_enable_capture(int enabled);
+void yerbas_cn_debug_get_last_state(std::uint8_t out[200]);
 }
 
 #include <array>
@@ -273,10 +275,20 @@ int main()
     sph_groestl256_close(&sph_ctx, sph_groestl.data());
 
     std::array<std::uint8_t, 32> raw_core_cn{};
+    std::array<std::uint8_t, 200> raw_core_state{};
+    yerbas_cn_debug_enable_capture(1);
     crypto::cryptonight_dark_hash(
         reinterpret_cast<const char*>(stage_input.data()),
         reinterpret_cast<char*>(raw_core_cn.data()),
         static_cast<std::uint32_t>(stage_input.size()), 1);
+    yerbas_cn_debug_get_last_state(raw_core_state.data());
+    yerbas_cn_debug_enable_capture(0);
+
+    std::array<std::uint8_t, 32> raw_core_finalizer{};
+    ::groestl(raw_core_state.data(),
+              static_cast<DataLength>(raw_core_state.size() * 8ULL),
+              raw_core_finalizer.data());
+
     const auto stage_core_cn = yerbas::ghostrider::stage_reference(
         stage_work, static_cast<std::uint8_t>(yerbas::ghostrider::kCryptoNightStageFlag | 0U));
 
@@ -286,6 +298,12 @@ int main()
               << "Core c_groestl CPU digest:        " << hex_string(core_groestl) << "\n"
               << "sphlib Groestl-256 CPU digest:   " << hex_string(sph_groestl) << "\n"
               << "Raw Core CN-Dark digest:         " << hex_string(raw_core_cn) << "\n"
+              << "Raw Core captured final state:   " << hex_string(raw_core_state) << "\n"
+              << "Raw Core captured-state Groestl: " << hex_string(raw_core_finalizer) << "\n"
+              << "Raw Core final state matches GPU checkpoint: "
+              << (raw_core_state == gpu_cp.post_keccak_state ? "YES" : "NO") << "\n"
+              << "Raw Core captured-state Groestl matches raw digest: "
+              << (raw_core_finalizer == raw_core_cn ? "YES" : "NO") << "\n"
               << "stage_reference CN-Dark first32: "
               << hex_string(std::array<std::uint8_t, 32>{
                     stage_core_cn[0], stage_core_cn[1], stage_core_cn[2], stage_core_cn[3],
@@ -334,7 +352,7 @@ int main()
                       << "  GPU final: " << hex_string(gpu) << "\n"
                       << "  Captured finalizer: " << hex_string(gpu_cp.final_extra_hash) << "\n"
                       << "  Raw Core CN-Dark: " << hex_string(raw_core_cn) << "\n"
-                      << "  Slow-hash reconstruction/finalizer path matches; inspect raw Core cn_slow_hash state\n";
+                      << "  Compare raw Core captured final state against CUDA checkpoint above\n";
             return 60 + variant;
         }
         std::cout << " OK | kernel " << kernel_ms << " ms"
