@@ -14,11 +14,19 @@ __device__ __forceinline__ void dispatch_extra_hash(std::uint8_t selector,
                                                     const std::uint8_t state[200],
                                                     std::uint8_t out[32]);
 
-// Generic little-endian load retained for the intentionally unaligned
-// variant-1 input tweak at input+35 and validator scratch state.
+// Generic little-endian helpers retained for validator/reference scratch state
+// and intentionally unaligned accesses such as the variant-1 input tweak at
+// input+35.
 __device__ __forceinline__ std::uint64_t cn_load64(const std::uint8_t* p)
 {
     return load64le(p);
+}
+
+__device__ __forceinline__ void cn_store64(std::uint8_t* p, std::uint64_t v)
+{
+    #pragma unroll
+    for (int i = 0; i < 8; ++i)
+        p[i] = static_cast<std::uint8_t>(v >> (i * 8));
 }
 
 // All production hot-loop state blocks and scratchpad slots are explicitly
