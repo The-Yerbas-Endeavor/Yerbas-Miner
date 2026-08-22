@@ -893,14 +893,27 @@ void Client::report_stats(bool force)
     const double average_hps = uptime > 0.0 ? static_cast<double>(hashes_done_) / uptime : 0.0;
     const double expected_hashes = difficulty_ > 0.0 ? difficulty_ * kStratumDiffOneHashes : 0.0;
     const double eta = average_hps > 0.0 && expected_hashes > 0.0 ? expected_hashes / average_hps : std::numeric_limits<double>::infinity();
+    const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
+    const double acceptance = resolved_shares > 0
+        ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares)
+        : 100.0;
 
-    std::cout << "\n============================== STATUS UPDATE (1 MINUTE) ==============================\n";
-    std::cout << "SOURCE        HASHRATE          HASHES          BATCH\n";
-    std::cout << "---------------------------------------------------------------------------------------\n";
+    constexpr const char* kRule = "--------------------------------------------------------------------------------------------";
+    constexpr const char* kTop =  "============================= 🌿 PROOF OF GRASS | STATUS UPDATE =============================";
+
+    std::cout << '\n' << kTop << '\n';
+    std::cout << std::left
+              << std::setw(14) << "SOURCE"
+              << std::setw(18) << "HASHRATE"
+              << std::setw(17) << "HASHES"
+              << "BATCH\n";
+    std::cout << kRule << '\n';
+
     if (config_.miner.cpu_enabled) {
-        std::cout << kCpuColor << std::left << std::setw(13) << "CPU"
+        std::cout << kCpuColor
+                  << std::left << std::setw(14) << "CPU"
                   << std::setw(18) << format_rate(cpu_hps)
-                  << std::setw(16) << cpu_hashes_done_
+                  << std::setw(17) << cpu_hashes_done_
                   << "-" << kColorReset << '\n';
     }
 #ifdef YERBAS_HAS_CUDA
@@ -910,48 +923,49 @@ void Client::report_stats(bool force)
             const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_delta) / since_report : 0.0;
             std::ostringstream label;
             label << "GPU " << worker.device_id;
-            std::cout << gpu_color(worker.device_id) << std::left << std::setw(13) << label.str()
+            std::cout << gpu_color(worker.device_id)
+                      << std::left << std::setw(14) << label.str()
                       << std::setw(18) << (gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle")
-                      << std::setw(16) << worker.hashes_done
-                      << worker.engine->batch_size() << kColorReset << '\n';
+                      << std::setw(17) << worker.hashes_done
+                      << worker.engine->batch_size()
+                      << kColorReset << '\n';
             worker.hashes_at_last_report = worker.hashes_done;
         }
     }
 #endif
-    std::cout << "---------------------------------------------------------------------------------------\n";
-    const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
-    const double acceptance = resolved_shares > 0 ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares) : 100.0;
 
-    std::cout << "\n";
-    std::cout << std::left
-              << std::setw(20) << "TOTAL HASHRATE"
-              << std::setw(16) << "ACCEPTED"
-              << std::setw(16) << "REJECTED"
-              << "BLOCKS FOUND\n";
-    std::cout << std::setw(20) << (std::string(kGrassColor) + format_rate(total_hps) + kColorReset)
-              << std::setw(16) << (std::string(kAcceptColor) + std::to_string(shares_accepted_) + kColorReset)
-              << std::setw(16) << (std::string(kRejectColor) + std::to_string(shares_rejected_) + kColorReset)
-              << kBlockColor << ' ' << g_blocks_found << ' ' << kColorReset << '\n';
-    std::cout << "---------------------------------------------------------------------------------------\n";
+    std::cout << kRule << '\n';
+    std::cout << std::left << std::setw(14) << "TOTAL";
+    std::cout << kGrassColor << std::setw(18) << format_rate(total_hps) << kColorReset;
+    std::cout << "ACCEPTED " << kAcceptColor << shares_accepted_ << kColorReset
+              << "     REJECTED " << kRejectColor << shares_rejected_ << kColorReset
+              << "     BLOCKS " << kBlockColor << ' ' << g_blocks_found << ' ' << kColorReset << '\n';
 
-    std::cout << kGrassColor << "🌿 Proof of Grass" << kColorReset
-              << " | Shares " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_
-              << " (" << std::fixed << std::setprecision(1) << acceptance << "%)"
-              << " | Uptime " << format_duration(uptime) << '\n';
-    if (difficulty_ > 0.0) {
-        std::cout << "Diff " << std::defaultfloat << std::setprecision(8) << difficulty_
-                  << " | Expected/share " << std::fixed << std::setprecision(0) << expected_hashes
-                  << " | Avg ETA " << format_duration(eta)
-                  << " | Avg " << format_rate(average_hps) << '\n';
-    }
+    std::ostringstream shares_text;
+    shares_text << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_
+                << " (" << std::fixed << std::setprecision(1) << acceptance << "%)";
+    std::cout << std::left << std::setw(14) << "SHARES"
+              << std::setw(18) << shares_text.str()
+              << "DIFF " << std::defaultfloat << std::setprecision(8) << difficulty_
+              << "     ETA " << format_duration(eta)
+              << "     UPTIME " << format_duration(uptime) << '\n';
+
+    std::cout << std::left << std::setw(14) << "AVG"
+              << std::setw(18) << format_rate(average_hps)
+              << "EXPECTED/SHARE " << std::fixed << std::setprecision(0) << expected_hashes << '\n';
+
+    std::cout << kRule << '\n';
     std::cout << kCpuColor << "■ CPU" << kColorReset << "  "
               << kGpuColor << "■ GPU" << kColorReset << "  "
               << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << "  "
               << kAcceptBadge << " SHARE ACCEPTED " << kColorReset << "  "
               << kRejectBadge << " SHARE REJECTED " << kColorReset << "  "
-              << kBlockColor << " ★ BLOCK FOUND ★ " << kColorReset << "\n\n";
+              << kBlockColor << " ★ BLOCK FOUND ★ " << kColorReset << '\n';
+    std::cout << "============================================================================================\n\n";
 
-    last_report_ = now; hashes_at_last_report_ = hashes_done_; cpu_hashes_at_last_report_ = cpu_hashes_done_;
+    last_report_ = now;
+    hashes_at_last_report_ = hashes_done_;
+    cpu_hashes_at_last_report_ = cpu_hashes_done_;
 }
 
 } // namespace yerbas::stratum
