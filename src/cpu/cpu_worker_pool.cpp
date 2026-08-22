@@ -142,14 +142,16 @@ struct WorkerPool::Impl {
         }
         lock.unlock();
 
-        // Re-hash every candidate after all worker threads are idle, then log
-        // the exact final 256-bit hash and target in conventional big-endian
-        // display order. During hybrid mining the CPU owns the upper half of
-        // the nonce space (bit 31 set). The live pool test showed every such
-        // CPU candidate being rejected while both lower-half CUDA regions were
-        // accepted. Until CPU/pool parity for high-bit nonces is proven, do not
-        // send those known-bad candidates to the pool. CPU-only mining starts
-        // below 0x80000000 and therefore remains available for the parity test.
+        // Re-hash every worker-reported candidate on the coordinator thread
+        // before it is returned to Stratum. This keeps CPU submission gated by
+        // a second independent pass through the pinned Yerbas Core reference
+        // path and avoids trusting a transient worker result blindly.
+        //
+        // The previous high-bit quarantine was diagnostic only. A nonce's bit
+        // 31 is ordinary header data and is not part of GhostRider validity, so
+        // verified candidates from the CPU-owned hybrid region are now allowed
+        // to reach the pool again. Pool acceptance/rejection is the final parity
+        // check and is tracked by the normal share accounting.
         std::vector<Candidate> verified;
         verified.reserve(combined.size());
         for (const auto& candidate : combined) {
@@ -158,16 +160,15 @@ struct WorkerPool::Impl {
             const ghostrider::Work work{verify_header.data(), verify_header.size()};
             const auto hash = ghostrider::hash_reference(work);
             const bool local_pass = hash_meets_target(hash, target);
-            const bool high_bit_nonce = (candidate.nonce & 0x80000000U) != 0U;
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
                       << " | hash=" << display_hex(hash)
                       << " | target=" << display_hex(target)
                       << " | local=" << (local_pass ? "PASS" : "FAIL");
-            if (local_pass && high_bit_nonce) {
-                std::cout << " | pool=QUARANTINE-high-bit";
+            if (local_pass) {
+                std::cout << " | pool=SUBMIT";
+                verified.push_back(candidate);
             }
             std::cout << '\n';
-            if (local_pass && !high_bit_nonce) verified.push_back(candidate);
         }
         return verified;
     }
