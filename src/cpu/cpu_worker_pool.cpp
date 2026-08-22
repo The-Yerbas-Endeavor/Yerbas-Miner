@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -102,7 +103,25 @@ struct WorkerPool::Impl {
         {
             std::lock_guard<std::mutex> lock(mutex);
             base_header = header;
-            target_le = target;
+
+            // Stratum mining.set_difficulty applies to the next mining.notify job.
+            // CUDA already keeps the target that was uploaded with the active job,
+            // but the CPU path previously replaced its target immediately on every
+            // vardiff message. At high vardiff this made CPU shares appear to stop
+            // while GPU shares for the same active job continued to be accepted.
+            //
+            // Treat bytes 0..75 of the header (everything except nonce) as the
+            // active-work identity. Preserve that job's target until the header
+            // changes, then latch the newest pool target for the new job.
+            std::array<std::uint8_t, 76> header_key{};
+            std::copy_n(header.begin(), header_key.size(), header_key.begin());
+            if (!active_target_valid || header_key != active_header_key) {
+                active_header_key = header_key;
+                active_target = target;
+                active_target_valid = true;
+            }
+            target_le = active_target;
+
             batch_start = start;
             per_thread = count;
             completed = 0;
@@ -138,6 +157,10 @@ struct WorkerPool::Impl {
     std::array<std::uint8_t, 32> target_le{};
     std::uint32_t batch_start{0};
     unsigned int per_thread{0};
+
+    std::array<std::uint8_t, 76> active_header_key{};
+    std::array<std::uint8_t, 32> active_target{};
+    bool active_target_valid{false};
 };
 
 WorkerPool::WorkerPool(unsigned int thread_count)
