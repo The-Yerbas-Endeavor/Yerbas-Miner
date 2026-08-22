@@ -1,11 +1,15 @@
 #include "cpu/cpu_worker_pool.h"
 
 #include "ghostrider/ghostrider.h"
+#ifdef YERBAS_HAS_CUDA
+#include "cuda/cuda_backend.h"
+#endif
 
 #include <algorithm>
 #include <condition_variable>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -140,24 +144,68 @@ struct WorkerPool::Impl {
         for (auto& result : results) combined.insert(combined.end(), result.begin(), result.end());
         lock.unlock();
 
-        // Re-hash each candidate serially through the same explicit staged
-        // path used by the worker threads. This mirrors the CUDA pipeline's
-        // 18-stage dispatch instead of relying on the older monolithic helper.
         std::vector<Candidate> verified;
         verified.reserve(combined.size());
         for (const auto& candidate : combined) {
             auto verify_header = header;
             write_nonce(verify_header, candidate.nonce);
             const ghostrider::Work work{verify_header.data(), verify_header.size()};
-            const auto hash = ghostrider::hash_staged_reference(work);
-            const bool local_pass = hash_meets_target(hash, target);
+            const auto cpu_hash = ghostrider::hash_staged_reference(work);
+            const bool local_pass = hash_meets_target(cpu_hash, target);
+
+#ifdef YERBAS_HAS_CUDA
+            bool parity_ready = false;
+            bool parity_match = false;
+            bool cuda_pass = false;
+            std::array<std::uint8_t, 32> cuda_hash{};
+            if (local_pass && cuda::device_count() > 0) {
+                try {
+                    if (!parity_engine) parity_engine = std::make_unique<cuda::BatchEngine>(0, 1);
+                    cuda::JobDescriptor parity_job{};
+                    parity_job.header = header;
+                    parity_job.target_le.fill(0xff);
+                    parity_job.stages = ghostrider::stage_schedule(work);
+                    parity_engine->upload_job(parity_job);
+                    const auto parity_candidates = parity_engine->scan(candidate.nonce);
+                    const auto hit = std::find_if(parity_candidates.begin(), parity_candidates.end(),
+                                                  [&](const cuda::Candidate& c) { return c.nonce == candidate.nonce; });
+                    if (hit != parity_candidates.end()) {
+                        cuda_hash = hit->hash;
+                        parity_ready = true;
+                        parity_match = (cuda_hash == cpu_hash);
+                        cuda_pass = hash_meets_target(cuda_hash, target);
+                    }
+                } catch (const std::exception& e) {
+                    std::cout << "[CPU/CUDA PARITY] nonce=" << nonce_hex(candidate.nonce)
+                              << " | ERROR=" << e.what() << '\n';
+                }
+            }
+
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
-                      << " | hash=" << display_hex(hash)
+                      << " | hash=" << display_hex(cpu_hash)
+                      << " | target=" << display_hex(target)
+                      << " | staged=YES"
+                      << " | local=" << (local_pass ? "PASS" : "FAIL");
+            if (parity_ready) {
+                std::cout << " | CUDA=" << display_hex(cuda_hash)
+                          << " | parity=" << (parity_match ? "MATCH" : "MISMATCH")
+                          << " | cuda_target=" << (cuda_pass ? "PASS" : "FAIL");
+            } else if (local_pass) {
+                std::cout << " | parity=UNAVAILABLE";
+            }
+
+            const bool submit_ok = local_pass && (!parity_ready || (parity_match && cuda_pass));
+            std::cout << (submit_ok ? " | pool=SUBMIT" : " | pool=HOLD") << '\n';
+            if (submit_ok) verified.push_back(candidate);
+#else
+            std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
+                      << " | hash=" << display_hex(cpu_hash)
                       << " | target=" << display_hex(target)
                       << " | staged=YES"
                       << " | local=" << (local_pass ? "PASS" : "FAIL")
                       << (local_pass ? " | pool=SUBMIT" : "") << '\n';
             if (local_pass) verified.push_back(candidate);
+#endif
         }
         return verified;
     }
@@ -177,6 +225,9 @@ struct WorkerPool::Impl {
     std::array<std::uint8_t, 32> target_le{};
     std::uint32_t batch_start{0};
     unsigned int per_thread{0};
+#ifdef YERBAS_HAS_CUDA
+    std::unique_ptr<cuda::BatchEngine> parity_engine;
+#endif
 };
 
 WorkerPool::WorkerPool(unsigned int thread_count)
