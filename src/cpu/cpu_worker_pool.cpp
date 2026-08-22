@@ -144,8 +144,12 @@ struct WorkerPool::Impl {
 
         // Re-hash every candidate after all worker threads are idle, then log
         // the exact final 256-bit hash and target in conventional big-endian
-        // display order. This gives us a direct record for pool error-23 cases
-        // without adding overhead to ordinary non-candidate hashes.
+        // display order. During hybrid mining the CPU owns the upper half of
+        // the nonce space (bit 31 set). The live pool test showed every such
+        // CPU candidate being rejected while both lower-half CUDA regions were
+        // accepted. Until CPU/pool parity for high-bit nonces is proven, do not
+        // send those known-bad candidates to the pool. CPU-only mining starts
+        // below 0x80000000 and therefore remains available for the parity test.
         std::vector<Candidate> verified;
         verified.reserve(combined.size());
         for (const auto& candidate : combined) {
@@ -154,11 +158,16 @@ struct WorkerPool::Impl {
             const ghostrider::Work work{verify_header.data(), verify_header.size()};
             const auto hash = ghostrider::hash_reference(work);
             const bool local_pass = hash_meets_target(hash, target);
+            const bool high_bit_nonce = (candidate.nonce & 0x80000000U) != 0U;
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
                       << " | hash=" << display_hex(hash)
                       << " | target=" << display_hex(target)
-                      << " | local=" << (local_pass ? "PASS" : "FAIL") << '\n';
-            if (local_pass) verified.push_back(candidate);
+                      << " | local=" << (local_pass ? "PASS" : "FAIL");
+            if (local_pass && high_bit_nonce) {
+                std::cout << " | pool=QUARANTINE-high-bit";
+            }
+            std::cout << '\n';
+            if (local_pass && !high_bit_nonce) verified.push_back(candidate);
         }
         return verified;
     }
