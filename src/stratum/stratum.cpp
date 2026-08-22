@@ -922,16 +922,21 @@ void Client::report_stats(bool force)
     const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
     const double acceptance = resolved_shares > 0 ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares) : 100.0;
 
-    std::cout << "TOTAL HASHRATE " << kGrassColor << format_rate(total_hps) << kColorReset
-              << " | ACCEPTED " << kAcceptColor << shares_accepted_ << kColorReset
-              << " | REJECTED " << kRejectColor << shares_rejected_ << kColorReset
-              << " | BLOCKS FOUND " << kBlockColor << ' ' << g_blocks_found << ' ' << kColorReset << '\n';
+    std::cout << "\n";
+    std::cout << std::left
+              << std::setw(20) << "TOTAL HASHRATE"
+              << std::setw(16) << "ACCEPTED"
+              << std::setw(16) << "REJECTED"
+              << "BLOCKS FOUND\n";
+    std::cout << std::setw(20) << (std::string(kGrassColor) + format_rate(total_hps) + kColorReset)
+              << std::setw(16) << (std::string(kAcceptColor) + std::to_string(shares_accepted_) + kColorReset)
+              << std::setw(16) << (std::string(kRejectColor) + std::to_string(shares_rejected_) + kColorReset)
+              << kBlockColor << ' ' << g_blocks_found << ' ' << kColorReset << '\n';
+    std::cout << "---------------------------------------------------------------------------------------\n";
 
     std::cout << kGrassColor << "🌿 Proof of Grass" << kColorReset
-              << " | TOTAL " << format_rate(total_hps)
-              << " | Shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_
+              << " | Shares " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_
               << " (" << std::fixed << std::setprecision(1) << acceptance << "%)"
-              << " | Blocks " << g_blocks_found
               << " | Uptime " << format_duration(uptime) << '\n';
     if (difficulty_ > 0.0) {
         std::cout << "Diff " << std::defaultfloat << std::setprecision(8) << difficulty_
