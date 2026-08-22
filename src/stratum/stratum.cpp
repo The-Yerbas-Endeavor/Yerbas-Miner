@@ -426,6 +426,7 @@ bool Client::run_session(std::atomic_bool& stop_requested)
     subscribed_ = false;
     authorized_ = false;
     job_.valid = false;
+    socket_pending_.clear();
 #ifdef YERBAS_HAS_CUDA
     gpu_job_loaded_ = false;
 #endif
@@ -438,25 +439,11 @@ bool Client::run_session(std::atomic_bool& stop_requested)
         close_socket(socket_handle);
         throw std::runtime_error("Failed to send Stratum subscribe/authorize requests");
     }
-    std::string pending;
-    char buffer[8192];
     while (!stop_requested.load()) {
-        if (socket_readable(socket_handle, job_.valid ? 0 : 250)) {
-#ifdef _WIN32
-            const int n = recv(socket_handle, buffer, static_cast<int>(sizeof(buffer)), 0);
-#else
-            const ssize_t n = recv(socket_handle, buffer, sizeof(buffer), 0);
-#endif
-            if (n <= 0) { close_socket(socket_handle); std::cout << "[stratum] Connection closed by pool\n"; return false; }
-            pending.append(buffer, static_cast<std::size_t>(n));
-            for (;;) {
-                const auto newline = pending.find('\n');
-                if (newline == std::string::npos) break;
-                std::string line = pending.substr(0, newline);
-                pending.erase(0, newline + 1);
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (!line.empty()) handle_message(line);
-            }
+        if (!pump_socket_messages(static_cast<std::intptr_t>(socket_handle), job_.valid ? 0 : 250)) {
+            close_socket(socket_handle);
+            std::cout << "[stratum] Connection closed by pool\n";
+            return false;
         }
         if (authorized_ && job_.valid && target_ready_) {
 #ifdef YERBAS_HAS_CUDA
@@ -476,6 +463,32 @@ bool Client::run_session(std::atomic_bool& stop_requested)
         report_stats(false);
     }
     close_socket(socket_handle);
+    return true;
+}
+
+bool Client::pump_socket_messages(std::intptr_t socket_value, int wait_ms)
+{
+    const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
+    if (!socket_readable(socket_handle, wait_ms)) return true;
+
+    char buffer[8192];
+    do {
+#ifdef _WIN32
+        const int n = recv(socket_handle, buffer, static_cast<int>(sizeof(buffer)), 0);
+#else
+        const ssize_t n = recv(socket_handle, buffer, sizeof(buffer), 0);
+#endif
+        if (n <= 0) return false;
+        socket_pending_.append(buffer, static_cast<std::size_t>(n));
+        for (;;) {
+            const auto newline = socket_pending_.find('\n');
+            if (newline == std::string::npos) break;
+            std::string line = socket_pending_.substr(0, newline);
+            socket_pending_.erase(0, newline + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) handle_message(line);
+        }
+    } while (socket_readable(socket_handle, 0));
     return true;
 }
 
@@ -605,6 +618,8 @@ bool Client::build_header(std::array<std::uint8_t, 80>& header, std::string& ext
 
 bool Client::mine_one(std::intptr_t socket_value)
 {
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
     std::array<std::uint8_t, 80> header{};
     std::string extranonce2;
     const std::uint32_t nonce = nonce_++;
@@ -612,8 +627,9 @@ bool Client::mine_one(std::intptr_t socket_value)
     const ghostrider::Work work{header.data(), header.size()};
     const auto hash = ghostrider::hash_reference(work);
     ++cpu_hashes_done_; ++hashes_done_;
+    if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) return true;
     if (hash_meets_target(hash, target_le_)) {
-        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
+        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
         return submit_share(socket_value, extranonce2, nonce, "CPU");
     }
     if (nonce_ == 0) ++extranonce2_counter_;
@@ -623,6 +639,8 @@ bool Client::mine_one(std::intptr_t socket_value)
 bool Client::mine_cpu_batch(std::intptr_t socket_value)
 {
     if (!config_.miner.cpu_enabled) return true;
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
     const unsigned int threads = config_.miner.threads == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : std::max(1u, config_.miner.threads);
@@ -656,13 +674,20 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
     nonce_ = static_cast<std::uint32_t>(static_cast<std::uint64_t>(nonce_) + total);
 
     const auto candidates = worker_pool->run(base_header, target_le_, batch_start, per_thread);
-    for (const auto& candidate : candidates) {
-        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-        if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
-    }
-
     cpu_hashes_done_ += total;
     hashes_done_ += total;
+    if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
+        if (!candidates.empty()) {
+            std::cout << timestamp() << "[CPU] discarded " << candidates.size()
+                      << " stale candidate(s) from job=" << work_job_id << '\n';
+        }
+        return true;
+    }
+
+    for (const auto& candidate : candidates) {
+        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
+    }
     return true;
 }
 
@@ -710,7 +735,9 @@ void Client::upload_gpu_job()
 bool Client::mine_gpu_batch(std::intptr_t socket_value)
 {
     if (!gpu_pipeline_ready_) return true;
-    std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
+    const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
     struct PendingGpu { GpuWorker* worker; std::uint32_t start; std::future<std::vector<cuda::Candidate>> future; };
     std::vector<PendingGpu> pending; pending.reserve(gpu_workers_.size());
     for (auto& worker : gpu_workers_) {
@@ -719,13 +746,35 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
         const std::uint32_t start = worker.next_nonce; worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count); auto* engine = worker.engine.get();
         pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
     }
+
+    bool all_ready = false;
+    do {
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        all_ready = true;
+        for (auto& task : pending) {
+            if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { all_ready = false; break; }
+        }
+        if (!all_ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (!all_ready);
+    if (!pump_socket_messages(socket_value, 0)) return false;
+
+    const bool stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+    std::size_t stale_candidates = 0;
     for (auto& task : pending) {
-        const auto candidates = task.future.get(); const auto count = task.worker->engine->batch_size(); task.worker->hashes_done += count; hashes_done_ += count;
+        const auto candidates = task.future.get();
+        const auto count = task.worker->engine->batch_size();
+        task.worker->hashes_done += count;
+        hashes_done_ += count;
+        if (stale) { stale_candidates += candidates.size(); continue; }
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (const auto& candidate : candidates) {
-            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
+    }
+    if (stale) {
+        std::cout << timestamp() << "[GPU] stale round discarded | old_job=" << work_job_id
+                  << " new_job=" << job_.job_id << " | candidates=" << stale_candidates << '\n';
     }
     return true;
 }
@@ -733,7 +782,9 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
 bool Client::mine_hybrid_round(std::intptr_t socket_value)
 {
     if (!gpu_pipeline_ready_) return mine_cpu_batch(socket_value);
-    std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
+    const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
     struct PendingGpu { GpuWorker* worker; std::uint32_t start; std::future<std::vector<cuda::Candidate>> future; };
     std::vector<PendingGpu> pending; pending.reserve(gpu_workers_.size());
     for (auto& worker : gpu_workers_) {
@@ -743,25 +794,45 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
     }
 
-    bool gpu_ready = false;
+    bool all_ready = false;
+    bool stale = false;
     do {
-        if (!mine_cpu_batch(socket_value)) return false;
-        gpu_ready = true;
-        for (auto& task : pending) {
-            if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-                gpu_ready = false;
-                break;
-            }
-        }
-    } while (!gpu_ready);
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
 
+        if (!stale) {
+            if (!mine_cpu_batch(socket_value)) return false;
+            if (!pump_socket_messages(socket_value, 0)) return false;
+            stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+        }
+
+        all_ready = true;
+        for (auto& task : pending) {
+            if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { all_ready = false; break; }
+        }
+        if (!all_ready && stale) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (!all_ready);
+
+    if (!pump_socket_messages(socket_value, 0)) return false;
+    stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+
+    std::size_t stale_candidates = 0;
     for (auto& task : pending) {
-        const auto candidates = task.future.get(); const auto count = task.worker->engine->batch_size(); task.worker->hashes_done += count; hashes_done_ += count;
+        const auto candidates = task.future.get();
+        const auto count = task.worker->engine->batch_size();
+        task.worker->hashes_done += count;
+        hashes_done_ += count;
+        if (stale) { stale_candidates += candidates.size(); continue; }
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (const auto& candidate : candidates) {
-            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
+    }
+
+    if (stale) {
+        std::cout << timestamp() << "[hybrid] stale round discarded | old_job=" << work_job_id
+                  << " new_job=" << job_.job_id << " | GPU candidates=" << stale_candidates << '\n';
     }
     return true;
 }
