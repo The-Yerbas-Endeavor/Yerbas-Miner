@@ -46,12 +46,106 @@ std::string display_hex(const std::array<std::uint8_t, 32>& value_le)
     return ss.str();
 }
 
+std::string display_hex64(const std::array<std::uint8_t, 64>& value)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (const auto byte : value) ss << std::setw(2) << static_cast<unsigned int>(byte);
+    return ss.str();
+}
+
 std::string nonce_hex(std::uint32_t nonce)
 {
     std::ostringstream ss;
     ss << std::hex << std::setfill('0') << std::setw(8) << nonce;
     return ss.str();
 }
+
+const char* stage_name(std::uint8_t stage)
+{
+    static constexpr const char* core_names[15] = {
+        "BLAKE-512", "BMW-512", "Groestl-512", "JH-512", "Keccak-512",
+        "Skein-512", "Luffa-512", "CubeHash-512", "Shavite-512", "SIMD-512",
+        "Echo-512", "Hamsi-512", "Fugue-512", "Shabal-512", "Whirlpool"
+    };
+    static constexpr const char* cn_names[6] = {
+        "CN-Dark", "CN-DarkLite", "CN-Fast", "CN-Lite", "CN-Turtle", "CN-TurtleLite"
+    };
+    if ((stage & ghostrider::kCryptoNightStageFlag) != 0) {
+        const auto index = static_cast<std::uint8_t>(stage & 0x7fU);
+        return index < 6 ? cn_names[index] : "CN?";
+    }
+    return stage < 15 ? core_names[stage] : "Core?";
+}
+
+#ifdef YERBAS_HAS_CUDA
+std::array<std::uint8_t, 64> cuda_core_stage(int device_id,
+                                             const std::uint8_t* input,
+                                             std::size_t length,
+                                             std::uint8_t algorithm)
+{
+    switch (algorithm) {
+    case 0: return cuda::blake512_reference_stage(device_id, input, length);
+    case 1: return cuda::bmw512_reference_stage(device_id, input, length);
+    case 2: return cuda::groestl512_reference_stage(device_id, input, length);
+    case 3: return cuda::jh512_reference_stage(device_id, input, length);
+    case 4: return cuda::keccak512_reference_stage(device_id, input, length);
+    case 5: return cuda::skein512_reference_stage(device_id, input, length);
+    case 6: return cuda::luffa512_reference_stage(device_id, input, length);
+    case 7: return cuda::cubehash512_reference_stage(device_id, input, length);
+    case 8: return cuda::shavite512_reference_stage(device_id, input, length);
+    case 9: return cuda::simd512_reference_stage(device_id, input, length);
+    case 10: return cuda::echo512_reference_stage(device_id, input, length);
+    case 11: return cuda::hamsi512_reference_stage(device_id, input, length);
+    case 12: return cuda::fugue512_reference_stage(device_id, input, length);
+    case 13: return cuda::shabal512_reference_stage(device_id, input, length);
+    case 14: return cuda::whirlpool512_reference_stage(device_id, input, length);
+    default: throw std::runtime_error("invalid CUDA core stage index");
+    }
+}
+
+void trace_first_divergence_prefix(const std::array<std::uint8_t, 80>& header,
+                                   std::uint32_t nonce,
+                                   const ghostrider::StageSchedule& schedule)
+{
+    auto traced_header = header;
+    write_nonce(traced_header, nonce);
+
+    ghostrider::Hash512 cpu_state{};
+    ghostrider::Hash512 gpu_state{};
+
+    std::cout << "[CPU/CUDA TRACE] nonce=" << nonce_hex(nonce)
+              << " | begin stage-by-stage prefix comparison\n";
+
+    for (std::size_t i = 0; i < schedule.size(); ++i) {
+        const std::uint8_t stage = schedule[i];
+        if ((stage & ghostrider::kCryptoNightStageFlag) != 0) {
+            std::cout << "[CPU/CUDA TRACE] stage " << i << ' ' << stage_name(stage)
+                      << " | first unresolved CryptoNight boundary after matched core prefix\n";
+            break;
+        }
+
+        if (i == 0) {
+            const ghostrider::Work cpu_work{traced_header.data(), traced_header.size()};
+            cpu_state = ghostrider::stage_reference(cpu_work, stage);
+            gpu_state = cuda_core_stage(0, traced_header.data(), traced_header.size(), stage);
+        } else {
+            const ghostrider::Work cpu_work{cpu_state.data(), cpu_state.size()};
+            cpu_state = ghostrider::stage_reference(cpu_work, stage);
+            gpu_state = cuda_core_stage(0, gpu_state.data(), gpu_state.size(), stage);
+        }
+
+        const bool match = cpu_state == gpu_state;
+        std::cout << "[CPU/CUDA TRACE] stage " << i << ' ' << stage_name(stage)
+                  << " | " << (match ? "MATCH" : "MISMATCH") << '\n';
+        if (!match) {
+            std::cout << "[CPU/CUDA TRACE] CPU=" << display_hex64(cpu_state) << '\n'
+                      << "[CPU/CUDA TRACE] GPU=" << display_hex64(gpu_state) << '\n';
+            break;
+        }
+    }
+}
+#endif
 
 } // namespace
 
@@ -160,13 +254,15 @@ struct WorkerPool::Impl {
             bool staged_match = false;
             bool cuda_pass = false;
             std::array<std::uint8_t, 32> cuda_hash{};
+            ghostrider::StageSchedule schedule{};
             if (local_pass && cuda::device_count() > 0) {
                 try {
                     if (!parity_engine) parity_engine = std::make_unique<cuda::BatchEngine>(0, 1);
                     cuda::JobDescriptor parity_job{};
                     parity_job.header = header;
                     parity_job.target_le.fill(0xff);
-                    parity_job.stages = ghostrider::stage_schedule(work);
+                    schedule = ghostrider::stage_schedule(work);
+                    parity_job.stages = schedule;
                     parity_engine->upload_job(parity_job);
                     const auto parity_candidates = parity_engine->scan(candidate.nonce);
                     const auto hit = std::find_if(parity_candidates.begin(), parity_candidates.end(),
@@ -198,8 +294,14 @@ struct WorkerPool::Impl {
                 std::cout << " | parity=UNAVAILABLE";
             }
 
-            const bool submit_ok = local_pass && parity_ready && parity_match && cuda_pass;
+            const bool submit_ok = local_pass && (!parity_ready || (parity_match && cuda_pass));
             std::cout << (submit_ok ? " | pool=SUBMIT" : " | pool=HOLD") << '\n';
+
+            if (parity_ready && !parity_match && !divergence_trace_emitted) {
+                divergence_trace_emitted = true;
+                trace_first_divergence_prefix(header, candidate.nonce, schedule);
+            }
+
             if (submit_ok) verified.push_back(candidate);
 #else
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
@@ -207,7 +309,8 @@ struct WorkerPool::Impl {
                       << " | staged=" << display_hex(staged_hash)
                       << " | target=" << display_hex(target)
                       << " | local=" << (local_pass ? "PASS" : "FAIL")
-                      << " | pool=HOLD-no-cuda-parity\n";
+                      << (local_pass ? " | pool=SUBMIT" : "") << '\n';
+            if (local_pass) verified.push_back(candidate);
 #endif
         }
         return verified;
@@ -230,6 +333,7 @@ struct WorkerPool::Impl {
     unsigned int per_thread{0};
 #ifdef YERBAS_HAS_CUDA
     std::unique_ptr<cuda::BatchEngine> parity_engine;
+    bool divergence_trace_emitted{false};
 #endif
 };
 
