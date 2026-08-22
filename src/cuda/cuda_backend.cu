@@ -172,24 +172,29 @@ __global__ void cryptonight_final_stage(std::uint8_t* states,
 
 template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant(cudaStream_t stream,
-                                      int blocks,
-                                      int threads,
                                       std::uint8_t* states,
                                       std::size_t count,
                                       std::uint8_t* scratchpads,
                                       cryptonight::SplitContext* contexts)
 {
-    cryptonight_setup_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, count, scratchpads, contexts);
+    // Pascal/GTX 1080 Ti tuning at batch 3584:
+    // setup 64 threads, memory loop 128 threads, final 128 threads.
+    constexpr int setup_threads = 64;
+    constexpr int loop_threads = 128;
+    constexpr int final_threads = 128;
+    const int setup_blocks = static_cast<int>((count + setup_threads - 1) / setup_threads);
+    const int loop_blocks = static_cast<int>((count + loop_threads - 1) / loop_threads);
+    const int final_blocks = static_cast<int>((count + final_threads - 1) / final_threads);
+
+    cryptonight_setup_stage<VariantIndex><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight setup launch failed");
-    cryptonight_loop_stage<VariantIndex><<<blocks, threads, 0, stream>>>(count, scratchpads, contexts);
+    cryptonight_loop_stage<VariantIndex><<<loop_blocks, loop_threads, 0, stream>>>(count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight loop launch failed");
-    cryptonight_final_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, count, scratchpads, contexts);
+    cryptonight_final_stage<VariantIndex><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight final launch failed");
 }
 
 void launch_split_cryptonight(cudaStream_t stream,
-                              int blocks,
-                              int threads,
                               std::uint8_t* states,
                               std::size_t count,
                               std::uint8_t variant,
@@ -197,12 +202,12 @@ void launch_split_cryptonight(cudaStream_t stream,
                               cryptonight::SplitContext* contexts)
 {
     switch (variant) {
-    case 0: launch_split_cryptonight_variant<0>(stream, blocks, threads, states, count, scratchpads, contexts); break;
-    case 1: launch_split_cryptonight_variant<1>(stream, blocks, threads, states, count, scratchpads, contexts); break;
-    case 2: launch_split_cryptonight_variant<2>(stream, blocks, threads, states, count, scratchpads, contexts); break;
-    case 3: launch_split_cryptonight_variant<3>(stream, blocks, threads, states, count, scratchpads, contexts); break;
-    case 4: launch_split_cryptonight_variant<4>(stream, blocks, threads, states, count, scratchpads, contexts); break;
-    case 5: launch_split_cryptonight_variant<5>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    case 0: launch_split_cryptonight_variant<0>(stream, states, count, scratchpads, contexts); break;
+    case 1: launch_split_cryptonight_variant<1>(stream, states, count, scratchpads, contexts); break;
+    case 2: launch_split_cryptonight_variant<2>(stream, states, count, scratchpads, contexts); break;
+    case 3: launch_split_cryptonight_variant<3>(stream, states, count, scratchpads, contexts); break;
+    case 4: launch_split_cryptonight_variant<4>(stream, states, count, scratchpads, contexts); break;
+    case 5: launch_split_cryptonight_variant<5>(stream, states, count, scratchpads, contexts); break;
     default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
     }
 }
@@ -387,9 +392,7 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                "cudaMemsetAsync candidate counter failed");
 
     constexpr int core_threads = 256;
-    constexpr int cn_threads = 64;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
     initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
                                                                            impl_->d_nonces,
                                                                            impl_->batch_size);
@@ -405,8 +408,6 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                 throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
             }
             launch_split_cryptonight(impl_->stream,
-                                     cn_blocks,
-                                     cn_threads,
                                      impl_->d_states,
                                      impl_->batch_size,
                                      algorithm,
@@ -474,9 +475,7 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                "cudaMemsetAsync candidate counter failed");
 
     constexpr int core_threads = 256;
-    constexpr int cn_threads = 64;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
 
     cudaEvent_t total_start{}, total_stop{}, section_start{}, section_stop{};
     check_cuda(cudaEventCreate(&total_start), "cudaEventCreate total_start failed");
@@ -510,8 +509,6 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                     throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
                 }
                 launch_split_cryptonight(impl_->stream,
-                                         cn_blocks,
-                                         cn_threads,
                                          impl_->d_states,
                                          impl_->batch_size,
                                          algorithm,
