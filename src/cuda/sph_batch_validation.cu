@@ -1,6 +1,7 @@
 #include "cuda/cuda_backend.h"
 #include "cuda/core/stage_dispatch.cuh"
 #include "cuda/cryptonight/cn_config.cuh"
+#include "cuda/cryptonight/cn_final.cuh"
 #include "cuda/cryptonight/cn_split.cuh"
 #include <cuda_runtime.h>
 #include <stdexcept>
