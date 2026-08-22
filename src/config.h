@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -28,9 +27,6 @@ struct GpuConfig {
     // that device 0 is always the GPU the user intended to mine with.
     std::vector<int> devices{};
     int intensity{0};
-    // Explicit production CUDA batch size. 0 keeps legacy auto behavior.
-    // Pascal/GTX 1080 Ti tuning currently favors 3584 hashes per batch.
-    std::size_t batch_size{0};
     // Skip the startup CUDA readiness probe after the backend has already been
     // validated on the machine. Full mining coverage is still required.
     bool skip_validation{false};
