@@ -89,6 +89,10 @@ Hash512 hamsi512_reference_stage(int device_id, const std::uint8_t* input, std::
 Hash512 fugue512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
 Hash512 shabal512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
 Hash512 whirlpool512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length);
+Hash512 cryptonight_reference_stage(int device_id,
+                                    const std::uint8_t* input,
+                                    std::size_t length,
+                                    std::uint8_t variant);
 
 } // namespace yerbas::cuda
 
