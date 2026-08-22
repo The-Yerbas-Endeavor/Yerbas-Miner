@@ -4,6 +4,7 @@
 #include "cuda/cryptonight/cn_config.cuh"
 #include "cuda/cryptonight/cn_final.cuh"
 #include "cuda/cryptonight/cn_slow_hash.cuh"
+#include "cuda/cryptonight/cn_split.cuh"
 #include "ghostrider/ghostrider.h"
 
 #include <cuda_runtime.h>
@@ -120,6 +121,92 @@ __global__ void cryptonight_stage(std::uint8_t* states,
     for (int i = 32; i < 64; ++i) state[i] = 0;
 }
 
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_setup_stage(std::uint8_t* states,
+                                        std::size_t count,
+                                        std::uint8_t* scratchpads,
+                                        cryptonight::SplitContext* contexts)
+{
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    std::uint8_t* state = states + index * kStateBytes;
+    std::uint8_t* scratchpad = scratchpads + index * static_cast<std::size_t>(cfg.page_size);
+    cryptonight::split_setup<VariantIndex>(state, kStateBytes, scratchpad, contexts[index]);
+}
+
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_loop_stage(std::size_t count,
+                                       std::uint8_t* scratchpads,
+                                       const cryptonight::SplitContext* contexts)
+{
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    std::uint8_t* scratchpad = scratchpads + index * static_cast<std::size_t>(cfg.page_size);
+    cryptonight::split_memory_loop<VariantIndex>(scratchpad, contexts[index]);
+}
+
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_final_stage(std::uint8_t* states,
+                                        std::size_t count,
+                                        std::uint8_t* scratchpads,
+                                        cryptonight::SplitContext* contexts)
+{
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    std::uint8_t* state = states + index * kStateBytes;
+    std::uint8_t* scratchpad = scratchpads + index * static_cast<std::size_t>(cfg.page_size);
+    std::uint8_t digest[32];
+    cryptonight::split_finalize<VariantIndex>(scratchpad, contexts[index], digest);
+
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) state[i] = digest[i];
+    #pragma unroll
+    for (int i = 32; i < 64; ++i) state[i] = 0;
+}
+
+template <std::uint8_t VariantIndex>
+void launch_split_cryptonight_variant(cudaStream_t stream,
+                                      int blocks,
+                                      int threads,
+                                      std::uint8_t* states,
+                                      std::size_t count,
+                                      std::uint8_t* scratchpads,
+                                      cryptonight::SplitContext* contexts)
+{
+    cryptonight_setup_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight setup launch failed");
+    cryptonight_loop_stage<VariantIndex><<<blocks, threads, 0, stream>>>(count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight loop launch failed");
+    cryptonight_final_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight final launch failed");
+}
+
+void launch_split_cryptonight(cudaStream_t stream,
+                              int blocks,
+                              int threads,
+                              std::uint8_t* states,
+                              std::size_t count,
+                              std::uint8_t variant,
+                              std::uint8_t* scratchpads,
+                              cryptonight::SplitContext* contexts)
+{
+    switch (variant) {
+    case 0: launch_split_cryptonight_variant<0>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    case 1: launch_split_cryptonight_variant<1>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    case 2: launch_split_cryptonight_variant<2>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    case 3: launch_split_cryptonight_variant<3>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    case 4: launch_split_cryptonight_variant<4>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    case 5: launch_split_cryptonight_variant<5>(stream, blocks, threads, states, count, scratchpads, contexts); break;
+    default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+    }
+}
+
 __global__ void keccak512_validation_kernel(const std::uint8_t* input,
                                             std::size_t length,
                                             std::uint8_t* output)
@@ -214,6 +301,7 @@ struct BatchEngine::Impl {
     std::uint32_t* d_nonces{nullptr};
     std::uint8_t* d_states{nullptr};
     std::uint8_t* d_cn_scratchpads{nullptr};
+    cryptonight::SplitContext* d_cn_contexts{nullptr};
     DeviceCandidate* d_candidates{nullptr};
     unsigned int* d_candidate_count{nullptr};
     JobDescriptor host_job{};
@@ -239,6 +327,9 @@ struct BatchEngine::Impl {
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads),
                               batch_size * kCnScratchpadStride),
                    "cudaMalloc CryptoNight scratchpads failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts),
+                              batch_size * sizeof(cryptonight::SplitContext)),
+                   "cudaMalloc CryptoNight split contexts failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)),
                    "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)),
@@ -250,6 +341,7 @@ struct BatchEngine::Impl {
         cudaSetDevice(device_id);
         if (d_candidate_count) cudaFree(d_candidate_count);
         if (d_candidates) cudaFree(d_candidates);
+        if (d_cn_contexts) cudaFree(d_cn_contexts);
         if (d_cn_scratchpads) cudaFree(d_cn_scratchpads);
         if (d_states) cudaFree(d_states);
         if (d_nonces) cudaFree(d_nonces);
@@ -312,11 +404,14 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
             if (algorithm >= cryptonight::kVariantConfigs.size()) {
                 throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
             }
-            cryptonight_stage<<<cn_blocks, cn_threads, 0, impl_->stream>>>(impl_->d_states,
-                                                                           impl_->batch_size,
-                                                                           algorithm,
-                                                                           impl_->d_cn_scratchpads);
-            check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight stage launch failed");
+            launch_split_cryptonight(impl_->stream,
+                                     cn_blocks,
+                                     cn_threads,
+                                     impl_->d_states,
+                                     impl_->batch_size,
+                                     algorithm,
+                                     impl_->d_cn_scratchpads,
+                                     impl_->d_cn_contexts);
         } else {
             if (!core::core512_implemented(algorithm)) {
                 throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
@@ -414,11 +509,14 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                 if (algorithm >= cryptonight::kVariantConfigs.size()) {
                     throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
                 }
-                cryptonight_stage<<<cn_blocks, cn_threads, 0, impl_->stream>>>(impl_->d_states,
-                                                                               impl_->batch_size,
-                                                                               algorithm,
-                                                                               impl_->d_cn_scratchpads);
-                check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight stage launch failed");
+                launch_split_cryptonight(impl_->stream,
+                                         cn_blocks,
+                                         cn_threads,
+                                         impl_->d_states,
+                                         impl_->batch_size,
+                                         algorithm,
+                                         impl_->d_cn_scratchpads,
+                                         impl_->d_cn_contexts);
             } else {
                 if (!core::core512_implemented(algorithm)) {
                     throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
