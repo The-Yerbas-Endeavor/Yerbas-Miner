@@ -14,6 +14,9 @@
 namespace yerbas::cpu {
 namespace {
 
+constexpr std::uint32_t kHybridCpuLaneBase = 0x70000000U;
+constexpr std::uint32_t kHybridCpuLaneMask = 0x0fffffffU;
+
 void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
 {
     header[76] = static_cast<std::uint8_t>(nonce);
@@ -97,7 +100,10 @@ struct WorkerPool::Impl {
             std::vector<Candidate> found;
             found.reserve(2);
             for (unsigned int i = 0; i < count; ++i) {
-                const std::uint32_t nonce = start + i;
+                const std::uint32_t logical_nonce = start + i;
+                const std::uint32_t nonce = (logical_nonce & 0x80000000U) != 0U
+                    ? (kHybridCpuLaneBase | (logical_nonce & kHybridCpuLaneMask))
+                    : logical_nonce;
                 write_nonce(header, nonce);
                 const ghostrider::Work work{header.data(), header.size()};
                 const auto hash = ghostrider::hash_reference(work);
@@ -142,16 +148,13 @@ struct WorkerPool::Impl {
         }
         lock.unlock();
 
-        // Re-hash every worker-reported candidate on the coordinator thread
-        // before it is returned to Stratum. This keeps CPU submission gated by
-        // a second independent pass through the pinned Yerbas Core reference
-        // path and avoids trusting a transient worker result blindly.
-        //
-        // The previous high-bit quarantine was diagnostic only. A nonce's bit
-        // 31 is ordinary header data and is not part of GhostRider validity, so
-        // verified candidates from the CPU-owned hybrid region are now allowed
-        // to reach the pool again. Pool acceptance/rejection is the final parity
-        // check and is tracked by the normal share accounting.
+        // Re-hash every candidate after all worker threads are idle. Hybrid
+        // scheduling uses a logical upper-half nonce counter, but several pool
+        // implementations mishandle bit-31-set nonce values. Map hybrid CPU
+        // work into a dedicated low-bit lane (0x70000000-0x7fffffff) before
+        // hashing/submission so the exact nonce verified here is the nonce the
+        // pool reconstructs. The lane is intentionally far ahead of the GPU 1
+        // cursor, avoiding practical overlap during normal sessions.
         std::vector<Candidate> verified;
         verified.reserve(combined.size());
         for (const auto& candidate : combined) {
@@ -163,12 +166,9 @@ struct WorkerPool::Impl {
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
                       << " | hash=" << display_hex(hash)
                       << " | target=" << display_hex(target)
-                      << " | local=" << (local_pass ? "PASS" : "FAIL");
-            if (local_pass) {
-                std::cout << " | pool=SUBMIT";
-                verified.push_back(candidate);
-            }
-            std::cout << '\n';
+                      << " | local=" << (local_pass ? "PASS" : "FAIL")
+                      << (local_pass ? " | pool=SUBMIT" : "") << '\n';
+            if (local_pass) verified.push_back(candidate);
         }
         return verified;
     }
