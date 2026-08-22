@@ -53,7 +53,6 @@ void apply_json(AppConfig& cfg, const json& root)
         if (g.contains("enabled")) cfg.gpu.enabled = g.at("enabled").get<bool>();
         if (g.contains("devices")) cfg.gpu.devices = g.at("devices").get<std::vector<int>>();
         if (g.contains("intensity")) cfg.gpu.intensity = g.at("intensity").get<int>();
-        if (g.contains("batch_size")) cfg.gpu.batch_size = g.at("batch_size").get<std::size_t>();
         if (g.contains("skip_validation")) cfg.gpu.skip_validation = g.at("skip_validation").get<bool>();
     }
     if (root.contains("logging")) {
@@ -93,7 +92,6 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--no-hybrid") cfg.miner.hybrid = false;
         else if (arg == "--devices") cfg.gpu.devices = parse_devices(require_value(argc, argv, i, "--devices"));
         else if (arg == "--intensity") cfg.gpu.intensity = std::stoi(require_value(argc, argv, i, "--intensity"));
-        else if (arg == "--gpu-batch") cfg.gpu.batch_size = static_cast<std::size_t>(std::stoull(require_value(argc, argv, i, "--gpu-batch")));
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
@@ -118,8 +116,7 @@ void print_config_help(const char* program)
         << "  --no-cpu            Disable CPU mining\n"
         << "  --no-hybrid         Do not combine CPU and GPU\n"
         << "  --devices 0,1       GPU device ids\n"
-        << "  --intensity N       Legacy GPU intensity (0 = auto)\n"
-        << "  --gpu-batch N       Explicit CUDA batch size (e.g. 3584)\n"
+        << "  --intensity N       GPU intensity (0 = auto)\n"
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
