@@ -64,6 +64,7 @@ constexpr const char* kColorReset = "\x1b[0m";
 
 std::unordered_map<int, std::string> g_pending_share_sources;
 std::mutex g_pending_share_sources_mutex;
+std::uint64_t g_blocks_found = 0;
 
 std::string timestamp()
 {
@@ -848,11 +849,13 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
             const auto hash = ghostrider::hash_reference(work);
             const auto network_target = compact_target_le(job_.nbits);
             if (hash_meets_target(hash, network_target)) {
+                ++g_blocks_found;
                 std::cout << '\n' << timestamp() << kBlockColor
                           << " ★★★ BLOCK FOUND ★★★ | source=" << source
                           << " | job=" << job_.job_id
                           << " | nonce=" << nonce_hex(nonce)
                           << " | nbits=" << job_.nbits
+                          << " | total=" << g_blocks_found
                           << ' ' << kColorReset << "\n\n";
             }
         }
@@ -918,10 +921,17 @@ void Client::report_stats(bool force)
     std::cout << "---------------------------------------------------------------------------------------\n";
     const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
     const double acceptance = resolved_shares > 0 ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares) : 100.0;
+
+    std::cout << "TOTAL HASHRATE " << kGrassColor << format_rate(total_hps) << kColorReset
+              << " | ACCEPTED " << kAcceptColor << shares_accepted_ << kColorReset
+              << " | REJECTED " << kRejectColor << shares_rejected_ << kColorReset
+              << " | BLOCKS FOUND " << kBlockColor << ' ' << g_blocks_found << ' ' << kColorReset << '\n';
+
     std::cout << kGrassColor << "🌿 Proof of Grass" << kColorReset
               << " | TOTAL " << format_rate(total_hps)
               << " | Shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_
               << " (" << std::fixed << std::setprecision(1) << acceptance << "%)"
+              << " | Blocks " << g_blocks_found
               << " | Uptime " << format_duration(uptime) << '\n';
     if (difficulty_ > 0.0) {
         std::cout << "Diff " << std::defaultfloat << std::setprecision(8) << difficulty_
