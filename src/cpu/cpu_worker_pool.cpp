@@ -14,9 +14,6 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr std::uint32_t kHybridCpuLaneBase = 0x70000000U;
-constexpr std::uint32_t kHybridCpuLaneMask = 0x0fffffffU;
-
 void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
 {
     header[76] = static_cast<std::uint8_t>(nonce);
@@ -100,13 +97,10 @@ struct WorkerPool::Impl {
             std::vector<Candidate> found;
             found.reserve(2);
             for (unsigned int i = 0; i < count; ++i) {
-                const std::uint32_t logical_nonce = start + i;
-                const std::uint32_t nonce = (logical_nonce & 0x80000000U) != 0U
-                    ? (kHybridCpuLaneBase | (logical_nonce & kHybridCpuLaneMask))
-                    : logical_nonce;
+                const std::uint32_t nonce = start + i;
                 write_nonce(header, nonce);
                 const ghostrider::Work work{header.data(), header.size()};
-                const auto hash = ghostrider::hash_reference(work);
+                const auto hash = ghostrider::hash_staged_reference(work);
                 if (hash_meets_target(hash, target)) found.push_back({nonce});
             }
 
@@ -143,29 +137,24 @@ struct WorkerPool::Impl {
         for (const auto& result : results) total_candidates += result.size();
         std::vector<Candidate> combined;
         combined.reserve(total_candidates);
-        for (auto& result : results) {
-            combined.insert(combined.end(), result.begin(), result.end());
-        }
+        for (auto& result : results) combined.insert(combined.end(), result.begin(), result.end());
         lock.unlock();
 
-        // Re-hash every candidate after all worker threads are idle. Hybrid
-        // scheduling uses a logical upper-half nonce counter, but several pool
-        // implementations mishandle bit-31-set nonce values. Map hybrid CPU
-        // work into a dedicated low-bit lane (0x70000000-0x7fffffff) before
-        // hashing/submission so the exact nonce verified here is the nonce the
-        // pool reconstructs. The lane is intentionally far ahead of the GPU 1
-        // cursor, avoiding practical overlap during normal sessions.
+        // Re-hash each candidate serially through the same explicit staged
+        // path used by the worker threads. This mirrors the CUDA pipeline's
+        // 18-stage dispatch instead of relying on the older monolithic helper.
         std::vector<Candidate> verified;
         verified.reserve(combined.size());
         for (const auto& candidate : combined) {
             auto verify_header = header;
             write_nonce(verify_header, candidate.nonce);
             const ghostrider::Work work{verify_header.data(), verify_header.size()};
-            const auto hash = ghostrider::hash_reference(work);
+            const auto hash = ghostrider::hash_staged_reference(work);
             const bool local_pass = hash_meets_target(hash, target);
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
                       << " | hash=" << display_hex(hash)
                       << " | target=" << display_hex(target)
+                      << " | staged=YES"
                       << " | local=" << (local_pass ? "PASS" : "FAIL")
                       << (local_pass ? " | pool=SUBMIT" : "") << '\n';
             if (local_pass) verified.push_back(candidate);
