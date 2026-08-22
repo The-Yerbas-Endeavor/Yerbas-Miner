@@ -45,3 +45,15 @@
 #undef le64toh
 #endif
 #endif
+
+// Yerbas Core's legacy CryptoNight implementation intentionally type-puns
+// 16-byte state/scratchpad blocks through uint8_t*, uint32_t* and uint64_t*.
+// With modern GCC at -O3 those accesses violate strict-aliasing assumptions and
+// can produce input-dependent hashes that differ from the pool-proven CUDA
+// implementation. The original algorithm relies on the byte/word views
+// aliasing exactly, so compile the pinned Core reference translation units with
+// strict-aliasing optimizations disabled. This header is force-included only on
+// the yerbas-ghostrider-reference target.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize ("no-strict-aliasing")
+#endif
