@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <cuda_runtime.h>
+
 namespace yerbas::cuda::cryptonight {
 
 // Exact parameters from the pinned Yerbas Core slow-hash.h wrappers.
@@ -55,10 +57,58 @@ inline constexpr std::size_t max_scratchpad_bytes()
     return value;
 }
 
-// Current production tuning point for the GTX 1080 Ti/Pascal path. The full
-// 18-stage benchmark peaks around 3584 hashes per batch; 4096 adds memory
-// pressure and reduces throughput. BatchEngine clamps larger/auto requests to
-// this ceiling, so normal pool mining uses the benchmarked production point.
-inline constexpr std::size_t kInitialMaxBatch = 3584;
+// Hardware-adaptive batch ceiling used by BatchEngine auto mode.
+//
+// GhostRider's largest CryptoNight variant consumes 2 MiB of scratchpad per
+// in-flight hash, so blindly using one fixed batch for every GPU either leaves
+// large cards under-filled or pushes smaller cards into memory pressure/OOM.
+// The auto ceiling combines two independent limits:
+//   1. roughly 70% of currently free VRAM, leaving headroom for the driver,
+//      desktop, CUDA contexts, states, and split-CN bookkeeping;
+//   2. 128 in-flight hashes per SM, which scales the working set with the
+//      amount of execution hardware instead of a specific GPU model.
+//
+// The result is aligned to 128 hashes and capped at 16384 for a conservative
+// first-generation autotuner. Explicit smaller user batches remain untouched
+// because BatchEngine still takes min(requested_size, this ceiling).
+inline std::size_t adaptive_batch_limit(int device_id)
+{
+    constexpr std::size_t kFallbackBatch = 1024;
+    constexpr std::size_t kAlignment = 128;
+    constexpr std::size_t kAbsoluteCap = 16384;
+    constexpr std::size_t kPerHashOverhead = 4096;
+
+    int previous_device = 0;
+    const bool have_previous = cudaGetDevice(&previous_device) == cudaSuccess;
+    if (cudaSetDevice(device_id) != cudaSuccess) return kFallbackBatch;
+
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    cudaDeviceProp props{};
+    const bool memory_ok = cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess;
+    const bool props_ok = cudaGetDeviceProperties(&props, device_id) == cudaSuccess;
+
+    if (have_previous && previous_device != device_id) cudaSetDevice(previous_device);
+
+    if (!memory_ok || !props_ok || props.multiProcessorCount <= 0) return kFallbackBatch;
+
+    const std::size_t bytes_per_hash = max_scratchpad_bytes() + kPerHashOverhead;
+    const std::size_t memory_budget = (free_bytes * 70U) / 100U;
+    std::size_t memory_limit = memory_budget / bytes_per_hash;
+    std::size_t sm_limit = static_cast<std::size_t>(props.multiProcessorCount) * 128U;
+
+    std::size_t selected = memory_limit < sm_limit ? memory_limit : sm_limit;
+    if (selected > kAbsoluteCap) selected = kAbsoluteCap;
+    selected = (selected / kAlignment) * kAlignment;
+    if (selected < kAlignment) selected = kAlignment;
+    return selected;
+}
+
+// Compatibility token consumed by the existing BatchEngine constructor.
+// The constructor has its device id in scope as `id`, so this expands the old
+// fixed ceiling into the per-device adaptive ceiling without changing public
+// BatchEngine APIs. Keep this local to CUDA compilation until the next backend
+// API cleanup moves auto-batch selection into an explicit constructor helper.
+#define kInitialMaxBatch adaptive_batch_limit(id)
 
 } // namespace yerbas::cuda::cryptonight
