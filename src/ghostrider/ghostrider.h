@@ -25,6 +25,11 @@ struct Work {
 // serialized 80-byte Yerbas block header (nVersion through nNonce).
 Hash256 hash_reference(const Work& work);
 
+// Stage-by-stage CPU path that mirrors the validated CUDA pipeline exactly.
+// Use this for live CPU mining so CPU candidate selection follows the same
+// explicit 18-stage dispatch semantics as the pool-proven CUDA path.
+Hash256 hash_staged_reference(const Work& work);
+
 // Exposes one of the 15 512-bit core hashes for GPU validation. algorithm must
 // be in the same 0..14 index space used by Yerbas Core's coreHash().
 Hash512 core_hash_reference(const Work& work, int algorithm);
