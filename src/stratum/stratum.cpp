@@ -428,6 +428,11 @@ bool Client::run_session(std::atomic_bool& stop_requested)
     subscribed_ = false;
     authorized_ = false;
     job_.valid = false;
+    target_ready_ = false;
+    difficulty_ = 0.0;
+    pending_target_ready_ = false;
+    pending_difficulty_ready_ = false;
+    pending_difficulty_ = 0.0;
     socket_pending_.clear();
 #ifdef YERBAS_HAS_CUDA
     gpu_job_loaded_ = false;
@@ -557,6 +562,7 @@ void Client::handle_message(const std::string& line)
             for (const auto& branch : params[4]) next.merkle_branch.push_back(branch.get<std::string>());
             next.version = params[5].get<std::string>(); next.nbits = params[6].get<std::string>(); next.ntime = params[7].get<std::string>(); next.clean_jobs = params[8].get<bool>(); next.valid = true;
             job_ = std::move(next);
+            activate_pending_target();
 #ifdef YERBAS_HAS_CUDA
             nonce_ = (gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty()) ? kHybridCpuStart : 0U;
             gpu_job_loaded_ = false;
@@ -565,7 +571,11 @@ void Client::handle_message(const std::string& line)
 #endif
             if (job_.clean_jobs) ++extranonce2_counter_;
             ++received_jobs_;
-            std::cout << "[stratum] New job #" << received_jobs_ << " id=" << job_.job_id << " branches=" << job_.merkle_branch.size() << " clean=" << (job_.clean_jobs ? "yes" : "no") << '\n';
+            std::cout << "[stratum] New job #" << received_jobs_ << " id=" << job_.job_id << " branches=" << job_.merkle_branch.size() << " clean=" << (job_.clean_jobs ? "yes" : "no");
+            if (target_ready_) {
+                std::cout << " | active_diff=" << std::defaultfloat << std::setprecision(8) << difficulty_;
+            }
+            std::cout << '\n';
         } catch (const std::exception& e) { job_.valid = false; std::cerr << "[stratum] Failed to decode mining.notify: " << e.what() << '\n'; }
         return;
     }
@@ -580,32 +590,41 @@ void Client::set_target_hex(const std::string& target_hex)
     if (hex.size() < 64) hex.insert(hex.begin(), 64 - hex.size(), '0');
     if (hex.size() != 64) throw std::runtime_error("Pool target must be 256 bits or shorter");
     const auto be = hex_to_bytes(hex);
-    for (std::size_t i = 0; i < 32; ++i) target_le_[i] = be[31 - i];
-    target_ready_ = true;
-#ifdef YERBAS_HAS_CUDA
-    gpu_job_loaded_ = false;
-#endif
-    std::cout << "[stratum] Explicit share target installed\n";
+    for (std::size_t i = 0; i < 32; ++i) pending_target_le_[i] = be[31 - i];
+    pending_target_ready_ = true;
+    pending_difficulty_ready_ = false;
+    std::cout << "[stratum] Explicit share target queued for next job\n";
 }
 
 void Client::set_difficulty(double difficulty)
 {
     if (!(difficulty > 0.0)) return;
-    difficulty_ = difficulty;
+    pending_difficulty_ = difficulty;
+    pending_difficulty_ready_ = true;
     static const cpp_int diff1 = parse_hex_int("00000000ffff0000000000000000000000000000000000000000000000000000");
     const std::uint64_t scaled = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(difficulty * 1000000.0));
     cpp_int target = (diff1 * kGhostRiderTargetFactorInt * 1000000ULL) / scaled;
     const cpp_int max_target = (cpp_int(1) << 256) - 1;
     if (target > max_target) target = max_target;
-    for (std::size_t i = 0; i < 32; ++i) { target_le_[i] = static_cast<std::uint8_t>(target & 0xff); target >>= 8; }
-    target_ready_ = true;
-#ifdef YERBAS_HAS_CUDA
-    gpu_job_loaded_ = false;
-#endif
-    const double expected = difficulty_ * kStratumDiffOneHashes;
+    for (std::size_t i = 0; i < 32; ++i) { pending_target_le_[i] = static_cast<std::uint8_t>(target & 0xff); target >>= 8; }
+    pending_target_ready_ = true;
+    const double expected = difficulty * kStratumDiffOneHashes;
     std::ostringstream msg;
-    msg << std::defaultfloat << std::setprecision(8) << "[stratum] Difficulty set to " << difficulty_ << " | GhostRider target factor " << static_cast<std::uint64_t>(kGhostRiderTargetFactor) << " | average work/share ~" << std::fixed << std::setprecision(0) << expected << " hashes";
+    msg << std::defaultfloat << std::setprecision(8) << "[stratum] Difficulty queued for next job: " << difficulty
+        << " | GhostRider target factor " << static_cast<std::uint64_t>(kGhostRiderTargetFactor)
+        << " | average work/share ~" << std::fixed << std::setprecision(0) << expected << " hashes";
+    if (target_ready_) msg << " | active job remains at diff " << std::defaultfloat << std::setprecision(8) << difficulty_;
     std::cout << msg.str() << '\n';
+}
+
+void Client::activate_pending_target()
+{
+    if (!pending_target_ready_) return;
+    target_le_ = pending_target_le_;
+    target_ready_ = true;
+    if (pending_difficulty_ready_) difficulty_ = pending_difficulty_;
+    pending_target_ready_ = false;
+    pending_difficulty_ready_ = false;
 }
 
 bool Client::build_header(std::array<std::uint8_t, 80>& header, std::string& extranonce2_hex, std::uint32_t nonce) const
@@ -953,8 +972,10 @@ void Client::report_stats(bool force)
                 << " (" << std::fixed << std::setprecision(1) << acceptance << "%)";
     std::cout << std::left << std::setw(14) << "SHARES"
               << std::setw(18) << shares_text.str()
-              << "DIFF " << std::defaultfloat << std::setprecision(8) << difficulty_
-              << "     ETA " << format_duration(eta)
+              << "ACTIVE DIFF " << std::defaultfloat << std::setprecision(8) << difficulty_;
+    if (pending_target_ready_ && pending_difficulty_ready_)
+        std::cout << "     PENDING " << std::defaultfloat << std::setprecision(8) << pending_difficulty_;
+    std::cout << "     ETA " << format_duration(eta)
               << "     UPTIME " << format_duration(uptime) << '\n';
 
     std::cout << std::left << std::setw(14) << "AVG"
