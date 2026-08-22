@@ -124,6 +124,7 @@ public:
 
 private:
     bool run_session(std::atomic_bool& stop_requested);
+    bool pump_socket_messages(std::intptr_t socket_value, int wait_ms = 0);
     void handle_message(const std::string& line);
     std::string login_user() const;
 
@@ -166,6 +167,7 @@ private:
     std::array<std::uint8_t, 32> target_le_{};
     bool target_ready_{false};
     double difficulty_{0.0};
+    std::string socket_pending_;
 
     std::chrono::steady_clock::time_point mining_started_{};
     std::chrono::steady_clock::time_point last_report_{};
