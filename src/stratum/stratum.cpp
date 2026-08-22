@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -50,23 +51,43 @@ constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
 constexpr double kStatusIntervalSeconds = 60.0;
-// High-contrast terminal palette: GPU cyan, CPU yellow, submitted white-on-blue,
-// accepted green, rejected red, and block-found black-on-bright-yellow.
 constexpr const char* kGpuColor = "\x1b[1;96m";
 constexpr const char* kCpuColor = "\x1b[1;93m";
-constexpr const char* kSubmitColor = "\x1b[1;97;44m";
+constexpr const char* kSubmitBadge = "\x1b[1;97;44m";
+constexpr const char* kAcceptBadge = "\x1b[1;97;42m";
+constexpr const char* kRejectBadge = "\x1b[1;97;41m";
 constexpr const char* kAcceptColor = "\x1b[1;92m";
 constexpr const char* kRejectColor = "\x1b[1;91m";
 constexpr const char* kBlockColor = "\x1b[1;30;103m";
+constexpr const char* kGrassColor = "\x1b[1;92m";
 constexpr const char* kColorReset = "\x1b[0m";
 
 std::unordered_map<int, std::string> g_pending_share_sources;
 std::mutex g_pending_share_sources_mutex;
 
+std::string timestamp()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    std::ostringstream ss;
+    ss << '[' << std::put_time(&tm, "%H:%M:%S") << "] ";
+    return ss.str();
+}
+
 const char* gpu_color(int device_id)
 {
     (void)device_id;
     return kGpuColor;
+}
+
+const char* source_color(const std::string& source)
+{
+    return source.rfind("GPU", 0) == 0 ? kGpuColor : (source == "CPU" ? kCpuColor : kColorReset);
 }
 
 void close_socket(SocketHandle socket)
@@ -495,10 +516,17 @@ void Client::handle_message(const std::string& line)
             const bool accepted = error.is_null() && result_ok;
             if (accepted) {
                 ++shares_accepted_;
-                std::cout << kAcceptColor << "[share] ACCEPTED | source=" << source << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << kColorReset << '\n';
+                std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset
+                          << " SRC: " << source_color(source) << source << kColorReset
+                          << " | accepted=" << kAcceptColor << shares_accepted_ << kColorReset
+                          << " rejected=" << shares_rejected_ << '\n';
             } else {
                 ++shares_rejected_;
-                std::cout << kRejectColor << "[share] REJECTED | source=" << source << " | accepted=" << shares_accepted_ << " rejected=" << shares_rejected_ << " | response=" << message.dump() << kColorReset << '\n';
+                std::cout << timestamp() << kRejectBadge << " SHARE REJECTED " << kColorReset
+                          << " SRC: " << source_color(source) << source << kColorReset
+                          << " | accepted=" << shares_accepted_
+                          << " rejected=" << kRejectColor << shares_rejected_ << kColorReset
+                          << " | response=" << message.dump() << '\n';
             }
         }
         return;
@@ -585,7 +613,7 @@ bool Client::mine_one(std::intptr_t socket_value)
     const auto hash = ghostrider::hash_reference(work);
     ++cpu_hashes_done_; ++hashes_done_;
     if (hash_meets_target(hash, target_le_)) {
-        std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
+        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
         return submit_share(socket_value, extranonce2, nonce, "CPU");
     }
     if (nonce_ == 0) ++extranonce2_counter_;
@@ -606,7 +634,7 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
     if (!worker_pool || worker_pool_threads != threads) {
         worker_pool = std::make_unique<cpu::WorkerPool>(threads);
         worker_pool_threads = threads;
-        std::cout << kCpuColor << "[CPU] persistent worker pool initialized | threads=" << threads << kColorReset << '\n';
+        std::cout << timestamp() << kCpuColor << "[CPU] persistent worker pool initialized | threads=" << threads << kColorReset << '\n';
     }
 
 #ifdef YERBAS_HAS_CUDA
@@ -629,7 +657,7 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
 
     const auto candidates = worker_pool->run(base_header, target_le_, batch_start, per_thread);
     for (const auto& candidate : candidates) {
-        std::cout << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
         if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
     }
 
@@ -695,7 +723,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
         const auto candidates = task.future.get(); const auto count = task.worker->engine->batch_size(); task.worker->hashes_done += count; hashes_done_ += count;
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (const auto& candidate : candidates) {
-            std::cout << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
     }
@@ -731,7 +759,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         const auto candidates = task.future.get(); const auto count = task.worker->engine->batch_size(); task.worker->hashes_done += count; hashes_done_ += count;
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (const auto& candidate : candidates) {
-            std::cout << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << job_.job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
     }
@@ -741,10 +769,6 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
 
 bool Client::submit_share(std::intptr_t socket_value, const std::string& extranonce2_hex, std::uint32_t nonce, const std::string& source)
 {
-    // Re-hash the submitted candidate with the pinned CPU reference and compare
-    // against the block header's compact nBits target. Pool share difficulty is
-    // intentionally separate: meeting nBits means this share is a real block
-    // candidate and gets an unmistakable BLOCK FOUND event before submission.
     try {
         std::array<std::uint8_t, 80> header{};
         std::string rebuilt_extranonce2;
@@ -753,8 +777,8 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
             const auto hash = ghostrider::hash_reference(work);
             const auto network_target = compact_target_le(job_.nbits);
             if (hash_meets_target(hash, network_target)) {
-                std::cout << '\n' << kBlockColor
-                          << " *** BLOCK FOUND *** | source=" << source
+                std::cout << '\n' << timestamp() << kBlockColor
+                          << " ★★★ BLOCK FOUND ★★★ | source=" << source
                           << " | job=" << job_.job_id
                           << " | nonce=" << nonce_hex(nonce)
                           << " | nbits=" << job_.nbits
@@ -771,7 +795,13 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
     if (!send_all(socket_handle, json_line(submit))) { std::cerr << "[share] Failed to send candidate share\n"; return false; }
     { std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex); g_pending_share_sources[request_id] = source; }
     ++shares_submitted_;
-    std::cout << kSubmitColor << "[share] Submitted #" << shares_submitted_ << " | source=" << source << " | job=" << job_.job_id << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
+    std::cout << timestamp() << kSubmitBadge << " SHARE SUBMITTED " << kColorReset
+              << " #" << shares_submitted_
+              << " SRC: " << source_color(source) << source << kColorReset
+              << " | job=" << job_.job_id
+              << " extranonce2=" << extranonce2_hex
+              << " ntime=" << job_.ntime
+              << " nonce=" << nonce_hex(nonce) << '\n';
     return true;
 }
 
@@ -787,31 +817,54 @@ void Client::report_stats(bool force)
     const double cpu_hps = since_report > 0.0 ? static_cast<double>(cpu_delta) / since_report : 0.0;
     const double uptime = std::chrono::duration<double>(now - mining_started_).count();
     const double average_hps = uptime > 0.0 ? static_cast<double>(hashes_done_) / uptime : 0.0;
-    if (config_.miner.cpu_enabled) std::cout << kCpuColor << "[CPU] " << format_rate(cpu_hps) << " | hashes " << cpu_hashes_done_ << kColorReset << '\n';
+    const double expected_hashes = difficulty_ > 0.0 ? difficulty_ * kStratumDiffOneHashes : 0.0;
+    const double eta = average_hps > 0.0 && expected_hashes > 0.0 ? expected_hashes / average_hps : std::numeric_limits<double>::infinity();
+
+    std::cout << "\n============================== STATUS UPDATE (1 MINUTE) ==============================\n";
+    std::cout << "SOURCE        HASHRATE          HASHES          BATCH\n";
+    std::cout << "---------------------------------------------------------------------------------------\n";
+    if (config_.miner.cpu_enabled) {
+        std::cout << kCpuColor << std::left << std::setw(13) << "CPU"
+                  << std::setw(18) << format_rate(cpu_hps)
+                  << std::setw(16) << cpu_hashes_done_
+                  << "-" << kColorReset << '\n';
+    }
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled && !gpu_workers_.empty()) {
         for (auto& worker : gpu_workers_) {
             const std::uint64_t gpu_delta = worker.hashes_done - worker.hashes_at_last_report;
             const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_delta) / since_report : 0.0;
-            if (gpu_pipeline_ready_) std::cout << gpu_color(worker.device_id) << "[GPU " << worker.device_id << "] " << format_rate(gpu_hps) << " | hashes " << worker.hashes_done << " | batch " << worker.engine->batch_size() << kColorReset << '\n';
-            else std::cout << gpu_color(worker.device_id) << "[GPU " << worker.device_id << "] idle | CUDA GhostRider pipeline incomplete" << kColorReset << '\n';
+            std::ostringstream label;
+            label << "GPU " << worker.device_id;
+            std::cout << gpu_color(worker.device_id) << std::left << std::setw(13) << label.str()
+                      << std::setw(18) << (gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle")
+                      << std::setw(16) << worker.hashes_done
+                      << worker.engine->batch_size() << kColorReset << '\n';
             worker.hashes_at_last_report = worker.hashes_done;
         }
     }
 #endif
+    std::cout << "---------------------------------------------------------------------------------------\n";
     const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
-    std::cout << "🌿 Proof of Grass | TOTAL " << format_rate(total_hps)
-              << " | Shares " << shares_accepted_ << '/' << resolved_shares
+    const double acceptance = resolved_shares > 0 ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares) : 100.0;
+    std::cout << kGrassColor << "🌿 Proof of Grass" << kColorReset
+              << " | TOTAL " << format_rate(total_hps)
+              << " | Shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_
+              << " (" << std::fixed << std::setprecision(1) << acceptance << "%)"
               << " | Uptime " << format_duration(uptime) << '\n';
-    std::cout << "[TOTAL] " << format_rate(total_hps) << " | avg " << format_rate(average_hps) << " | hashes " << hashes_done_ << " | jobs " << received_jobs_ << " | shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_;
     if (difficulty_ > 0.0) {
-        const double expected_hashes = difficulty_ * kStratumDiffOneHashes;
-        const double eta = average_hps > 0.0 ? expected_hashes / average_hps : std::numeric_limits<double>::infinity();
-        std::ostringstream diff_stats;
-        diff_stats << std::defaultfloat << std::setprecision(8) << " | diff " << difficulty_ << " | expected/share " << std::fixed << std::setprecision(0) << expected_hashes << " | avg ETA " << format_duration(eta);
-        std::cout << diff_stats.str();
+        std::cout << "Diff " << std::defaultfloat << std::setprecision(8) << difficulty_
+                  << " | Expected/share " << std::fixed << std::setprecision(0) << expected_hashes
+                  << " | Avg ETA " << format_duration(eta)
+                  << " | Avg " << format_rate(average_hps) << '\n';
     }
-    std::cout << " | uptime " << format_duration(uptime) << '\n';
+    std::cout << kCpuColor << "■ CPU" << kColorReset << "  "
+              << kGpuColor << "■ GPU" << kColorReset << "  "
+              << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << "  "
+              << kAcceptBadge << " SHARE ACCEPTED " << kColorReset << "  "
+              << kRejectBadge << " SHARE REJECTED " << kColorReset << "  "
+              << kBlockColor << " ★ BLOCK FOUND ★ " << kColorReset << "\n\n";
+
     last_report_ = now; hashes_at_last_report_ = hashes_done_; cpu_hashes_at_last_report_ = cpu_hashes_done_;
 }
 
