@@ -37,6 +37,12 @@ struct DeviceCandidate {
     std::uint8_t hash[32];
 };
 
+struct CnGeometry {
+    int setup_threads{64};
+    int loop_threads{64};
+    int final_threads{64};
+};
+
 void check_cuda(cudaError_t status, const char* what)
 {
     if (status != cudaSuccess) {
@@ -170,19 +176,159 @@ __global__ void cryptonight_final_stage(std::uint8_t* states,
     for (int i = 32; i < 64; ++i) state[i] = 0;
 }
 
+template <typename Launch>
+float time_cuda_phase(cudaStream_t stream, Launch&& launch)
+{
+    cudaEvent_t start{}, stop{};
+    check_cuda(cudaEventCreate(&start), "cudaEventCreate autotune start failed");
+    check_cuda(cudaEventCreate(&stop), "cudaEventCreate autotune stop failed");
+    float milliseconds = 0.0F;
+    try {
+        check_cuda(cudaEventRecord(start, stream), "cudaEventRecord autotune start failed");
+        launch();
+        check_cuda(cudaEventRecord(stop, stream), "cudaEventRecord autotune stop failed");
+        check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize autotune failed");
+        check_cuda(cudaEventElapsedTime(&milliseconds, start, stop), "cudaEventElapsedTime autotune failed");
+        cudaEventDestroy(stop);
+        cudaEventDestroy(start);
+        return milliseconds;
+    } catch (...) {
+        cudaEventDestroy(stop);
+        cudaEventDestroy(start);
+        throw;
+    }
+}
+
+template <std::uint8_t VariantIndex>
+CnGeometry autotune_cn_variant(cudaStream_t stream,
+                               std::uint8_t* states,
+                               std::size_t sample_count,
+                               std::uint8_t* scratchpads,
+                               cryptonight::SplitContext* contexts,
+                               int max_threads)
+{
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::array<int, 4> candidates{{32, 64, 128, 256}};
+    CnGeometry best{};
+    float best_setup_ms = 1.0e30F;
+    float best_loop_ms = 1.0e30F;
+    float best_final_ms = 1.0e30F;
+
+    auto reset_states = [&]() {
+        check_cuda(cudaMemsetAsync(states,
+                                   static_cast<int>(0x31U + VariantIndex * 17U),
+                                   sample_count * kStateBytes,
+                                   stream),
+                   "cudaMemsetAsync CryptoNight autotune states failed");
+    };
+
+    for (const int threads : candidates) {
+        if (threads > max_threads) continue;
+        reset_states();
+        const int blocks = static_cast<int>((sample_count + static_cast<std::size_t>(threads) - 1U) /
+                                            static_cast<std::size_t>(threads));
+        const float ms = time_cuda_phase(stream, [&]() {
+            cryptonight_setup_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
+            check_cuda(cudaGetLastError(), "CryptoNight autotune setup launch failed");
+        });
+        if (ms < best_setup_ms) {
+            best_setup_ms = ms;
+            best.setup_threads = threads;
+        }
+    }
+
+    for (const int threads : candidates) {
+        if (threads > max_threads) continue;
+        reset_states();
+        const int setup_blocks = static_cast<int>((sample_count + static_cast<std::size_t>(best.setup_threads) - 1U) /
+                                                  static_cast<std::size_t>(best.setup_threads));
+        cryptonight_setup_stage<VariantIndex><<<setup_blocks, best.setup_threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "CryptoNight autotune loop prep failed");
+        const int blocks = static_cast<int>((sample_count + static_cast<std::size_t>(threads) - 1U) /
+                                            static_cast<std::size_t>(threads));
+        const float ms = time_cuda_phase(stream, [&]() {
+            cryptonight_loop_stage<VariantIndex><<<blocks, threads, 0, stream>>>(sample_count, scratchpads, contexts);
+            check_cuda(cudaGetLastError(), "CryptoNight autotune loop launch failed");
+        });
+        if (ms < best_loop_ms) {
+            best_loop_ms = ms;
+            best.loop_threads = threads;
+        }
+    }
+
+    for (const int threads : candidates) {
+        if (threads > max_threads) continue;
+        reset_states();
+        const int setup_blocks = static_cast<int>((sample_count + static_cast<std::size_t>(best.setup_threads) - 1U) /
+                                                  static_cast<std::size_t>(best.setup_threads));
+        const int loop_blocks = static_cast<int>((sample_count + static_cast<std::size_t>(best.loop_threads) - 1U) /
+                                                 static_cast<std::size_t>(best.loop_threads));
+        cryptonight_setup_stage<VariantIndex><<<setup_blocks, best.setup_threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "CryptoNight autotune final setup prep failed");
+        cryptonight_loop_stage<VariantIndex><<<loop_blocks, best.loop_threads, 0, stream>>>(sample_count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "CryptoNight autotune final loop prep failed");
+        const int blocks = static_cast<int>((sample_count + static_cast<std::size_t>(threads) - 1U) /
+                                            static_cast<std::size_t>(threads));
+        const float ms = time_cuda_phase(stream, [&]() {
+            cryptonight_final_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
+            check_cuda(cudaGetLastError(), "CryptoNight autotune final launch failed");
+        });
+        if (ms < best_final_ms) {
+            best_final_ms = ms;
+            best.final_threads = threads;
+        }
+    }
+
+    std::cout << "[CUDA autotune] " << cfg.name
+              << " | sample=" << sample_count
+              << " | setup=" << best.setup_threads << " (" << best_setup_ms << " ms)"
+              << " | loop=" << best.loop_threads << " (" << best_loop_ms << " ms)"
+              << " | final=" << best.final_threads << " (" << best_final_ms << " ms)\n";
+    return best;
+}
+
+std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
+                                                 cudaStream_t stream,
+                                                 std::uint8_t* states,
+                                                 std::size_t batch_size,
+                                                 std::uint8_t* scratchpads,
+                                                 cryptonight::SplitContext* contexts)
+{
+    std::array<CnGeometry, 6> result{};
+    cudaDeviceProp props{};
+    check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CryptoNight autotune failed");
+
+    std::size_t sample_count = std::max<std::size_t>(32U,
+        static_cast<std::size_t>(std::max(1, props.multiProcessorCount)) * 2U);
+    sample_count = std::min(sample_count, batch_size);
+    sample_count = std::max<std::size_t>(1U, sample_count);
+
+    std::cout << "[GPU " << device_id << "] empirical CryptoNight geometry autotune starting"
+              << " | sample=" << sample_count
+              << " | candidates=32,64,128,256\n";
+
+    result[0] = autotune_cn_variant<0>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
+    result[1] = autotune_cn_variant<1>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
+    result[2] = autotune_cn_variant<2>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
+    result[3] = autotune_cn_variant<3>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
+    result[4] = autotune_cn_variant<4>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
+    result[5] = autotune_cn_variant<5>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
+
+    std::cout << "[GPU " << device_id << "] empirical CryptoNight geometry autotune complete\n";
+    return result;
+}
+
 template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant(cudaStream_t stream,
                                       std::uint8_t* states,
                                       std::size_t count,
                                       std::uint8_t* scratchpads,
-                                      cryptonight::SplitContext* contexts)
+                                      cryptonight::SplitContext* contexts,
+                                      const CnGeometry& geometry)
 {
-    // Keep the production path on the full-pipeline-proven geometry.
-    // The CN-Fast microbenchmark favored 64/128/128, but applying that
-    // geometry to every GhostRider CN variant regressed the real pipeline.
-    constexpr int setup_threads = 64;
-    constexpr int loop_threads = 64;
-    constexpr int final_threads = 64;
+    const int setup_threads = geometry.setup_threads;
+    const int loop_threads = geometry.loop_threads;
+    const int final_threads = geometry.final_threads;
     const int setup_blocks = static_cast<int>((count + setup_threads - 1) / setup_threads);
     const int loop_blocks = static_cast<int>((count + loop_threads - 1) / loop_threads);
     const int final_blocks = static_cast<int>((count + final_threads - 1) / final_threads);
@@ -200,15 +346,16 @@ void launch_split_cryptonight(cudaStream_t stream,
                               std::size_t count,
                               std::uint8_t variant,
                               std::uint8_t* scratchpads,
-                              cryptonight::SplitContext* contexts)
+                              cryptonight::SplitContext* contexts,
+                              const CnGeometry& geometry)
 {
     switch (variant) {
-    case 0: launch_split_cryptonight_variant<0>(stream, states, count, scratchpads, contexts); break;
-    case 1: launch_split_cryptonight_variant<1>(stream, states, count, scratchpads, contexts); break;
-    case 2: launch_split_cryptonight_variant<2>(stream, states, count, scratchpads, contexts); break;
-    case 3: launch_split_cryptonight_variant<3>(stream, states, count, scratchpads, contexts); break;
-    case 4: launch_split_cryptonight_variant<4>(stream, states, count, scratchpads, contexts); break;
-    case 5: launch_split_cryptonight_variant<5>(stream, states, count, scratchpads, contexts); break;
+    case 0: launch_split_cryptonight_variant<0>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 1: launch_split_cryptonight_variant<1>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 2: launch_split_cryptonight_variant<2>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 3: launch_split_cryptonight_variant<3>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 4: launch_split_cryptonight_variant<4>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 5: launch_split_cryptonight_variant<5>(stream, states, count, scratchpads, contexts, geometry); break;
     default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
     }
 }
@@ -312,6 +459,7 @@ struct BatchEngine::Impl {
     unsigned int* d_candidate_count{nullptr};
     JobDescriptor host_job{};
     std::vector<std::uint8_t> host_states;
+    std::array<CnGeometry, 6> cn_geometries{};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -340,6 +488,20 @@ struct BatchEngine::Impl {
                    "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)),
                    "cudaMalloc candidate counter failed");
+
+        try {
+            cn_geometries = autotune_cn_geometries(device_id,
+                                                   stream,
+                                                   d_states,
+                                                   batch_size,
+                                                   d_cn_scratchpads,
+                                                   d_cn_contexts);
+        } catch (const std::exception& e) {
+            cn_geometries.fill(CnGeometry{});
+            cudaGetLastError();
+            std::cerr << "[GPU " << device_id << "] CryptoNight geometry autotune failed; using 64/64/64: "
+                      << e.what() << '\n';
+        }
     }
 
     ~Impl()
@@ -393,9 +555,7 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                "cudaMemsetAsync candidate counter failed");
 
     constexpr int core_threads = 256;
-    constexpr int cn_threads = 64;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
     initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
                                                                            impl_->d_nonces,
                                                                            impl_->batch_size);
@@ -415,7 +575,8 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                      impl_->batch_size,
                                      algorithm,
                                      impl_->d_cn_scratchpads,
-                                     impl_->d_cn_contexts);
+                                     impl_->d_cn_contexts,
+                                     impl_->cn_geometries[algorithm]);
         } else {
             if (!core::core512_implemented(algorithm)) {
                 throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
@@ -478,9 +639,7 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                "cudaMemsetAsync candidate counter failed");
 
     constexpr int core_threads = 256;
-    constexpr int cn_threads = 64;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
 
     cudaEvent_t total_start{}, total_stop{}, section_start{}, section_stop{};
     check_cuda(cudaEventCreate(&total_start), "cudaEventCreate total_start failed");
@@ -518,7 +677,8 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                                          impl_->batch_size,
                                          algorithm,
                                          impl_->d_cn_scratchpads,
-                                         impl_->d_cn_contexts);
+                                         impl_->d_cn_contexts,
+                                         impl_->cn_geometries[algorithm]);
             } else {
                 if (!core::core512_implemented(algorithm)) {
                     throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
