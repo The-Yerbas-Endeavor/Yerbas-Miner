@@ -177,11 +177,12 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
                                       std::uint8_t* scratchpads,
                                       cryptonight::SplitContext* contexts)
 {
-    // Pascal/GTX 1080 Ti tuning at batch 3584:
-    // setup 64 threads, memory loop 128 threads, final 128 threads.
+    // Keep the production path on the full-pipeline-proven geometry.
+    // The CN-Fast microbenchmark favored 64/128/128, but applying that
+    // geometry to every GhostRider CN variant regressed the real pipeline.
     constexpr int setup_threads = 64;
-    constexpr int loop_threads = 128;
-    constexpr int final_threads = 128;
+    constexpr int loop_threads = 64;
+    constexpr int final_threads = 64;
     const int setup_blocks = static_cast<int>((count + setup_threads - 1) / setup_threads);
     const int loop_blocks = static_cast<int>((count + loop_threads - 1) / loop_threads);
     const int final_blocks = static_cast<int>((count + final_threads - 1) / final_threads);
@@ -392,7 +393,9 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                "cudaMemsetAsync candidate counter failed");
 
     constexpr int core_threads = 256;
+    constexpr int cn_threads = 64;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
+    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
     initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
                                                                            impl_->d_nonces,
                                                                            impl_->batch_size);
@@ -475,7 +478,9 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                "cudaMemsetAsync candidate counter failed");
 
     constexpr int core_threads = 256;
+    constexpr int cn_threads = 64;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
+    const int cn_blocks = static_cast<int>((impl_->batch_size + cn_threads - 1) / cn_threads);
 
     cudaEvent_t total_start{}, total_stop{}, section_start{}, section_stop{};
     check_cuda(cudaEventCreate(&total_start), "cudaEventCreate total_start failed");
