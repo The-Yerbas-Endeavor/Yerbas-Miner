@@ -146,6 +146,7 @@ private:
 
     void set_target_hex(const std::string& target_hex);
     void set_difficulty(double difficulty);
+    void activate_pending_target();
     void report_stats(bool force = false);
 
     AppConfig config_;
@@ -164,9 +165,17 @@ private:
     std::uint64_t extranonce2_counter_{0};
     std::uint32_t nonce_{0x80000000U};
     MiningJob job_;
+
+    // target_le_/difficulty_ describe the active mining job only. Pool vardiff
+    // messages are staged in pending_* and promoted atomically by mining.notify.
     std::array<std::uint8_t, 32> target_le_{};
     bool target_ready_{false};
     double difficulty_{0.0};
+    std::array<std::uint8_t, 32> pending_target_le_{};
+    bool pending_target_ready_{false};
+    double pending_difficulty_{0.0};
+    bool pending_difficulty_ready_{false};
+
     std::string socket_pending_;
 
     std::chrono::steady_clock::time_point mining_started_{};
