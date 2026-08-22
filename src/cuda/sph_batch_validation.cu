@@ -1,5 +1,7 @@
 #include "cuda/cuda_backend.h"
 #include "cuda/core/stage_dispatch.cuh"
+#include "cuda/cryptonight/cn_config.cuh"
+#include "cuda/cryptonight/cn_split.cuh"
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -42,6 +44,47 @@ Hash512 validate_stage(int device_id, std::uint8_t algorithm,
         if (d_ok) cudaFree(d_ok); if (d_output) cudaFree(d_output); if (d_input) cudaFree(d_input); throw;
     }
 }
+
+template <std::uint8_t Variant>
+__global__ void validate_cn_kernel(const std::uint8_t* input,
+                                   std::uint8_t* scratchpad,
+                                   std::uint8_t* output) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    cryptonight::SplitContext context{};
+    std::uint8_t digest[32];
+    cryptonight::split_setup<Variant>(input, 64, scratchpad, context);
+    cryptonight::split_memory_loop<Variant>(scratchpad, context);
+    cryptonight::split_finalize<Variant>(scratchpad, context, digest);
+    for (int i = 0; i < 32; ++i) output[i] = digest[i];
+    for (int i = 32; i < 64; ++i) output[i] = 0;
+}
+
+template <std::uint8_t Variant>
+Hash512 validate_cn_stage(int device_id, const std::uint8_t* input, std::size_t length) {
+    if (!input || length != 64) throw std::invalid_argument("CUDA CryptoNight validation input must be exactly 64 bytes");
+    constexpr auto cfg = cryptonight::config_value(Variant);
+    check_cuda_batch(cudaSetDevice(device_id), "cudaSetDevice failed");
+    std::uint8_t *d_input = nullptr, *d_scratchpad = nullptr, *d_output = nullptr;
+    check_cuda_batch(cudaMalloc(reinterpret_cast<void**>(&d_input), 64), "cudaMalloc CN input failed");
+    try {
+        check_cuda_batch(cudaMalloc(reinterpret_cast<void**>(&d_scratchpad), static_cast<std::size_t>(cfg.page_size)),
+                         "cudaMalloc CN scratchpad failed");
+        check_cuda_batch(cudaMalloc(reinterpret_cast<void**>(&d_output), 64), "cudaMalloc CN output failed");
+        check_cuda_batch(cudaMemcpy(d_input, input, 64, cudaMemcpyHostToDevice), "cudaMemcpy CN input failed");
+        validate_cn_kernel<Variant><<<1,1>>>(d_input, d_scratchpad, d_output);
+        check_cuda_batch(cudaGetLastError(), "CN validation kernel launch failed");
+        check_cuda_batch(cudaDeviceSynchronize(), "CN validation synchronize failed");
+        Hash512 out{};
+        check_cuda_batch(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost), "cudaMemcpy CN output failed");
+        cudaFree(d_output); cudaFree(d_scratchpad); cudaFree(d_input);
+        return out;
+    } catch (...) {
+        if (d_output) cudaFree(d_output);
+        if (d_scratchpad) cudaFree(d_scratchpad);
+        if (d_input) cudaFree(d_input);
+        throw;
+    }
+}
 }
 Hash512 bmw512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,1,p,n); }
 Hash512 groestl512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,2,p,n); }
@@ -54,4 +97,15 @@ Hash512 hamsi512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { 
 Hash512 fugue512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,12,p,n); }
 Hash512 shabal512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,13,p,n); }
 Hash512 whirlpool512_reference_stage(int d, const std::uint8_t* p, std::size_t n) { return validate_stage(d,14,p,n); }
+Hash512 cryptonight_reference_stage(int d, const std::uint8_t* p, std::size_t n, std::uint8_t variant) {
+    switch (variant) {
+    case 0: return validate_cn_stage<0>(d,p,n);
+    case 1: return validate_cn_stage<1>(d,p,n);
+    case 2: return validate_cn_stage<2>(d,p,n);
+    case 3: return validate_cn_stage<3>(d,p,n);
+    case 4: return validate_cn_stage<4>(d,p,n);
+    case 5: return validate_cn_stage<5>(d,p,n);
+    default: throw std::invalid_argument("CUDA CryptoNight variant must be 0..5");
+    }
+}
 }
