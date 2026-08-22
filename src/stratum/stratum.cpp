@@ -49,6 +49,7 @@ constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
 constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
+constexpr double kStatusIntervalSeconds = 60.0;
 // High-contrast terminal palette: GPU cyan, CPU yellow, submitted white-on-blue,
 // accepted green, rejected red, and block-found black-on-bright-yellow.
 constexpr const char* kGpuColor = "\x1b[1;96m";
@@ -56,7 +57,7 @@ constexpr const char* kCpuColor = "\x1b[1;93m";
 constexpr const char* kSubmitColor = "\x1b[1;97;44m";
 constexpr const char* kAcceptColor = "\x1b[1;92m";
 constexpr const char* kRejectColor = "\x1b[1;91m";
-[[maybe_unused]] constexpr const char* kBlockColor = "\x1b[1;30;103m";
+constexpr const char* kBlockColor = "\x1b[1;30;103m";
 constexpr const char* kColorReset = "\x1b[0m";
 
 std::unordered_map<int, std::string> g_pending_share_sources;
@@ -241,6 +242,29 @@ bool hash_meets_target(const ghostrider::Hash256& hash, const std::array<std::ui
         if (hash[index] > target_le[index]) return false;
     }
     return true;
+}
+
+std::array<std::uint8_t, 32> compact_target_le(const std::string& nbits_hex)
+{
+    if (nbits_hex.size() != 8) throw std::runtime_error("nBits must be exactly 4 bytes");
+    const std::uint32_t compact = static_cast<std::uint32_t>(std::stoul(nbits_hex, nullptr, 16));
+    const unsigned int exponent = compact >> 24;
+    const std::uint32_t mantissa = compact & 0x007fffffU;
+    if ((compact & 0x00800000U) != 0U || mantissa == 0U)
+        throw std::runtime_error("Invalid compact network target");
+
+    cpp_int target = mantissa;
+    if (exponent <= 3U) target >>= 8U * (3U - exponent);
+    else target <<= 8U * (exponent - 3U);
+
+    const cpp_int max_target = (cpp_int(1) << 256) - 1;
+    if (target > max_target) target = max_target;
+    std::array<std::uint8_t, 32> target_le{};
+    for (std::size_t i = 0; i < target_le.size(); ++i) {
+        target_le[i] = static_cast<std::uint8_t>(target & 0xff);
+        target >>= 8;
+    }
+    return target_le;
 }
 
 cpp_int parse_hex_int(const std::string& hex)
@@ -717,6 +741,30 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
 
 bool Client::submit_share(std::intptr_t socket_value, const std::string& extranonce2_hex, std::uint32_t nonce, const std::string& source)
 {
+    // Re-hash the submitted candidate with the pinned CPU reference and compare
+    // against the block header's compact nBits target. Pool share difficulty is
+    // intentionally separate: meeting nBits means this share is a real block
+    // candidate and gets an unmistakable BLOCK FOUND event before submission.
+    try {
+        std::array<std::uint8_t, 80> header{};
+        std::string rebuilt_extranonce2;
+        if (build_header(header, rebuilt_extranonce2, nonce) && rebuilt_extranonce2 == extranonce2_hex) {
+            const ghostrider::Work work{header.data(), header.size()};
+            const auto hash = ghostrider::hash_reference(work);
+            const auto network_target = compact_target_le(job_.nbits);
+            if (hash_meets_target(hash, network_target)) {
+                std::cout << '\n' << kBlockColor
+                          << " *** BLOCK FOUND *** | source=" << source
+                          << " | job=" << job_.job_id
+                          << " | nonce=" << nonce_hex(nonce)
+                          << " | nbits=" << job_.nbits
+                          << ' ' << kColorReset << "\n\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[block-check] " << e.what() << '\n';
+    }
+
     const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
     const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
     const nlohmann::json submit = {{"id",request_id},{"method","mining.submit"},{"params",nlohmann::json::array({login_user(),job_.job_id,extranonce2_hex,job_.ntime,nonce_hex(nonce)})}};
@@ -732,7 +780,7 @@ void Client::report_stats(bool force)
     const auto now = std::chrono::steady_clock::now();
     if (mining_started_.time_since_epoch().count() == 0) return;
     const double since_report = std::chrono::duration<double>(now - last_report_).count();
-    if (!force && since_report < 5.0) return;
+    if (!force && since_report < kStatusIntervalSeconds) return;
     const std::uint64_t delta_hashes = hashes_done_ - hashes_at_last_report_;
     const std::uint64_t cpu_delta = cpu_hashes_done_ - cpu_hashes_at_last_report_;
     const double total_hps = since_report > 0.0 ? static_cast<double>(delta_hashes) / since_report : 0.0;
@@ -752,7 +800,7 @@ void Client::report_stats(bool force)
     }
 #endif
     const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
-    std::cout << "🌿 Proof of Grass | " << format_rate(total_hps)
+    std::cout << "🌿 Proof of Grass | TOTAL " << format_rate(total_hps)
               << " | Shares " << shares_accepted_ << '/' << resolved_shares
               << " | Uptime " << format_duration(uptime) << '\n';
     std::cout << "[TOTAL] " << format_rate(total_hps) << " | avg " << format_rate(average_hps) << " | hashes " << hashes_done_ << " | jobs " << received_jobs_ << " | shares S/A/R " << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_;
