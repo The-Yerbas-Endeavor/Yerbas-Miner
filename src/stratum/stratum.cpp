@@ -50,7 +50,7 @@ constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
 constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
-constexpr double kStatusIntervalSeconds = 60.0;
+constexpr double kStatusIntervalSeconds = 150.0;
 constexpr const char* kGpuColor = "\x1b[1;96m";
 constexpr const char* kCpuColor = "\x1b[1;93m";
 constexpr const char* kSubmitBadge = "\x1b[1;97;44m";
@@ -63,6 +63,7 @@ constexpr const char* kGrassColor = "\x1b[1;92m";
 constexpr const char* kColorReset = "\x1b[0m";
 
 std::unordered_map<int, std::string> g_pending_share_sources;
+std::unordered_map<std::string, std::uint64_t> g_source_accepted;
 std::mutex g_pending_share_sources_mutex;
 std::uint64_t g_blocks_found = 0;
 
@@ -530,6 +531,7 @@ void Client::handle_message(const std::string& line)
             const bool accepted = error.is_null() && result_ok;
             if (accepted) {
                 ++shares_accepted_;
+                ++g_source_accepted[source];
                 std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset
                           << " SRC: " << source_color(source) << source << kColorReset
                           << " | accepted=" << kAcceptColor << shares_accepted_ << kColorReset
@@ -898,15 +900,16 @@ void Client::report_stats(bool force)
         ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares)
         : 100.0;
 
-    constexpr const char* kRule = "--------------------------------------------------------------------------------------------";
-    constexpr const char* kTop =  "============================= 🌿 PROOF OF GRASS | STATUS UPDATE =============================";
+    constexpr const char* kRule = "--------------------------------------------------------------------------------------------------------";
+    constexpr const char* kTop =  "================================ 🌿 PROOF OF GRASS | STATUS UPDATE =================================";
 
     std::cout << '\n' << kTop << '\n';
     std::cout << std::left
               << std::setw(14) << "SOURCE"
               << std::setw(18) << "HASHRATE"
               << std::setw(17) << "HASHES"
-              << "BATCH\n";
+              << std::setw(12) << "BATCH"
+              << "ACCEPTED\n";
     std::cout << kRule << '\n';
 
     if (config_.miner.cpu_enabled) {
@@ -914,7 +917,9 @@ void Client::report_stats(bool force)
                   << std::left << std::setw(14) << "CPU"
                   << std::setw(18) << format_rate(cpu_hps)
                   << std::setw(17) << cpu_hashes_done_
-                  << "-" << kColorReset << '\n';
+                  << std::setw(12) << "-"
+                  << g_source_accepted["CPU"]
+                  << kColorReset << '\n';
     }
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled && !gpu_workers_.empty()) {
@@ -923,11 +928,13 @@ void Client::report_stats(bool force)
             const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_delta) / since_report : 0.0;
             std::ostringstream label;
             label << "GPU " << worker.device_id;
+            const std::string source = label.str();
             std::cout << gpu_color(worker.device_id)
-                      << std::left << std::setw(14) << label.str()
+                      << std::left << std::setw(14) << source
                       << std::setw(18) << (gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle")
                       << std::setw(17) << worker.hashes_done
-                      << worker.engine->batch_size()
+                      << std::setw(12) << worker.engine->batch_size()
+                      << g_source_accepted[source]
                       << kColorReset << '\n';
             worker.hashes_at_last_report = worker.hashes_done;
         }
@@ -961,7 +968,7 @@ void Client::report_stats(bool force)
               << kAcceptBadge << " SHARE ACCEPTED " << kColorReset << "  "
               << kRejectBadge << " SHARE REJECTED " << kColorReset << "  "
               << kBlockColor << " ★ BLOCK FOUND ★ " << kColorReset << '\n';
-    std::cout << "============================================================================================\n\n";
+    std::cout << "========================================================================================================\n\n";
 
     last_report_ = now;
     hashes_at_last_report_ = hashes_done_;
