@@ -49,23 +49,20 @@ constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
 constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
-constexpr const char* kCpuColor = "\x1b[93m";
+constexpr const char* kGpuColor = "\x1b[96m";
+constexpr const char* kCpuColor = "\x1b[95m";
+constexpr const char* kSubmitColor = "\x1b[94m";
 constexpr const char* kAcceptColor = "\x1b[92m";
 constexpr const char* kRejectColor = "\x1b[91m";
 constexpr const char* kColorReset = "\x1b[0m";
-constexpr std::array<const char*, 6> kGpuColors{{
-    "\x1b[96m", "\x1b[92m", "\x1b[94m", "\x1b[93m", "\x1b[36m", "\x1b[32m",
-}};
 
 std::unordered_map<int, std::string> g_pending_share_sources;
 std::mutex g_pending_share_sources_mutex;
 
 const char* gpu_color(int device_id)
 {
-    const std::size_t index = device_id >= 0
-        ? static_cast<std::size_t>(device_id) % kGpuColors.size()
-        : 0U;
-    return kGpuColors[index];
+    (void)device_id;
+    return kGpuColor;
 }
 
 void close_socket(SocketHandle socket)
@@ -582,7 +579,7 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
     if (!worker_pool || worker_pool_threads != threads) {
         worker_pool = std::make_unique<cpu::WorkerPool>(threads);
         worker_pool_threads = threads;
-        std::cout << "[CPU] persistent worker pool initialized | threads=" << threads << '\n';
+        std::cout << kCpuColor << "[CPU] persistent worker pool initialized | threads=" << threads << kColorReset << '\n';
     }
 
 #ifdef YERBAS_HAS_CUDA
@@ -723,7 +720,7 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
     if (!send_all(socket_handle, json_line(submit))) { std::cerr << "[share] Failed to send candidate share\n"; return false; }
     { std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex); g_pending_share_sources[request_id] = source; }
     ++shares_submitted_;
-    std::cout << "[share] Submitted #" << shares_submitted_ << " | source=" << source << " | job=" << job_.job_id << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce) << '\n';
+    std::cout << kSubmitColor << "[share] Submitted #" << shares_submitted_ << " | source=" << source << " | job=" << job_.job_id << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
     return true;
 }
 
