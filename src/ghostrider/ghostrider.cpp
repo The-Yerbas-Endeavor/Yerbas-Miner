@@ -1,7 +1,10 @@
 #include "ghostrider/ghostrider.h"
 
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -37,6 +40,65 @@ void selections(const Work& work,
         {0, 1, 2, 3, 4, 5});
     random_cns = hash_selection.getCnIndexes();
     core_hash_indexes = hash_selection.getAlgoIndexes();
+}
+
+const char* core_name(std::uint8_t index)
+{
+    static constexpr const char* names[15] = {
+        "BLAKE", "BMW", "Groestl", "JH", "Keccak",
+        "Skein", "Luffa", "CubeHash", "Shavite", "SIMD",
+        "Echo", "Hamsi", "Fugue", "Shabal", "Whirlpool"
+    };
+    return index < 15 ? names[index] : "Core?";
+}
+
+const char* cn_name(std::uint8_t index)
+{
+    static constexpr const char* names[6] = {
+        "CN-Dark", "CN-DarkLite", "CN-Fast",
+        "CN-Lite", "CN-Turtle", "CN-TurtleLite"
+    };
+    return index < 6 ? names[index] : "CN?";
+}
+
+std::uint64_t schedule_fingerprint64(const StageSchedule& schedule)
+{
+    // FNV-1a 64-bit: stable, compact fingerprint for grouping live hashrate
+    // observations by the exact 18-stage GhostRider schedule.
+    std::uint64_t value = 14695981039346656037ULL;
+    for (const auto stage : schedule) {
+        value ^= static_cast<std::uint64_t>(stage);
+        value *= 1099511628211ULL;
+    }
+    return value;
+}
+
+void log_schedule(const StageSchedule& schedule)
+{
+    std::ostringstream compact;
+    compact << std::hex << std::setfill('0');
+    for (std::size_t i = 0; i < schedule.size(); ++i) {
+        if (i) compact << '-';
+        compact << std::setw(2) << static_cast<unsigned int>(schedule[i]);
+    }
+
+    std::ostringstream names;
+    for (std::size_t i = 0; i < schedule.size(); ++i) {
+        if (i) names << ' ';
+        const std::uint8_t stage = schedule[i];
+        if ((stage & kCryptoNightStageFlag) != 0)
+            names << i << ':' << cn_name(static_cast<std::uint8_t>(stage & 0x7fU));
+        else
+            names << i << ':' << core_name(stage);
+    }
+
+    std::ostringstream fingerprint;
+    fingerprint << std::hex << std::setfill('0') << std::setw(16)
+                << schedule_fingerprint64(schedule);
+
+    std::cout << "[GhostRider] schedule fingerprint=" << fingerprint.str()
+              << " | stages=" << compact.str() << '\n'
+              << "[GhostRider] schedule " << names.str() << '\n';
 }
 }
 
@@ -116,6 +178,12 @@ StageSchedule stage_schedule(const Work& work)
             schedule[17] = static_cast<std::uint8_t>(kCryptoNightStageFlag | random_cns[2]);
         }
     }
+
+    // The production Stratum miner computes stage_schedule() once when a
+    // newly received job is uploaded to CUDA. Emitting the fingerprint here
+    // therefore records the exact workload schedule used by that job without
+    // adding noise to every individual hash_reference() invocation.
+    log_schedule(schedule);
     return schedule;
 }
 
