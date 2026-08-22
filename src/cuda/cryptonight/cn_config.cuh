@@ -55,12 +55,10 @@ inline constexpr std::size_t max_scratchpad_bytes()
     return value;
 }
 
-// Constant-memory AES moved the Pascal CryptoNight path from ~50 H/s to
-// ~228 H/s and throughput was still increasing at the old 1536-hash ceiling.
-// A GTX 1080 Ti has ~11 GiB; CN-Fast needs 2 MiB/hash, so 4096 hashes consume
-// ~8 GiB of scratchpad and leave practical headroom for states and CUDA
-// runtime allocations. Benchmark up to this ceiling before changing the
-// kernel architecture.
-inline constexpr std::size_t kInitialMaxBatch = 4096;
+// Current production tuning point for the GTX 1080 Ti/Pascal path. The full
+// 18-stage benchmark peaks around 3584 hashes per batch; 4096 adds memory
+// pressure and reduces throughput. BatchEngine clamps larger/auto requests to
+// this ceiling, so normal pool mining uses the benchmarked production point.
+inline constexpr std::size_t kInitialMaxBatch = 3584;
 
 } // namespace yerbas::cuda::cryptonight
