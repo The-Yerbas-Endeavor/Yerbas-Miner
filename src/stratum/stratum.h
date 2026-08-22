@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "config.h"
@@ -34,7 +35,82 @@ struct MiningJob {
     std::string ntime;
     bool clean_jobs{false};
     bool valid{false};
+
+    MiningJob() = default;
+    MiningJob(const MiningJob&) = default;
+
+    MiningJob& operator=(const MiningJob& other)
+    {
+        if (this == &other) return *this;
+        job_id = other.job_id;
+        prevhash = other.prevhash;
+        coinb1 = other.coinb1;
+        coinb2 = other.coinb2;
+        merkle_branch = other.merkle_branch;
+        version = other.version;
+        nbits = other.nbits;
+        ntime = other.ntime;
+        clean_jobs = other.clean_jobs;
+        valid = other.valid;
+        ++generation_;
+        return *this;
+    }
+
+    MiningJob& operator=(MiningJob&& other) noexcept
+    {
+        if (this == &other) return *this;
+        job_id = std::move(other.job_id);
+        prevhash = std::move(other.prevhash);
+        coinb1 = std::move(other.coinb1);
+        coinb2 = std::move(other.coinb2);
+        merkle_branch = std::move(other.merkle_branch);
+        version = std::move(other.version);
+        nbits = std::move(other.nbits);
+        ntime = std::move(other.ntime);
+        clean_jobs = other.clean_jobs;
+        valid = other.valid;
+        ++generation_;
+        return *this;
+    }
+
+    static std::uint64_t generation() noexcept { return generation_.load(std::memory_order_relaxed); }
+
+private:
+    inline static std::atomic<std::uint64_t> generation_{0};
 };
+
+#ifdef YERBAS_HAS_CUDA
+// mining.set_difficulty / mining.set_target can arrive while the current job is
+// still active. Re-uploading that same job used to reset every GPU nonce cursor
+// (and the CPU cursor through upload_gpu_job), causing duplicate submissions.
+// A real mining.notify assignment advances MiningJob::generation(), so a false
+// assignment is honored for a new job but ignored for target-only updates to the
+// same job. This preserves nonce progress without changing Stratum wire behavior.
+class JobLoadedFlag {
+public:
+    JobLoadedFlag() noexcept : generation_(MiningJob::generation()) {}
+
+    JobLoadedFlag& operator=(bool value) noexcept
+    {
+        const std::uint64_t current_generation = MiningJob::generation();
+        if (value) {
+            value_ = true;
+            generation_ = current_generation;
+        } else if (!value_ || generation_ != current_generation) {
+            value_ = false;
+            generation_ = current_generation;
+        }
+        return *this;
+    }
+
+    operator bool() const noexcept { return value_; }
+    bool operator!() const noexcept { return !value_; }
+
+private:
+    bool value_{false};
+    std::uint64_t generation_{0};
+};
+#endif
 
 Endpoint parse_endpoint(const std::string& url);
 
@@ -107,7 +183,7 @@ private:
         std::uint64_t hashes_at_last_report{0};
     };
     std::vector<GpuWorker> gpu_workers_;
-    bool gpu_job_loaded_{false};
+    JobLoadedFlag gpu_job_loaded_{};
     bool gpu_pipeline_ready_{false};
 #endif
 };
