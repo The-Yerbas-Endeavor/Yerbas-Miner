@@ -104,7 +104,7 @@ struct WorkerPool::Impl {
                 const std::uint32_t nonce = start + i;
                 write_nonce(header, nonce);
                 const ghostrider::Work work{header.data(), header.size()};
-                const auto hash = ghostrider::hash_staged_reference(work);
+                const auto hash = ghostrider::hash_reference(work);
                 if (hash_meets_target(hash, target)) found.push_back({nonce});
             }
 
@@ -150,12 +150,14 @@ struct WorkerPool::Impl {
             auto verify_header = header;
             write_nonce(verify_header, candidate.nonce);
             const ghostrider::Work work{verify_header.data(), verify_header.size()};
-            const auto cpu_hash = ghostrider::hash_staged_reference(work);
+            const auto cpu_hash = ghostrider::hash_reference(work);
+            const auto staged_hash = ghostrider::hash_staged_reference(work);
             const bool local_pass = hash_meets_target(cpu_hash, target);
 
 #ifdef YERBAS_HAS_CUDA
             bool parity_ready = false;
             bool parity_match = false;
+            bool staged_match = false;
             bool cuda_pass = false;
             std::array<std::uint8_t, 32> cuda_hash{};
             if (local_pass && cuda::device_count() > 0) {
@@ -173,6 +175,7 @@ struct WorkerPool::Impl {
                         cuda_hash = hit->hash;
                         parity_ready = true;
                         parity_match = (cuda_hash == cpu_hash);
+                        staged_match = (cuda_hash == staged_hash);
                         cuda_pass = hash_meets_target(cuda_hash, target);
                     }
                 } catch (const std::exception& e) {
@@ -182,29 +185,29 @@ struct WorkerPool::Impl {
             }
 
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
-                      << " | hash=" << display_hex(cpu_hash)
+                      << " | canonical=" << display_hex(cpu_hash)
+                      << " | staged=" << display_hex(staged_hash)
                       << " | target=" << display_hex(target)
-                      << " | staged=YES"
                       << " | local=" << (local_pass ? "PASS" : "FAIL");
             if (parity_ready) {
                 std::cout << " | CUDA=" << display_hex(cuda_hash)
-                          << " | parity=" << (parity_match ? "MATCH" : "MISMATCH")
+                          << " | canonical/CUDA=" << (parity_match ? "MATCH" : "MISMATCH")
+                          << " | staged/CUDA=" << (staged_match ? "MATCH" : "MISMATCH")
                           << " | cuda_target=" << (cuda_pass ? "PASS" : "FAIL");
             } else if (local_pass) {
                 std::cout << " | parity=UNAVAILABLE";
             }
 
-            const bool submit_ok = local_pass && (!parity_ready || (parity_match && cuda_pass));
+            const bool submit_ok = local_pass && parity_ready && parity_match && cuda_pass;
             std::cout << (submit_ok ? " | pool=SUBMIT" : " | pool=HOLD") << '\n';
             if (submit_ok) verified.push_back(candidate);
 #else
             std::cout << "[CPU verify] nonce=" << nonce_hex(candidate.nonce)
-                      << " | hash=" << display_hex(cpu_hash)
+                      << " | canonical=" << display_hex(cpu_hash)
+                      << " | staged=" << display_hex(staged_hash)
                       << " | target=" << display_hex(target)
-                      << " | staged=YES"
                       << " | local=" << (local_pass ? "PASS" : "FAIL")
-                      << (local_pass ? " | pool=SUBMIT" : "") << '\n';
-            if (local_pass) verified.push_back(candidate);
+                      << " | pool=HOLD-no-cuda-parity\n";
 #endif
         }
         return verified;
