@@ -104,9 +104,9 @@ std::array<std::uint8_t, 64> cuda_core_stage(int device_id,
     }
 }
 
-void trace_first_divergence_prefix(const std::array<std::uint8_t, 80>& header,
-                                   std::uint32_t nonce,
-                                   const ghostrider::StageSchedule& schedule)
+void trace_first_divergence(const std::array<std::uint8_t, 80>& header,
+                            std::uint32_t nonce,
+                            const ghostrider::StageSchedule& schedule)
 {
     auto traced_header = header;
     write_nonce(traced_header, nonce);
@@ -115,24 +115,27 @@ void trace_first_divergence_prefix(const std::array<std::uint8_t, 80>& header,
     ghostrider::Hash512 gpu_state{};
 
     std::cout << "[CPU/CUDA TRACE] nonce=" << nonce_hex(nonce)
-              << " | begin stage-by-stage prefix comparison\n";
+              << " | begin full stage-by-stage comparison\n";
 
     for (std::size_t i = 0; i < schedule.size(); ++i) {
         const std::uint8_t stage = schedule[i];
-        if ((stage & ghostrider::kCryptoNightStageFlag) != 0) {
-            std::cout << "[CPU/CUDA TRACE] stage " << i << ' ' << stage_name(stage)
-                      << " | first unresolved CryptoNight boundary after matched core prefix\n";
-            break;
-        }
+        const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
+        const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
 
         if (i == 0) {
             const ghostrider::Work cpu_work{traced_header.data(), traced_header.size()};
             cpu_state = ghostrider::stage_reference(cpu_work, stage);
-            gpu_state = cuda_core_stage(0, traced_header.data(), traced_header.size(), stage);
+            if (is_cn) {
+                throw std::runtime_error("GhostRider schedule cannot start with CryptoNight");
+            }
+            gpu_state = cuda_core_stage(0, traced_header.data(), traced_header.size(), algorithm);
         } else {
             const ghostrider::Work cpu_work{cpu_state.data(), cpu_state.size()};
             cpu_state = ghostrider::stage_reference(cpu_work, stage);
-            gpu_state = cuda_core_stage(0, gpu_state.data(), gpu_state.size(), stage);
+            if (is_cn)
+                gpu_state = cuda::cryptonight_reference_stage(0, gpu_state.data(), gpu_state.size(), algorithm);
+            else
+                gpu_state = cuda_core_stage(0, gpu_state.data(), gpu_state.size(), algorithm);
         }
 
         const bool match = cpu_state == gpu_state;
@@ -140,7 +143,9 @@ void trace_first_divergence_prefix(const std::array<std::uint8_t, 80>& header,
                   << " | " << (match ? "MATCH" : "MISMATCH") << '\n';
         if (!match) {
             std::cout << "[CPU/CUDA TRACE] CPU=" << display_hex64(cpu_state) << '\n'
-                      << "[CPU/CUDA TRACE] GPU=" << display_hex64(gpu_state) << '\n';
+                      << "[CPU/CUDA TRACE] GPU=" << display_hex64(gpu_state) << '\n'
+                      << "[CPU/CUDA TRACE] FIRST DIVERGENCE=stage " << i << ' '
+                      << stage_name(stage) << '\n';
             break;
         }
     }
@@ -299,7 +304,11 @@ struct WorkerPool::Impl {
 
             if (parity_ready && !parity_match && !divergence_trace_emitted) {
                 divergence_trace_emitted = true;
-                trace_first_divergence_prefix(header, candidate.nonce, schedule);
+                try {
+                    trace_first_divergence(header, candidate.nonce, schedule);
+                } catch (const std::exception& e) {
+                    std::cout << "[CPU/CUDA TRACE] ERROR=" << e.what() << '\n';
+                }
             }
 
             if (submit_ok) verified.push_back(candidate);
