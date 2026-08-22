@@ -12,6 +12,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -147,6 +148,19 @@ Timings run_profile(std::size_t count,
     return out;
 }
 
+void print_timing(const char* label, const Timings& t, std::size_t count)
+{
+    const double hps = static_cast<double>(count) * 1000.0 / t.total_ms;
+    std::cout << label
+              << " setup " << std::setw(3) << t.setup_threads
+              << " | loop " << std::setw(3) << t.loop_threads
+              << " | final " << std::setw(3) << t.final_threads
+              << " | " << std::fixed << std::setprecision(3)
+              << t.setup_ms << " + " << t.loop_ms << " + " << t.final_ms
+              << " = " << t.total_ms << " ms | "
+              << std::setprecision(2) << hps << " H/s\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -161,7 +175,7 @@ int main(int argc, char** argv)
             const int value = std::atoi(argv[i]);
             if (value > 0) thread_values.push_back(value);
         }
-        if (thread_values.empty()) thread_values = {32, 64, 96, 128, 192, 256};
+        if (thread_values.empty()) thread_values = {32, 64, 128};
 
         check(cudaSetDevice(device), "cudaSetDevice failed");
         cudaDeviceProp props{};
@@ -191,33 +205,39 @@ int main(int argc, char** argv)
         check(cudaMalloc(reinterpret_cast<void**>(&d_reference_output), 32U), "cudaMalloc reference output failed");
         check(cudaMemcpy(d_inputs, host_inputs.data(), host_inputs.size(), cudaMemcpyHostToDevice), "cudaMemcpy inputs failed");
 
-        std::cout << "Yerbas CUDA CN-Fast phase thread sweep\n"
+        std::cout << "Yerbas CUDA CN-Fast mixed phase geometry sweep\n"
                   << "GPU: " << device << " | " << props.name << " | CC " << props.major << '.' << props.minor << "\n"
                   << "Batch: " << count << " | Scratchpad: " << std::fixed << std::setprecision(2)
-                  << (static_cast<double>(scratch_bytes) / (1024.0 * 1024.0 * 1024.0)) << " GiB\n\n";
+                  << (static_cast<double>(scratch_bytes) / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+                  << "Candidates:";
+        for (const int t : thread_values) std::cout << ' ' << t;
+        std::cout << "\n\n";
 
         Timings best{};
-        best.total_ms = 1.0e30F;
-        for (const int threads : thread_values) {
-            if (threads > props.maxThreadsPerBlock) continue;
-            const Timings t = run_profile(count, threads, threads, threads,
-                                          d_inputs, d_scratch, d_contexts, d_outputs);
-            const double hps = static_cast<double>(count) * 1000.0 / t.total_ms;
-            std::cout << "threads " << std::setw(3) << threads
-                      << " | setup " << std::setprecision(3) << t.setup_ms
-                      << " ms | loop " << t.loop_ms
-                      << " ms | final " << t.final_ms
-                      << " ms | total " << t.total_ms
-                      << " ms | " << std::setprecision(2) << hps << " H/s\n";
-            if (t.total_ms < best.total_ms) best = t;
+        best.total_ms = std::numeric_limits<float>::max();
+        for (const int setup_threads : thread_values) {
+            if (setup_threads > props.maxThreadsPerBlock) continue;
+            for (const int loop_threads : thread_values) {
+                if (loop_threads > props.maxThreadsPerBlock) continue;
+                for (const int final_threads : thread_values) {
+                    if (final_threads > props.maxThreadsPerBlock) continue;
+                    const Timings t = run_profile(count,
+                                                  setup_threads,
+                                                  loop_threads,
+                                                  final_threads,
+                                                  d_inputs,
+                                                  d_scratch,
+                                                  d_contexts,
+                                                  d_outputs);
+                    print_timing("geometry", t, count);
+                    if (t.total_ms < best.total_ms) best = t;
+                }
+            }
         }
 
-        std::cout << "\nBest same-thread geometry: " << best.loop_threads
-                  << " threads | " << std::setprecision(3) << best.total_ms << " ms | "
-                  << std::setprecision(2) << (static_cast<double>(count) * 1000.0 / best.total_ms)
-                  << " CN-Fast H/s\n";
+        std::cout << "\n";
+        print_timing("BEST    ", best, count);
 
-        // Verify split output for hash 0 against the still-present monolithic implementation.
         monolithic_one<<<1, 1>>>(d_inputs, d_reference_scratch, d_reference_output);
         check(cudaDeviceSynchronize(), "monolithic reference failed");
         std::array<std::uint8_t, 32> split_out{}, reference_out{};
