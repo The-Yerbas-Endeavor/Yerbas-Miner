@@ -49,11 +49,14 @@ constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
 constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
 constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
 constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
-constexpr const char* kGpuColor = "\x1b[96m";
-constexpr const char* kCpuColor = "\x1b[95m";
-constexpr const char* kSubmitColor = "\x1b[94m";
-constexpr const char* kAcceptColor = "\x1b[92m";
-constexpr const char* kRejectColor = "\x1b[91m";
+// High-contrast terminal palette: GPU cyan, CPU yellow, submitted white-on-blue,
+// accepted green, rejected red, and block-found black-on-bright-yellow.
+constexpr const char* kGpuColor = "\x1b[1;96m";
+constexpr const char* kCpuColor = "\x1b[1;93m";
+constexpr const char* kSubmitColor = "\x1b[1;97;44m";
+constexpr const char* kAcceptColor = "\x1b[1;92m";
+constexpr const char* kRejectColor = "\x1b[1;91m";
+[[maybe_unused]] constexpr const char* kBlockColor = "\x1b[1;30;103m";
 constexpr const char* kColorReset = "\x1b[0m";
 
 std::unordered_map<int, std::string> g_pending_share_sources;
