@@ -95,13 +95,18 @@ int Miner::run()
             }
             std::cout << '\n';
 
-            bool pipeline_ready = cuda::full_ghostrider_cuda_coverage();
-            if (!config_.gpu.skip_validation) {
-                cuda::BatchEngine readiness_probe(devices.front().id, 1);
-                pipeline_ready = readiness_probe.hash_pipeline_ready();
-            } else {
+            // The real per-device BatchEngine instances have already been created by
+            // the Stratum client and run the CUDA parity/autotune gates at their full
+            // production batch size. Do not construct a one-hash BatchEngine here:
+            // doing so reruns the complete CryptoNight tuner against batch=1 and can
+            // invalidate parity scratch allocations. Coverage is the readiness gate;
+            // kernel correctness is enforced by the production engine validation.
+            const bool pipeline_ready = cuda::full_ghostrider_cuda_coverage();
+            if (config_.gpu.skip_validation)
                 std::cout << "CUDA startup validation: skipped by configuration\n";
-            }
+            else
+                std::cout << "CUDA startup validation: production engine parity/autotune complete\n";
+
             const bool native_ready = cuda::full_ghostrider_cuda_coverage();
             for (const auto& device : devices) {
                 std::cout << "[GPU " << device.id << "] CUDA ready | CC "
