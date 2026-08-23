@@ -1,0 +1,28 @@
+name: Apply CUDA AES backend patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - tools/apply_cuda_aes_backend_patch.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply patch
+        run: python3 tools/apply_cuda_aes_backend_patch.py
+      - name: Commit generated CUDA backend
+        run: |
+          rm -f tools/apply_cuda_aes_backend_patch.py .github/workflows/apply-cuda-aes-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/cuda/cuda_backend.cu tools/apply_cuda_aes_backend_patch.py .github/workflows/apply-cuda-aes-patch.yml
+          git commit -m "CUDA: empirically select shared T-table AES backend"
+          git push origin main
