@@ -91,45 +91,6 @@ __device__ __forceinline__ void aes_round(std::uint8_t block[16], const std::uin
     }
 }
 
-__device__ __forceinline__ std::uint32_t aes_mix_column_word(std::uint8_t a0,
-                                                             std::uint8_t a1,
-                                                             std::uint8_t a2,
-                                                             std::uint8_t a3)
-{
-    const std::uint8_t t = static_cast<std::uint8_t>(a0 ^ a1 ^ a2 ^ a3);
-    const std::uint8_t o0 = static_cast<std::uint8_t>(a0 ^ t ^ xtime(static_cast<std::uint8_t>(a0 ^ a1)));
-    const std::uint8_t o1 = static_cast<std::uint8_t>(a1 ^ t ^ xtime(static_cast<std::uint8_t>(a1 ^ a2)));
-    const std::uint8_t o2 = static_cast<std::uint8_t>(a2 ^ t ^ xtime(static_cast<std::uint8_t>(a2 ^ a3)));
-    const std::uint8_t o3 = static_cast<std::uint8_t>(a3 ^ t ^ xtime(static_cast<std::uint8_t>(a3 ^ a0)));
-    return pack4(o0, o1, o2, o3);
-}
-
-// Register-oriented AES single round for the CryptoNight random-memory loop.
-// Unlike aes_single_round()+aes_round(), this does not copy the 16-byte input
-// into an output array and does not materialize a 16-byte ShiftRows temporary.
-// Four 32-bit result words are built directly from S-box values and written once.
-__device__ __forceinline__ void aes_single_round_reg32(const std::uint8_t in[16],
-                                                       std::uint8_t out[16],
-                                                       const std::uint8_t round_key[16])
-{
-    const std::uint32_t o0 = aes_mix_column_word(aes_sbox(in[0]),  aes_sbox(in[5]),
-                                                 aes_sbox(in[10]), aes_sbox(in[15])) ^
-                             load32le_aligned(round_key);
-    const std::uint32_t o1 = aes_mix_column_word(aes_sbox(in[4]),  aes_sbox(in[9]),
-                                                 aes_sbox(in[14]), aes_sbox(in[3])) ^
-                             load32le_aligned(round_key + 4);
-    const std::uint32_t o2 = aes_mix_column_word(aes_sbox(in[8]),  aes_sbox(in[13]),
-                                                 aes_sbox(in[2]),  aes_sbox(in[7])) ^
-                             load32le_aligned(round_key + 8);
-    const std::uint32_t o3 = aes_mix_column_word(aes_sbox(in[12]), aes_sbox(in[1]),
-                                                 aes_sbox(in[6]),  aes_sbox(in[11])) ^
-                             load32le_aligned(round_key + 12);
-    store32le_aligned(out, o0);
-    store32le_aligned(out + 4, o1);
-    store32le_aligned(out + 8, o2);
-    store32le_aligned(out + 12, o3);
-}
-
 __device__ __forceinline__ void aes_round_ttable(std::uint8_t block[16],
                                                  const std::uint8_t key[16],
                                                  const std::uint32_t* tables)
@@ -173,7 +134,8 @@ __device__ __forceinline__ void aes256_expand_key(const std::uint8_t key[32], st
 
 __device__ __forceinline__ void aes_single_round(const std::uint8_t in[16], std::uint8_t out[16], const std::uint8_t round_key[16])
 {
-    aes_single_round_reg32(in, out, round_key);
+    for (int i = 0; i < 16; ++i) out[i] = in[i];
+    aes_round(out, round_key);
 }
 
 __device__ __forceinline__ void aes_single_round_ttable(const std::uint8_t in[16],
