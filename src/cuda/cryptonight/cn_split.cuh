@@ -59,56 +59,118 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
     return true;
 }
 
+// The memory-hard loop dominates CryptoNight runtime.  The byte-array version
+// kept a/b/c/t as indexable local arrays; NVCC can spill those to per-thread
+// local memory, adding extra global traffic around every dependent scratchpad
+// access.  Keep the complete hot state in six 64-bit registers instead.
+__device__ __forceinline__ std::uint8_t cn_byte64(std::uint64_t v, unsigned int byte)
+{
+    return static_cast<std::uint8_t>(v >> (byte * 8U));
+}
+
+__device__ __forceinline__ std::uint32_t cn_aes_mix_column(std::uint8_t x0,
+                                                           std::uint8_t x1,
+                                                           std::uint8_t x2,
+                                                           std::uint8_t x3,
+                                                           std::uint32_t key)
+{
+    const std::uint8_t t = static_cast<std::uint8_t>(x0 ^ x1 ^ x2 ^ x3);
+    const std::uint8_t o0 = static_cast<std::uint8_t>(x0 ^ t ^ xtime(static_cast<std::uint8_t>(x0 ^ x1)));
+    const std::uint8_t o1 = static_cast<std::uint8_t>(x1 ^ t ^ xtime(static_cast<std::uint8_t>(x1 ^ x2)));
+    const std::uint8_t o2 = static_cast<std::uint8_t>(x2 ^ t ^ xtime(static_cast<std::uint8_t>(x2 ^ x3)));
+    const std::uint8_t o3 = static_cast<std::uint8_t>(x3 ^ t ^ xtime(static_cast<std::uint8_t>(x3 ^ x0)));
+    const std::uint32_t mixed = static_cast<std::uint32_t>(o0)
+        | (static_cast<std::uint32_t>(o1) << 8)
+        | (static_cast<std::uint32_t>(o2) << 16)
+        | (static_cast<std::uint32_t>(o3) << 24);
+    return mixed ^ key;
+}
+
+__device__ __forceinline__ void cn_aes_single_round_u64(std::uint64_t in0,
+                                                        std::uint64_t in1,
+                                                        std::uint64_t key0,
+                                                        std::uint64_t key1,
+                                                        std::uint64_t& out0,
+                                                        std::uint64_t& out1)
+{
+    // SubBytes + ShiftRows, grouped directly into the four output columns.
+    const std::uint32_t c0 = cn_aes_mix_column(
+        aes_sbox(cn_byte64(in0, 0)), aes_sbox(cn_byte64(in0, 5)),
+        aes_sbox(cn_byte64(in1, 2)), aes_sbox(cn_byte64(in1, 7)),
+        static_cast<std::uint32_t>(key0));
+    const std::uint32_t c1 = cn_aes_mix_column(
+        aes_sbox(cn_byte64(in0, 4)), aes_sbox(cn_byte64(in1, 1)),
+        aes_sbox(cn_byte64(in1, 6)), aes_sbox(cn_byte64(in0, 3)),
+        static_cast<std::uint32_t>(key0 >> 32));
+    const std::uint32_t c2 = cn_aes_mix_column(
+        aes_sbox(cn_byte64(in1, 0)), aes_sbox(cn_byte64(in1, 5)),
+        aes_sbox(cn_byte64(in0, 2)), aes_sbox(cn_byte64(in0, 7)),
+        static_cast<std::uint32_t>(key1));
+    const std::uint32_t c3 = cn_aes_mix_column(
+        aes_sbox(cn_byte64(in1, 4)), aes_sbox(cn_byte64(in0, 1)),
+        aes_sbox(cn_byte64(in0, 6)), aes_sbox(cn_byte64(in1, 3)),
+        static_cast<std::uint32_t>(key1 >> 32));
+
+    out0 = static_cast<std::uint64_t>(c0) | (static_cast<std::uint64_t>(c1) << 32);
+    out1 = static_cast<std::uint64_t>(c2) | (static_cast<std::uint64_t>(c3) << 32);
+}
+
+__device__ __forceinline__ std::uint64_t cn_variant1_mutate_hi(std::uint64_t word)
+{
+    // block[11] is byte 3 of the upper 64-bit word.
+    const std::uint8_t tmp = static_cast<std::uint8_t>(word >> 24);
+    constexpr std::uint32_t table = 0x75310U;
+    const std::uint8_t index = static_cast<std::uint8_t>((((tmp >> 3) & 6U) | (tmp & 1U)) << 1);
+    const std::uint8_t mutated = static_cast<std::uint8_t>(tmp ^ ((table >> index) & 0x30U));
+    constexpr std::uint64_t mask = ~(std::uint64_t{0xff} << 24);
+    return (word & mask) | (static_cast<std::uint64_t>(mutated) << 24);
+}
+
 template <std::uint8_t VariantIndex>
-__device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
+__device__ __forceinline__ void split_memory_loop(std::uint8_t* __restrict__ scratchpad,
                                                   const SplitContext& ctx)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     constexpr VariantConfig cfg = config_value(VariantIndex);
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
 
-    alignas(16) std::uint8_t a[16];
-    alignas(16) std::uint8_t b[32];
-    alignas(16) std::uint8_t c[16];
-    alignas(16) std::uint8_t t[16];
-    copy16(a, ctx.a);
-    copy16(b, ctx.b);
-    copy16(b + 16, ctx.b + 16);
+    std::uint64_t a0 = cn_load64_aligned(ctx.a);
+    std::uint64_t a1 = cn_load64_aligned(ctx.a + 8);
+    std::uint64_t b0 = cn_load64_aligned(ctx.b);
+    std::uint64_t b1 = cn_load64_aligned(ctx.b + 8);
     const std::uint64_t tweak = ctx.tweak;
 
     #pragma unroll 1
     for (std::uint32_t i = 0; i < cfg.iterations; ++i) {
-        std::size_t j = cn_index_masked(a, address_mask);
-        std::uint8_t* slot = scratchpad + j * 16U;
+        std::size_t j = static_cast<std::size_t>((a0 >> 4) & address_mask);
+        std::uint64_t* slot = reinterpret_cast<std::uint64_t*>(scratchpad + j * 16U);
 
-        aes_single_round(slot, c, a);
-        reinterpret_cast<std::uint64_t*>(slot)[0] =
-            reinterpret_cast<const std::uint64_t*>(c)[0] ^ reinterpret_cast<const std::uint64_t*>(b)[0];
-        reinterpret_cast<std::uint64_t*>(slot)[1] =
-            reinterpret_cast<const std::uint64_t*>(c)[1] ^ reinterpret_cast<const std::uint64_t*>(b)[1];
-        variant1_mutate(slot);
+        const std::uint64_t in0 = slot[0];
+        const std::uint64_t in1 = slot[1];
+        std::uint64_t c0;
+        std::uint64_t c1;
+        cn_aes_single_round_u64(in0, in1, a0, a1, c0, c1);
 
-        j = cn_index_masked(c, address_mask);
-        slot = scratchpad + j * 16U;
-        copy16(t, slot);
+        slot[0] = c0 ^ b0;
+        slot[1] = cn_variant1_mutate_hi(c1 ^ b1);
 
-        const std::uint64_t c0 = cn_load64_aligned(c);
-        const std::uint64_t t0 = cn_load64_aligned(t);
+        j = static_cast<std::size_t>((c0 >> 4) & address_mask);
+        slot = reinterpret_cast<std::uint64_t*>(scratchpad + j * 16U);
+        const std::uint64_t t0 = slot[0];
+        const std::uint64_t t1 = slot[1];
+
         const std::uint64_t lo = c0 * t0;
         const std::uint64_t hi = __umul64hi(c0, t0);
 
-        std::uint64_t a0 = cn_load64_aligned(a) + hi;
-        std::uint64_t a1 = cn_load64_aligned(a + 8) + lo;
-        cn_store64_aligned(slot, a0);
-        cn_store64_aligned(slot + 8, a1 ^ tweak);
+        a0 += hi;
+        a1 += lo;
+        slot[0] = a0;
+        slot[1] = a1 ^ tweak;
 
         a0 ^= t0;
-        a1 ^= cn_load64_aligned(t + 8);
-        cn_store64_aligned(a, a0);
-        cn_store64_aligned(a + 8, a1);
-
-        copy16(b + 16, b);
-        copy16(b, c);
+        a1 ^= t1;
+        b0 = c0;
+        b1 = c1;
     }
 }
 
