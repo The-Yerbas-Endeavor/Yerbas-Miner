@@ -60,13 +60,56 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
     return true;
 }
 
-template <std::uint8_t VariantIndex>
-__device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
-                                                  const SplitContext& ctx)
+template <std::size_t AddressMask>
+__device__ __forceinline__ void split_memory_iteration(std::uint8_t* scratchpad,
+                                                        std::uint8_t a[16],
+                                                        std::uint8_t b[32],
+                                                        std::uint8_t c[16],
+                                                        std::uint8_t t[16],
+                                                        std::uint64_t tweak)
+{
+    std::size_t j = cn_index_masked(a, AddressMask);
+    std::uint8_t* slot = scratchpad + j * 16U;
+
+    aes_single_round(slot, c, a);
+    reinterpret_cast<std::uint64_t*>(slot)[0] =
+        reinterpret_cast<const std::uint64_t*>(c)[0] ^ reinterpret_cast<const std::uint64_t*>(b)[0];
+    reinterpret_cast<std::uint64_t*>(slot)[1] =
+        reinterpret_cast<const std::uint64_t*>(c)[1] ^ reinterpret_cast<const std::uint64_t*>(b)[1];
+    variant1_mutate(slot);
+
+    j = cn_index_masked(c, AddressMask);
+    slot = scratchpad + j * 16U;
+    copy16(t, slot);
+
+    const std::uint64_t c0 = cn_load64_aligned(c);
+    const std::uint64_t t0 = cn_load64_aligned(t);
+    const std::uint64_t lo = c0 * t0;
+    const std::uint64_t hi = __umul64hi(c0, t0);
+
+    std::uint64_t a0 = cn_load64_aligned(a) + hi;
+    std::uint64_t a1 = cn_load64_aligned(a + 8) + lo;
+    cn_store64_aligned(slot, a0);
+    cn_store64_aligned(slot + 8, a1 ^ tweak);
+
+    a0 ^= t0;
+    a1 ^= cn_load64_aligned(t + 8);
+    cn_store64_aligned(a, a0);
+    cn_store64_aligned(a + 8, a1);
+
+    copy16(b + 16, b);
+    copy16(b, c);
+}
+
+template <std::uint8_t VariantIndex, int Unroll>
+__device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad,
+                                                        const SplitContext& ctx)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
+    static_assert(Unroll == 1 || Unroll == 2 || Unroll == 4, "unsupported CryptoNight loop unroll");
     constexpr VariantConfig cfg = config_value(VariantIndex);
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    static_assert((cfg.iterations % Unroll) == 0, "CryptoNight iteration count must divide by unroll");
 
     alignas(16) std::uint8_t a[16];
     alignas(16) std::uint8_t b[32];
@@ -78,39 +121,18 @@ __device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
     const std::uint64_t tweak = ctx.tweak;
 
     #pragma unroll 1
-    for (std::uint32_t i = 0; i < cfg.iterations; ++i) {
-        std::size_t j = cn_index_masked(a, address_mask);
-        std::uint8_t* slot = scratchpad + j * 16U;
-
-        aes_single_round(slot, c, a);
-        reinterpret_cast<std::uint64_t*>(slot)[0] =
-            reinterpret_cast<const std::uint64_t*>(c)[0] ^ reinterpret_cast<const std::uint64_t*>(b)[0];
-        reinterpret_cast<std::uint64_t*>(slot)[1] =
-            reinterpret_cast<const std::uint64_t*>(c)[1] ^ reinterpret_cast<const std::uint64_t*>(b)[1];
-        variant1_mutate(slot);
-
-        j = cn_index_masked(c, address_mask);
-        slot = scratchpad + j * 16U;
-        copy16(t, slot);
-
-        const std::uint64_t c0 = cn_load64_aligned(c);
-        const std::uint64_t t0 = cn_load64_aligned(t);
-        const std::uint64_t lo = c0 * t0;
-        const std::uint64_t hi = __umul64hi(c0, t0);
-
-        std::uint64_t a0 = cn_load64_aligned(a) + hi;
-        std::uint64_t a1 = cn_load64_aligned(a + 8) + lo;
-        cn_store64_aligned(slot, a0);
-        cn_store64_aligned(slot + 8, a1 ^ tweak);
-
-        a0 ^= t0;
-        a1 ^= cn_load64_aligned(t + 8);
-        cn_store64_aligned(a, a0);
-        cn_store64_aligned(a + 8, a1);
-
-        copy16(b + 16, b);
-        copy16(b, c);
+    for (std::uint32_t i = 0; i < cfg.iterations; i += Unroll) {
+        #pragma unroll
+        for (int u = 0; u < Unroll; ++u)
+            split_memory_iteration<address_mask>(scratchpad, a, b, c, t, tweak);
     }
+}
+
+template <std::uint8_t VariantIndex>
+__device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
+                                                  const SplitContext& ctx)
+{
+    split_memory_loop_tuned<VariantIndex, 1>(scratchpad, ctx);
 }
 
 template <std::uint8_t VariantIndex, bool UseTTable = false>
