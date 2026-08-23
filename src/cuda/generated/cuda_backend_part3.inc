@@ -1,6 +1,7 @@
 struct BatchEngine::Impl {
     int device_id{-1};
     std::size_t batch_size{0};
+    std::size_t batch_capacity{0};
     unsigned int fallback_threads{1};
     cudaStream_t stream{};
     DeviceJob* d_job{nullptr};
@@ -21,16 +22,17 @@ struct BatchEngine::Impl {
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
         : device_id(id), batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
-          fallback_threads(std::max(1u, requested_fallback_threads)), host_states(batch_size * kStateBytes)
+          batch_capacity(batch_size),
+          fallback_threads(std::max(1u, requested_fallback_threads)), host_states(batch_capacity * kStateBytes)
     {
-        if (batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
+        if (batch_capacity == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_size * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_size * kStateBytes), "cudaMalloc 512-bit state batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), batch_size * kCnScratchpadStride), "cudaMalloc CryptoNight scratchpads failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_size * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_capacity * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_capacity * kStateBytes), "cudaMalloc 512-bit state batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), batch_capacity * kCnScratchpadStride), "cudaMalloc CryptoNight scratchpads failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_capacity * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
         try {
@@ -89,10 +91,6 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
-    // Sample one production scan out of every four. CUDA events are recorded
-    // into the existing stream and synchronized only by the normal end-of-scan
-    // barrier, so non-sampled scans have zero profiling overhead and sampled
-    // scans avoid the per-stage synchronizations used by scan_profiled().
     ++impl_->scan_count;
     const bool profile_this_scan = (impl_->scan_count % 4U) == 0U;
     std::array<cudaEvent_t, 19> stage_boundaries{};
@@ -143,9 +141,6 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         }
         for (auto& event : stage_boundaries) cudaEventDestroy(event);
 
-        // Print a compact production-stage profile every fourth sample
-        // (every 16 scans). This is frequent enough to follow changing
-        // GhostRider schedules without flooding normal share output.
         if ((impl_->stage_profile_samples % 4U) == 0U) {
             std::uint64_t fingerprint = 1469598103934665603ULL;
             for (const std::uint8_t stage : impl_->host_job.stages) {
