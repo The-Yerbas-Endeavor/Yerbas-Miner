@@ -61,8 +61,10 @@ public:
     std::vector<Candidate> scan(std::uint32_t start_nonce);
     std::vector<Candidate> scan_profiled(std::uint32_t start_nonce, BatchProfile& profile);
 
+    void set_active_batch_size(std::size_t batch_size);
     int device_id() const noexcept;
     std::size_t batch_size() const noexcept;
+    std::size_t batch_capacity() const noexcept;
     bool hash_pipeline_ready() const noexcept;
 
 private:
