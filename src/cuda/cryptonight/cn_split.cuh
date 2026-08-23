@@ -7,25 +7,10 @@
 
 namespace yerbas::cuda::cryptonight {
 
-struct alignas(16) CnState128 {
-    std::uint64_t lo;
-    std::uint64_t hi;
-};
-
-__device__ __forceinline__ std::uint8_t* cn_state_bytes(CnState128& v)
-{
-    return reinterpret_cast<std::uint8_t*>(&v);
-}
-
-__device__ __forceinline__ const std::uint8_t* cn_state_bytes(const CnState128& v)
-{
-    return reinterpret_cast<const std::uint8_t*>(&v);
-}
-
 struct alignas(16) SplitContext {
     std::uint8_t state[200];
-    CnState128 a;
-    CnState128 b;
+    std::uint8_t a[16];
+    std::uint8_t b[16];
     std::uint64_t tweak;
 };
 
@@ -64,55 +49,58 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
             scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
     }
 
-    // Keep the hot-loop state in native 64-bit words. All source offsets are
-    // naturally aligned inside the 200-byte Keccak state.
-    ctx.a.lo = cn_load64_aligned(ctx.state) ^ cn_load64_aligned(ctx.state + 32);
-    ctx.a.hi = cn_load64_aligned(ctx.state + 8) ^ cn_load64_aligned(ctx.state + 40);
-    ctx.b.lo = cn_load64_aligned(ctx.state + 16) ^ cn_load64_aligned(ctx.state + 48);
-    ctx.b.hi = cn_load64_aligned(ctx.state + 24) ^ cn_load64_aligned(ctx.state + 56);
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        ctx.a[i] = static_cast<std::uint8_t>(ctx.state[i] ^ ctx.state[32 + i]);
+        ctx.b[i] = static_cast<std::uint8_t>(ctx.state[16 + i] ^ ctx.state[48 + i]);
+    }
 
     ctx.tweak = cn_load64(input + 35) ^ cn_load64_aligned(ctx.state + 192);
     return true;
 }
 
 template <std::size_t AddressMask, bool UseTTable = false>
-__device__ __forceinline__ void split_memory_iteration_native(std::uint8_t* scratchpad,
-                                                               CnState128& a,
-                                                               CnState128& b,
-                                                               CnState128& c,
-                                                               std::uint64_t tweak,
-                                                               const std::uint32_t* aes_tables = nullptr)
+__device__ __forceinline__ void split_memory_iteration(std::uint8_t* scratchpad,
+                                                        std::uint8_t a[16],
+                                                        std::uint8_t b[16],
+                                                        std::uint8_t c[16],
+                                                        std::uint8_t t[16],
+                                                        std::uint64_t tweak,
+                                                        const std::uint32_t* aes_tables = nullptr)
 {
-    std::size_t j = static_cast<std::size_t>((a.lo >> 4) & AddressMask);
+    std::size_t j = cn_index_masked(a, AddressMask);
     std::uint8_t* slot = scratchpad + j * 16U;
 
     if constexpr (UseTTable)
-        aes_single_round_ttable(slot, cn_state_bytes(c), cn_state_bytes(a), aes_tables);
+        aes_single_round_ttable(slot, c, a, aes_tables);
     else
-        aes_single_round(slot, cn_state_bytes(c), cn_state_bytes(a));
-
-    auto* slot64 = reinterpret_cast<std::uint64_t*>(slot);
-    slot64[0] = c.lo ^ b.lo;
-    slot64[1] = c.hi ^ b.hi;
+        aes_single_round(slot, c, a);
+    reinterpret_cast<std::uint64_t*>(slot)[0] =
+        reinterpret_cast<const std::uint64_t*>(c)[0] ^ reinterpret_cast<const std::uint64_t*>(b)[0];
+    reinterpret_cast<std::uint64_t*>(slot)[1] =
+        reinterpret_cast<const std::uint64_t*>(c)[1] ^ reinterpret_cast<const std::uint64_t*>(b)[1];
     variant1_mutate(slot);
 
-    j = static_cast<std::size_t>((c.lo >> 4) & AddressMask);
+    j = cn_index_masked(c, AddressMask);
     slot = scratchpad + j * 16U;
-    slot64 = reinterpret_cast<std::uint64_t*>(slot);
+    copy16(t, slot);
 
-    const std::uint64_t t0 = slot64[0];
-    const std::uint64_t t1 = slot64[1];
-    const std::uint64_t lo = c.lo * t0;
-    const std::uint64_t hi = __umul64hi(c.lo, t0);
+    const std::uint64_t c0 = cn_load64_aligned(c);
+    const std::uint64_t t0 = cn_load64_aligned(t);
+    const std::uint64_t lo = c0 * t0;
+    const std::uint64_t hi = __umul64hi(c0, t0);
 
-    std::uint64_t a0 = a.lo + hi;
-    std::uint64_t a1 = a.hi + lo;
-    slot64[0] = a0;
-    slot64[1] = a1 ^ tweak;
+    std::uint64_t a0 = cn_load64_aligned(a) + hi;
+    std::uint64_t a1 = cn_load64_aligned(a + 8) + lo;
+    cn_store64_aligned(slot, a0);
+    cn_store64_aligned(slot + 8, a1 ^ tweak);
 
-    a.lo = a0 ^ t0;
-    a.hi = a1 ^ t1;
-    b = c;
+    a0 ^= t0;
+    a1 ^= cn_load64_aligned(t + 8);
+    cn_store64_aligned(a, a0);
+    cn_store64_aligned(a + 8, a1);
+
+    copy16(b, c);
 }
 
 template <std::uint8_t VariantIndex, int Unroll, bool UseTTable = false>
@@ -126,24 +114,22 @@ __device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
     static_assert((cfg.iterations % Unroll) == 0, "CryptoNight iteration count must divide by unroll");
 
-    CnState128 a = ctx.a;
-    CnState128 b = ctx.b;
-    CnState128 c{};
+    alignas(16) std::uint8_t a[16];
+    alignas(16) std::uint8_t b[16];
+    alignas(16) std::uint8_t c[16];
+    alignas(16) std::uint8_t t[16];
+    copy16(a, ctx.a);
+    copy16(b, ctx.b);
     const std::uint64_t tweak = ctx.tweak;
 
     #pragma unroll 1
     for (std::uint32_t i = 0; i < cfg.iterations; i += Unroll) {
         #pragma unroll
         for (int u = 0; u < Unroll; ++u)
-            split_memory_iteration_native<address_mask, UseTTable>(scratchpad, a, b, c, tweak, aes_tables);
+            split_memory_iteration<address_mask, UseTTable>(scratchpad, a, b, c, t, tweak, aes_tables);
     }
 }
 
-// Interleave two independent CryptoNight states in one CUDA thread. Each hash
-// preserves the exact canonical iteration order; the only change is exposing
-// independent work from the second hash while the first hash follows its
-// data-dependent scratchpad chain. Production selects this path only after
-// parity validation and an empirical per-device/per-variant benchmark.
 template <std::uint8_t VariantIndex, int Unroll, bool UseTTable = false>
 __device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scratchpad0,
                                                              const SplitContext& ctx0,
@@ -157,12 +143,12 @@ __device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scrat
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
     static_assert((cfg.iterations % Unroll) == 0, "CryptoNight iteration count must divide by unroll");
 
-    CnState128 a0 = ctx0.a;
-    CnState128 b0 = ctx0.b;
-    CnState128 c0{};
-    CnState128 a1 = ctx1.a;
-    CnState128 b1 = ctx1.b;
-    CnState128 c1{};
+    alignas(16) std::uint8_t a0[16], b0[16], c0[16], t0[16];
+    alignas(16) std::uint8_t a1[16], b1[16], c1[16], t1[16];
+    copy16(a0, ctx0.a);
+    copy16(b0, ctx0.b);
+    copy16(a1, ctx1.a);
+    copy16(b1, ctx1.b);
     const std::uint64_t tweak0 = ctx0.tweak;
     const std::uint64_t tweak1 = ctx1.tweak;
 
@@ -170,8 +156,8 @@ __device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scrat
     for (std::uint32_t i = 0; i < cfg.iterations; i += Unroll) {
         #pragma unroll
         for (int u = 0; u < Unroll; ++u) {
-            split_memory_iteration_native<address_mask, UseTTable>(scratchpad0, a0, b0, c0, tweak0, aes_tables);
-            split_memory_iteration_native<address_mask, UseTTable>(scratchpad1, a1, b1, c1, tweak1, aes_tables);
+            split_memory_iteration<address_mask, UseTTable>(scratchpad0, a0, b0, c0, t0, tweak0, aes_tables);
+            split_memory_iteration<address_mask, UseTTable>(scratchpad1, a1, b1, c1, t1, tweak1, aes_tables);
         }
     }
 }
