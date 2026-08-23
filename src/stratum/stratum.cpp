@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <ctime>
 #include <future>
@@ -343,6 +344,10 @@ Client::Client(const AppConfig& config) : config_(config)
 #endif
 }
 
+#ifndef YERBAS_HAS_CUDA
+Client::~Client() = default;
+#endif
+
 void Client::print_connection_plan() const
 {
     if (config_.pool.url.empty()) { std::cout << "Pool: not configured\n"; return; }
@@ -536,16 +541,116 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
 }
 
 #ifdef YERBAS_HAS_CUDA
+struct Client::GpuExecutor {
+    explicit GpuExecutor(cuda::BatchEngine* engine, int device_id)
+        : engine_(engine), device_id_(device_id), thread_([this]() { run(); })
+    {
+    }
+
+    ~GpuExecutor() { stop(); }
+
+    std::future<std::vector<cuda::Candidate>> submit(std::uint32_t start)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) throw std::runtime_error("GPU executor is stopping");
+        if (pending_ || busy_) throw std::runtime_error("GPU executor already has work in flight");
+        promise_ = std::promise<std::vector<cuda::Candidate>>{};
+        auto future = promise_.get_future();
+        start_ = start;
+        pending_ = true;
+        cv_.notify_one();
+        return future;
+    }
+
+    void wait_idle()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this]() { return !pending_ && !busy_; });
+    }
+
+private:
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            cv_.notify_all();
+        }
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void run()
+    {
+        for (;;) {
+            std::uint32_t start = 0;
+            std::promise<std::vector<cuda::Candidate>> promise;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this]() { return stopping_ || pending_; });
+                if (stopping_ && !pending_) break;
+                start = start_;
+                promise = std::move(promise_);
+                pending_ = false;
+                busy_ = true;
+            }
+
+            try {
+                auto candidates = engine_->scan(start);
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    busy_ = false;
+                    cv_.notify_all();
+                }
+                promise.set_value(std::move(candidates));
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    busy_ = false;
+                    cv_.notify_all();
+                }
+                promise.set_exception(std::current_exception());
+            }
+        }
+    }
+
+    cuda::BatchEngine* engine_{nullptr};
+    int device_id_{-1};
+    std::thread thread_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stopping_{false};
+    bool pending_{false};
+    bool busy_{false};
+    std::uint32_t start_{0};
+    std::promise<std::vector<cuda::Candidate>> promise_;
+};
+
+Client::~Client() = default;
+
 void Client::initialize_gpu_engines()
 {
     const auto available = cuda::enumerate_devices(); std::vector<int> selected = config_.gpu.devices; if (selected.empty()) for (const auto& info : available) selected.push_back(info.id);
-    for (int id : selected) { const auto found = std::find_if(available.begin(), available.end(), [id](const cuda::DeviceInfo& d) { return d.id == id; }); if (found == available.end()) { std::cerr << "[GPU] Requested device " << id << " is not available; skipping\n"; continue; } const std::size_t batch_size = config_.gpu.intensity > 0 ? (static_cast<std::size_t>(1) << std::min(config_.gpu.intensity, 24)) : 65536; GpuWorker worker; worker.device_id = id; worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size); const std::size_t actual_batch = worker.engine->batch_size(); gpu_workers_.push_back(std::move(worker)); std::cout << gpu_color(id) << "[GPU " << id << "] batch engine initialized | batch=" << actual_batch << " | CPU hash fallback=off" << kColorReset << '\n'; }
+    gpu_workers_.reserve(selected.size());
+    for (int id : selected) {
+        const auto found = std::find_if(available.begin(), available.end(), [id](const cuda::DeviceInfo& d) { return d.id == id; });
+        if (found == available.end()) { std::cerr << "[GPU] Requested device " << id << " is not available; skipping\n"; continue; }
+        const std::size_t batch_size = config_.gpu.intensity > 0 ? (static_cast<std::size_t>(1) << std::min(config_.gpu.intensity, 24)) : 65536;
+        GpuWorker worker;
+        worker.device_id = id;
+        worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size);
+        worker.executor = std::make_unique<GpuExecutor>(worker.engine.get(), id);
+        const std::size_t actual_batch = worker.engine->batch_size();
+        gpu_workers_.push_back(std::move(worker));
+        std::cout << gpu_color(id) << "[GPU " << id << "] batch engine initialized | batch=" << actual_batch << " | persistent worker thread=on | CPU hash fallback=off" << kColorReset << '\n';
+    }
     gpu_pipeline_ready_ = !gpu_workers_.empty(); for (const auto& worker : gpu_workers_) gpu_pipeline_ready_ = gpu_pipeline_ready_ && worker.engine->hash_pipeline_ready();
 }
 
 void Client::upload_gpu_job()
 {
-    if (gpu_workers_.empty() || !gpu_pipeline_ready_) return; std::array<std::uint8_t, 80> header{}; std::string extranonce2; if (!build_header(header, extranonce2, 0)) throw std::runtime_error("Unable to build CUDA job header"); cuda::JobDescriptor descriptor; descriptor.header = header; descriptor.target_le = target_le_; const ghostrider::Work work{descriptor.header.data(), descriptor.header.size()}; descriptor.stages = ghostrider::stage_schedule(work); const std::uint64_t gpu_space = static_cast<std::uint64_t>(kHybridCpuStart); const std::uint64_t region_size = gpu_space / std::max<std::size_t>(1, gpu_workers_.size());
+    if (gpu_workers_.empty() || !gpu_pipeline_ready_) return;
+    for (auto& worker : gpu_workers_) worker.executor->wait_idle();
+    std::array<std::uint8_t, 80> header{}; std::string extranonce2; if (!build_header(header, extranonce2, 0)) throw std::runtime_error("Unable to build CUDA job header"); cuda::JobDescriptor descriptor; descriptor.header = header; descriptor.target_le = target_le_; const ghostrider::Work work{descriptor.header.data(), descriptor.header.size()}; descriptor.stages = ghostrider::stage_schedule(work); const std::uint64_t gpu_space = static_cast<std::uint64_t>(kHybridCpuStart); const std::uint64_t region_size = gpu_space / std::max<std::size_t>(1, gpu_workers_.size());
     for (std::size_t i = 0; i < gpu_workers_.size(); ++i) { auto& worker = gpu_workers_[i]; worker.engine->upload_job(descriptor); const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size; worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start; }
     nonce_ = kHybridCpuStart; gpu_job_loaded_ = true; std::cout << "[hybrid] Job partitioned: " << gpu_workers_.size() << " GPU region(s) + CPU upper nonce region\n";
 }
@@ -555,7 +660,13 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
     if (!gpu_pipeline_ready_) return true;
     const std::uint64_t work_generation = MiningJob::generation(); const std::string work_job_id = job_.job_id; const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
     struct PendingGpu { GpuWorker* worker; std::uint32_t start; std::future<std::vector<cuda::Candidate>> future; }; std::vector<PendingGpu> pending; pending.reserve(gpu_workers_.size());
-    for (auto& worker : gpu_workers_) { const auto count = static_cast<std::uint64_t>(worker.engine->batch_size()); if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) worker.next_nonce = worker.region_start; const std::uint32_t start = worker.next_nonce; worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count); auto* engine = worker.engine.get(); pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })}); }
+    for (auto& worker : gpu_workers_) {
+        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) worker.next_nonce = worker.region_start;
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        pending.push_back(PendingGpu{&worker, start, worker.executor->submit(start)});
+    }
     bool all_ready = false; do { if (!pump_socket_messages(socket_value, 0)) return false; all_ready = true; for (auto& task : pending) if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { all_ready = false; break; } if (!all_ready) std::this_thread::sleep_for(std::chrono::milliseconds(1)); } while (!all_ready); if (!pump_socket_messages(socket_value, 0)) return false;
     const bool stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id; std::size_t stale_candidates = 0;
     for (auto& task : pending) { const auto candidates = task.future.get(); const auto count = task.worker->engine->batch_size(); task.worker->hashes_done += count; hashes_done_ += count; if (stale) { stale_candidates += candidates.size(); continue; } const std::string source = "GPU " + std::to_string(task.worker->device_id); for (const auto& candidate : candidates) { std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n'; if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false; } }
@@ -600,7 +711,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         tasks.resize(gpu_workers_.size());
         owner = this;
         for (std::size_t i = 0; i < gpu_workers_.size(); ++i) tasks[i].worker = &gpu_workers_[i];
-        std::cout << timestamp() << "[hybrid] persistent independent GPU workers online | count="
+        std::cout << timestamp() << "[hybrid] long-lived independent GPU worker threads online | count="
                   << gpu_workers_.size() << '\n';
     }
 
@@ -618,9 +729,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         task.generation = current_generation;
         task.job_id = current_job_id;
         task.extranonce2 = current_extranonce2;
-        auto* engine = worker.engine.get();
-        const std::uint32_t start = task.start;
-        task.future = std::async(std::launch::async, [engine, start]() { return engine->scan(start); });
+        task.future = worker.executor->submit(task.start);
         task.active = true;
     };
 
@@ -676,7 +785,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
             stale_candidates += candidates.size();
         }
         if (stale_candidates != 0) {
-            std::cout << timestamp() << "[hybrid] stale independent GPU work discarded | old_job="
+            std::cout << timestamp() << "[hybrid] stale long-lived GPU work discarded | old_job="
                       << current_job_id << " new_job=" << job_.job_id
                       << " | candidates=" << stale_candidates << '\n';
         }
