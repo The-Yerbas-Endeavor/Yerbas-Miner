@@ -44,6 +44,25 @@ struct BatchEngine::Impl {
             std::cerr << "[GPU " << device_id << "] CryptoNight geometry autotune failed; using 64/64/64: "
                       << e.what() << '\n';
         }
+
+        const char* active_batch_env = std::getenv("YERBAS_CUDA_ACTIVE_BATCH");
+        if (active_batch_env && *active_batch_env) {
+            try {
+                const std::size_t requested_active = static_cast<std::size_t>(std::stoull(active_batch_env));
+                if (requested_active > 0 && requested_active <= batch_capacity) {
+                    batch_size = requested_active;
+                    std::cout << "[GPU " << device_id << "] CUDA active batch override"
+                              << " | active=" << batch_size
+                              << " | capacity=" << batch_capacity << '\n';
+                } else {
+                    std::cerr << "[GPU " << device_id << "] ignoring YERBAS_CUDA_ACTIVE_BATCH="
+                              << active_batch_env << " | valid range=1.." << batch_capacity << '\n';
+                }
+            } catch (...) {
+                std::cerr << "[GPU " << device_id << "] ignoring invalid YERBAS_CUDA_ACTIVE_BATCH="
+                          << active_batch_env << '\n';
+            }
+        }
     }
 
     ~Impl()
