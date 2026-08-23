@@ -4,13 +4,9 @@
 
 namespace yerbas::cuda::cryptonight {
 
-// CryptoNight executes AES continuously during scratchpad setup/collapse and
-// once per memory-hard loop iteration. Keeping the 256-byte S-box as a local
-// constexpr array made every CUDA thread carry an indexable copy that NVCC can
-// spill to local memory. Pascal has a broadcast-friendly constant cache, so
-// keep one read-only S-box per translation unit in device constant memory.
-// Internal linkage avoids cross-TU device-link conflicts for this header-only
-// implementation.
+// Portable AES S-box fallback. The T-table backend copies a derived 4 KiB
+// table into shared memory once per CUDA block so data-dependent AES lookups do
+// not serialize through constant memory during scratchpad expand/collapse.
 static __device__ __constant__ const std::uint8_t kAesSbox[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
     0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -37,16 +33,47 @@ __device__ __forceinline__ std::uint8_t aes_sbox(std::uint8_t x)
 
 __device__ __forceinline__ std::uint8_t xtime(std::uint8_t x)
 {
-    // Branch-free GF(2^8) multiply-by-2. NVCC normally predicates the old
-    // ternary, but this form keeps the hot AES round explicitly branchless.
     const std::uint8_t carry = static_cast<std::uint8_t>(0U - (x >> 7));
     return static_cast<std::uint8_t>((x << 1) ^ (0x1bU & carry));
+}
+
+__device__ __forceinline__ std::uint32_t pack4(std::uint8_t b0, std::uint8_t b1,
+                                                std::uint8_t b2, std::uint8_t b3)
+{
+    return static_cast<std::uint32_t>(b0) |
+           (static_cast<std::uint32_t>(b1) << 8) |
+           (static_cast<std::uint32_t>(b2) << 16) |
+           (static_cast<std::uint32_t>(b3) << 24);
+}
+
+// Layout: four 256-entry 32-bit tables. Call cooperatively from every thread
+// in a block, then synchronize before using aes_round_ttable().
+__device__ __forceinline__ void init_shared_aes_ttables(std::uint32_t* tables)
+{
+    for (int i = static_cast<int>(threadIdx.x); i < 256; i += static_cast<int>(blockDim.x)) {
+        const std::uint8_t s = kAesSbox[i];
+        const std::uint8_t x2 = xtime(s);
+        const std::uint8_t x3 = static_cast<std::uint8_t>(x2 ^ s);
+        tables[i]       = pack4(x2, s,  s,  x3);
+        tables[256+i]   = pack4(x3, x2, s,  s );
+        tables[512+i]   = pack4(s,  x3, x2, s );
+        tables[768+i]   = pack4(s,  s,  x3, x2);
+    }
+}
+
+__device__ __forceinline__ std::uint32_t load32le_aligned(const std::uint8_t* p)
+{
+    return *reinterpret_cast<const std::uint32_t*>(p);
+}
+
+__device__ __forceinline__ void store32le_aligned(std::uint8_t* p, std::uint32_t v)
+{
+    *reinterpret_cast<std::uint32_t*>(p) = v;
 }
 
 __device__ __forceinline__ void aes_round(std::uint8_t block[16], const std::uint8_t key[16])
 {
     std::uint8_t s[16];
-    // SubBytes + ShiftRows (AES state is column-major).
     s[0]=aes_sbox(block[0]);  s[1]=aes_sbox(block[5]);  s[2]=aes_sbox(block[10]); s[3]=aes_sbox(block[15]);
     s[4]=aes_sbox(block[4]);  s[5]=aes_sbox(block[9]);  s[6]=aes_sbox(block[14]); s[7]=aes_sbox(block[3]);
     s[8]=aes_sbox(block[8]);  s[9]=aes_sbox(block[13]); s[10]=aes_sbox(block[2]); s[11]=aes_sbox(block[7]);
@@ -62,6 +89,25 @@ __device__ __forceinline__ void aes_round(std::uint8_t block[16], const std::uin
         block[i+2] = static_cast<std::uint8_t>(a2 ^ t ^ xtime(static_cast<std::uint8_t>(a2 ^ a3)) ^ key[i+2]);
         block[i+3] = static_cast<std::uint8_t>(a3 ^ t ^ xtime(static_cast<std::uint8_t>(a3 ^ a0)) ^ key[i+3]);
     }
+}
+
+__device__ __forceinline__ void aes_round_ttable(std::uint8_t block[16],
+                                                 const std::uint8_t key[16],
+                                                 const std::uint32_t* tables)
+{
+    const std::uint32_t* t0 = tables;
+    const std::uint32_t* t1 = tables + 256;
+    const std::uint32_t* t2 = tables + 512;
+    const std::uint32_t* t3 = tables + 768;
+
+    const std::uint32_t o0 = t0[block[0]]  ^ t1[block[5]]  ^ t2[block[10]] ^ t3[block[15]] ^ load32le_aligned(key);
+    const std::uint32_t o1 = t0[block[4]]  ^ t1[block[9]]  ^ t2[block[14]] ^ t3[block[3]]  ^ load32le_aligned(key + 4);
+    const std::uint32_t o2 = t0[block[8]]  ^ t1[block[13]] ^ t2[block[2]]  ^ t3[block[7]]  ^ load32le_aligned(key + 8);
+    const std::uint32_t o3 = t0[block[12]] ^ t1[block[1]]  ^ t2[block[6]]  ^ t3[block[11]] ^ load32le_aligned(key + 12);
+    store32le_aligned(block, o0);
+    store32le_aligned(block + 4, o1);
+    store32le_aligned(block + 8, o2);
+    store32le_aligned(block + 12, o3);
 }
 
 __device__ __forceinline__ void aes256_expand_key(const std::uint8_t key[32], std::uint8_t expanded[240])
@@ -92,12 +138,19 @@ __device__ __forceinline__ void aes_single_round(const std::uint8_t in[16], std:
     aes_round(out, round_key);
 }
 
-// Matches Yerbas Core aesb_pseudo_round(): ten normal AES rounds, each with
-// MixColumns, using the first ten expanded round keys.
 __device__ __forceinline__ void aes_pseudo_round(std::uint8_t block[16], const std::uint8_t expanded[240])
 {
     #pragma unroll
     for (int round = 0; round < 10; ++round) aes_round(block, expanded + round * 16);
+}
+
+__device__ __forceinline__ void aes_pseudo_round_ttable(std::uint8_t block[16],
+                                                        const std::uint8_t expanded[240],
+                                                        const std::uint32_t* tables)
+{
+    #pragma unroll
+    for (int round = 0; round < 10; ++round)
+        aes_round_ttable(block, expanded + round * 16, tables);
 }
 
 } // namespace yerbas::cuda::cryptonight
