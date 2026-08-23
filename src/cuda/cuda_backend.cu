@@ -5,8 +5,9 @@
 #include "cuda/generated/cuda_backend_part2a.inc"
 #include "cuda/generated/cuda_backend_part2b.inc"
 
-// part2b closes the private implementation namespace. Re-enter the public
-// CUDA namespace before the BatchEngine implementation fragments.
 namespace yerbas::cuda {
+
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
+
+} // namespace yerbas::cuda
