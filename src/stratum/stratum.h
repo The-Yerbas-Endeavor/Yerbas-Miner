@@ -117,7 +117,6 @@ Endpoint parse_endpoint(const std::string& url);
 class Client {
 public:
     explicit Client(const AppConfig& config);
-    ~Client();
 
     void print_connection_plan() const;
     bool ready() const noexcept;
@@ -185,11 +184,9 @@ private:
     std::uint64_t cpu_hashes_at_last_report_{0};
 
 #ifdef YERBAS_HAS_CUDA
-    struct GpuExecutor;
     struct GpuWorker {
         int device_id{-1};
         std::unique_ptr<cuda::BatchEngine> engine;
-        std::unique_ptr<GpuExecutor> executor;
         std::uint32_t region_start{0};
         std::uint32_t region_end{0};
         std::uint32_t next_nonce{0};
