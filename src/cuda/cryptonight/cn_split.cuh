@@ -128,6 +128,46 @@ __device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad
     }
 }
 
+// Interleave two independent CryptoNight states in one CUDA thread. Each hash
+// preserves the exact canonical iteration order; the only change is exposing
+// independent work from the second hash while the first hash follows its
+// data-dependent scratchpad chain. This can hide random-memory latency on
+// architectures where the added register pressure does not reduce occupancy
+// too far. Production selects this path only after parity validation and an
+// empirical per-device/per-variant benchmark.
+template <std::uint8_t VariantIndex, int Unroll>
+__device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scratchpad0,
+                                                             const SplitContext& ctx0,
+                                                             std::uint8_t* scratchpad1,
+                                                             const SplitContext& ctx1)
+{
+    static_assert(VariantIndex < 6, "invalid CryptoNight variant");
+    static_assert(Unroll == 1 || Unroll == 2 || Unroll == 4, "unsupported CryptoNight loop unroll");
+    constexpr VariantConfig cfg = config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    static_assert((cfg.iterations % Unroll) == 0, "CryptoNight iteration count must divide by unroll");
+
+    alignas(16) std::uint8_t a0[16], b0[32], c0[16], t0[16];
+    alignas(16) std::uint8_t a1[16], b1[32], c1[16], t1[16];
+    copy16(a0, ctx0.a);
+    copy16(b0, ctx0.b);
+    copy16(b0 + 16, ctx0.b + 16);
+    copy16(a1, ctx1.a);
+    copy16(b1, ctx1.b);
+    copy16(b1 + 16, ctx1.b + 16);
+    const std::uint64_t tweak0 = ctx0.tweak;
+    const std::uint64_t tweak1 = ctx1.tweak;
+
+    #pragma unroll 1
+    for (std::uint32_t i = 0; i < cfg.iterations; i += Unroll) {
+        #pragma unroll
+        for (int u = 0; u < Unroll; ++u) {
+            split_memory_iteration<address_mask>(scratchpad0, a0, b0, c0, t0, tweak0);
+            split_memory_iteration<address_mask>(scratchpad1, a1, b1, c1, t1, tweak1);
+        }
+    }
+}
+
 template <std::uint8_t VariantIndex>
 __device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
                                                   const SplitContext& ctx)
