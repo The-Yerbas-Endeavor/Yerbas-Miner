@@ -9,9 +9,15 @@
 #include "cuda/generated/cuda_backend_part1.inc"
 #include "cuda/generated/cuda_backend_part2a.inc"
 
-// Preserve the established small-sample tuner as the first-stage implementation.
+// Preserve the established small-sample tuner and split CryptoNight dispatch as
+// fallbacks. The public dispatch is replaced below only after cooperative mode
+// has passed parity and performance selection.
 #define autotune_cn_geometries autotune_cn_geometries_legacy
+#define launch_split_cryptonight_variant launch_split_cryptonight_variant_legacy
+#define launch_split_cryptonight launch_split_cryptonight_legacy
 #include "cuda/generated/cuda_backend_part2b.inc"
+#undef launch_split_cryptonight
+#undef launch_split_cryptonight_variant
 #undef autotune_cn_geometries
 
 // Preserve production-batch thread/unroll tuning as the second-stage implementation.
@@ -19,17 +25,20 @@
 #include "cuda/generated/cuda_backend_prod_tune.inc"
 #undef autotune_cn_geometries
 
-// Keep the original cooperative probe implementation available for its parity
-// kernels/helpers, but rename its wrapper so the architecture-neutral geometry
-// sweep below becomes the public autotune wrapper.
+// Keep the original cooperative probe implementation available for its kernels
+// and parity helpers. Its wrapper remains diagnostic-only.
 #define autotune_cn_geometries autotune_cn_geometries_coop_fixed128
 #include "cuda/generated/cuda_backend_coop_probe.inc"
 #undef autotune_cn_geometries
 
-// Probe the parity-proven cooperative kernel at several block sizes and compare
-// against the actual tuned production single-hash path. Production dispatch is
-// still unchanged until the measurements establish a safe per-device selector.
+// Final-stage production selector: validates complete CryptoNight output, sweeps
+// architecture-neutral cooperative geometries, applies a 2% speedup gate, and
+// persists the decision per GPU/driver/runtime/batch.
 #include "cuda/generated/cuda_backend_coop_tune.inc"
+
+// Public CryptoNight dispatch: selected variants use cooperative mode; all other
+// cases transparently call the established production implementation.
+#include "cuda/generated/cuda_backend_coop_dispatch.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
