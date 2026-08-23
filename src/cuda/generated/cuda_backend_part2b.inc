@@ -47,7 +47,11 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
     sample_count = std::min(sample_count, batch_size);
     sample_count = std::max<std::size_t>(1U, sample_count);
 
-    if (load_cn_geometry_cache(device_id, props, batch_size, sample_count, result)) return result;
+    if (load_cn_geometry_cache(device_id, props, batch_size, sample_count, result)) {
+        ensure_cn_loop_modes(device_id, props, stream, states, sample_count, batch_size,
+                             scratchpads, contexts, result);
+        return result;
+    }
 
     std::cout << "[GPU " << device_id << "] empirical CryptoNight geometry autotune starting"
               << " | sample=" << sample_count << " | candidates=32,64,128,256\n";
@@ -69,6 +73,8 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
     benchmark_aes_backend<4>(stream, states, sample_count, scratchpads, contexts, result[4], ttable_valid);
     benchmark_aes_backend<5>(stream, states, sample_count, scratchpads, contexts, result[5], ttable_valid);
 
+    ensure_cn_loop_modes(device_id, props, stream, states, sample_count, batch_size,
+                         scratchpads, contexts, result);
     print_cn_phase_measurements(device_id, result, sample_count, "fresh-autotune");
     save_cn_geometry_cache(device_id, props, batch_size, sample_count, result);
     return result;
@@ -93,8 +99,19 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
     else
         cryptonight_setup_stage<VariantIndex, false><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight setup launch failed");
-    cryptonight_loop_stage<VariantIndex><<<loop_blocks, loop_threads, 0, stream>>>(count, scratchpads, contexts);
+
+    int device_id = -1;
+    int loop_mode = 1;
+    if (cudaGetDevice(&device_id) == cudaSuccess && device_id >= 0 && device_id < kMaxLoopTuneDevices &&
+        g_cn_loop_ready[device_id]) {
+        loop_mode = g_cn_loop_unroll[device_id][VariantIndex];
+    } else {
+        cudaGetLastError();
+    }
+    launch_cn_loop_mode<VariantIndex>(stream, loop_mode, loop_blocks, loop_threads,
+                                      count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight loop launch failed");
+
     if (geometry.aes_backend == 1)
         cryptonight_final_stage<VariantIndex, true><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
     else
