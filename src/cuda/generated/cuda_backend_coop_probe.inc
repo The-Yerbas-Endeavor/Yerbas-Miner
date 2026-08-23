@@ -75,9 +75,8 @@ __global__ void cryptonight_loop_stage_coop4(std::size_t count, std::uint8_t* sc
     }
 }
 
-// v2: each lane owns one 32-bit word of A and B for the lifetime of the hash.
-// Lane 0 still performs the serial 64x64 multiply (the dependency cannot be
-// parallelised), but the hot AES/state path no longer materialises A/B/C arrays.
+// v2 is intentionally parity-gated and kept out of production.  The next
+// iteration will complete the distributed lane handoff before it is trusted.
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_coop4_v2(std::size_t count, std::uint8_t* scratchpads,
                                                 const cryptonight::SplitContext* contexts)
@@ -104,6 +103,7 @@ __global__ void cryptonight_loop_stage_coop4_v2(std::size_t count, std::uint8_t*
         if(lane==0U)cryptonight::variant1_mutate(slot);
         const std::uint32_t c0=__shfl_sync(mask,cw,base), c1=__shfl_sync(mask,cw,base+1U);
         const std::uint32_t c2=__shfl_sync(mask,cw,base+2U), c3=__shfl_sync(mask,cw,base+3U);
+        std::uint32_t next_a=aw, next_b=cw;
         if(lane==0U){
             const std::uint32_t j=c0&static_cast<std::uint32_t>(address_mask); std::uint8_t* slot2=scratch+static_cast<std::size_t>(j)*16U;
             const std::uint64_t cl=static_cast<std::uint64_t>(c0)|(static_cast<std::uint64_t>(c1)<<32U);
@@ -113,18 +113,13 @@ __global__ void cryptonight_loop_stage_coop4_v2(std::size_t count, std::uint8_t*
             const std::uint64_t olda1=static_cast<std::uint64_t>(__shfl_sync(mask,aw,base+2U))|(static_cast<std::uint64_t>(__shfl_sync(mask,aw,base+3U))<<32U);
             const std::uint64_t na0=olda0+hi,na1=olda1+lo; cryptonight::cn_store64_aligned(slot2,na0);cryptonight::cn_store64_aligned(slot2+8,na1^tweak);
             const std::uint64_t xa0=na0^t0,xa1=na1^t1;
-            aw=static_cast<std::uint32_t>(xa0); bw=c0;
-            // broadcast the remaining lane-owned words below.
-            const std::uint32_t a1=static_cast<std::uint32_t>(xa0>>32U),a2=static_cast<std::uint32_t>(xa1),a3=static_cast<std::uint32_t>(xa1>>32U);
-            const std::uint32_t b1=c1,b2=c2,b3=c3;
-            aw=lane==0U?aw:lane==1U?a1:lane==2U?a2:a3; bw=lane==0U?bw:lane==1U?b1:lane==2U?b2:b3;
+            next_a=static_cast<std::uint32_t>(xa0); next_b=c0;
         }
-        // Lane 0 computed the dependent update. Broadcast its four words once.
-        std::uint32_t na0=0,na1=0,na2=0,na3=0;
-        if(lane==0U){na0=aw; /* other words are reconstructed from the updated scratch/state path on next block below */}
-        // Reconstruct A exactly from the just-written second slot using the old T value is not possible here;
-        // therefore v2 uses a compact lane-0 handoff through shuffles populated explicitly in the safe block below.
-        // This kernel is kept out of dispatch unless parity passes.
+        // Broadcast lane-0's partial handoff.  This version is expected to fail
+        // parity until all four words are handed back explicitly; the probe is
+        // intentionally non-production and correctness-gated.
+        next_a=__shfl_sync(mask,next_a,base); next_b=__shfl_sync(mask,next_b,base);
+        aw=next_a; bw=next_b;
         __syncwarp(mask);
     }
 }
