@@ -10,7 +10,7 @@ namespace yerbas::cuda::cryptonight {
 struct alignas(16) SplitContext {
     std::uint8_t state[200];
     std::uint8_t a[16];
-    std::uint8_t b[32];
+    std::uint8_t b[16];
     std::uint64_t tweak;
 };
 
@@ -53,7 +53,6 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
     for (int i = 0; i < 16; ++i) {
         ctx.a[i] = static_cast<std::uint8_t>(ctx.state[i] ^ ctx.state[32 + i]);
         ctx.b[i] = static_cast<std::uint8_t>(ctx.state[16 + i] ^ ctx.state[48 + i]);
-        ctx.b[16 + i] = 0;
     }
 
     ctx.tweak = cn_load64(input + 35) ^ cn_load64_aligned(ctx.state + 192);
@@ -63,7 +62,7 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
 template <std::size_t AddressMask, bool UseTTable = false>
 __device__ __forceinline__ void split_memory_iteration(std::uint8_t* scratchpad,
                                                         std::uint8_t a[16],
-                                                        std::uint8_t b[32],
+                                                        std::uint8_t b[16],
                                                         std::uint8_t c[16],
                                                         std::uint8_t t[16],
                                                         std::uint64_t tweak,
@@ -101,7 +100,6 @@ __device__ __forceinline__ void split_memory_iteration(std::uint8_t* scratchpad,
     cn_store64_aligned(a, a0);
     cn_store64_aligned(a + 8, a1);
 
-    copy16(b + 16, b);
     copy16(b, c);
 }
 
@@ -117,12 +115,11 @@ __device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad
     static_assert((cfg.iterations % Unroll) == 0, "CryptoNight iteration count must divide by unroll");
 
     alignas(16) std::uint8_t a[16];
-    alignas(16) std::uint8_t b[32];
+    alignas(16) std::uint8_t b[16];
     alignas(16) std::uint8_t c[16];
     alignas(16) std::uint8_t t[16];
     copy16(a, ctx.a);
     copy16(b, ctx.b);
-    copy16(b + 16, ctx.b + 16);
     const std::uint64_t tweak = ctx.tweak;
 
     #pragma unroll 1
@@ -153,14 +150,12 @@ __device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scrat
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
     static_assert((cfg.iterations % Unroll) == 0, "CryptoNight iteration count must divide by unroll");
 
-    alignas(16) std::uint8_t a0[16], b0[32], c0[16], t0[16];
-    alignas(16) std::uint8_t a1[16], b1[32], c1[16], t1[16];
+    alignas(16) std::uint8_t a0[16], b0[16], c0[16], t0[16];
+    alignas(16) std::uint8_t a1[16], b1[16], c1[16], t1[16];
     copy16(a0, ctx0.a);
     copy16(b0, ctx0.b);
-    copy16(b0 + 16, ctx0.b + 16);
     copy16(a1, ctx1.a);
     copy16(b1, ctx1.b);
-    copy16(b1 + 16, ctx1.b + 16);
     const std::uint64_t tweak0 = ctx0.tweak;
     const std::uint64_t tweak1 = ctx1.tweak;
 
