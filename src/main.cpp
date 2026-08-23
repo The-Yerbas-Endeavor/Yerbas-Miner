@@ -11,6 +11,19 @@
 #include <windows.h>
 #endif
 
+// CUDA 12.x commonly uses an older supported GCC host compiler while the rest
+// of Yerbas-Miner is built with the system GCC (for example GCC 15 on Ubuntu
+// 26). GCC 14+ may emit __cxa_call_terminate in noexcept cleanup paths, while
+// an older libstdc++ selected through nvcc's GCC library path may not export
+// that ABI helper. Its required behavior is simply to terminate while handling
+// an exception, so provide a weak compatibility bridge for mixed GNU toolchains.
+#if defined(__linux__) && defined(__GNUC__) && (__GNUC__ >= 14)
+extern "C" [[noreturn]] __attribute__((weak)) void __cxa_call_terminate(void*) noexcept
+{
+    std::terminate();
+}
+#endif
+
 namespace {
 
 void write_startup_log(const std::string& message)
