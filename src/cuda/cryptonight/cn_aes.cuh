@@ -138,6 +138,16 @@ __device__ __forceinline__ void aes_single_round(const std::uint8_t in[16], std:
     aes_round(out, round_key);
 }
 
+__device__ __forceinline__ void aes_single_round_ttable(const std::uint8_t in[16],
+                                                        std::uint8_t out[16],
+                                                        const std::uint8_t round_key[16],
+                                                        const std::uint32_t* tables)
+{
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) out[i] = in[i];
+    aes_round_ttable(out, round_key, tables);
+}
+
 __device__ __forceinline__ void aes_pseudo_round(std::uint8_t block[16], const std::uint8_t expanded[240])
 {
     #pragma unroll
