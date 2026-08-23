@@ -13,6 +13,10 @@ struct BatchEngine::Impl {
     JobDescriptor host_job{};
     std::vector<std::uint8_t> host_states;
     std::array<CnGeometry, 6> cn_geometries{};
+    std::uint64_t scan_count{0};
+    std::uint64_t stage_profile_samples{0};
+    std::array<double, 256> rolling_stage_ms{};
+    std::array<std::uint64_t, 256> rolling_stage_count{};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -84,6 +88,20 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
     initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
+
+    // Sample one production scan out of every four. CUDA events are recorded
+    // into the existing stream and synchronized only by the normal end-of-scan
+    // barrier, so non-sampled scans have zero profiling overhead and sampled
+    // scans avoid the per-stage synchronizations used by scan_profiled().
+    ++impl_->scan_count;
+    const bool profile_this_scan = (impl_->scan_count % 4U) == 0U;
+    std::array<cudaEvent_t, 19> stage_boundaries{};
+    if (profile_this_scan) {
+        for (auto& event : stage_boundaries)
+            check_cuda(cudaEventCreateWithFlags(&event, cudaEventDefault), "cudaEventCreate rolling stage profile failed");
+        check_cuda(cudaEventRecord(stage_boundaries[0], impl_->stream), "cudaEventRecord rolling stage profile start failed");
+    }
+
     for (int stage_index = 0; stage_index < 18; ++stage_index) {
         const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
         const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
@@ -99,6 +117,9 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                                                            stage_index, algorithm);
             check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
         }
+        if (profile_this_scan)
+            check_cuda(cudaEventRecord(stage_boundaries[static_cast<std::size_t>(stage_index) + 1U], impl_->stream),
+                       "cudaEventRecord rolling stage profile boundary failed");
     }
     collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
                                                                         impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
@@ -107,6 +128,62 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count), cudaMemcpyDeviceToHost, impl_->stream),
                "cudaMemcpyAsync candidate count failed");
     check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize scan failed");
+
+    if (profile_this_scan) {
+        ++impl_->stage_profile_samples;
+        std::array<float, 18> sample_ms{};
+        float sample_total_ms = 0.0F;
+        for (std::size_t i = 0; i < sample_ms.size(); ++i) {
+            check_cuda(cudaEventElapsedTime(&sample_ms[i], stage_boundaries[i], stage_boundaries[i + 1U]),
+                       "cudaEventElapsedTime rolling stage profile failed");
+            sample_total_ms += sample_ms[i];
+            const std::uint8_t encoded = impl_->host_job.stages[i];
+            impl_->rolling_stage_ms[encoded] += static_cast<double>(sample_ms[i]);
+            ++impl_->rolling_stage_count[encoded];
+        }
+        for (auto& event : stage_boundaries) cudaEventDestroy(event);
+
+        // Print a compact production-stage profile every fourth sample
+        // (every 16 scans). This is frequent enough to follow changing
+        // GhostRider schedules without flooding normal share output.
+        if ((impl_->stage_profile_samples % 4U) == 0U) {
+            std::uint64_t fingerprint = 1469598103934665603ULL;
+            for (const std::uint8_t stage : impl_->host_job.stages) {
+                fingerprint ^= stage;
+                fingerprint *= 1099511628211ULL;
+            }
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[GPU " << impl_->device_id << "] GhostRider rolling stage profile"
+                      << " | samples=" << impl_->stage_profile_samples
+                      << " | fingerprint=" << std::hex << std::setw(16) << std::setfill('0') << fingerprint
+                      << std::dec << std::setfill(' ')
+                      << " | sampled-stage-total=" << sample_total_ms << " ms\n";
+            for (std::size_t i = 0; i < sample_ms.size(); ++i) {
+                const std::uint8_t encoded = impl_->host_job.stages[i];
+                const bool is_cn = (encoded & ghostrider::kCryptoNightStageFlag) != 0;
+                const std::uint8_t algorithm = static_cast<std::uint8_t>(encoded & 0x7fU);
+                const double avg_ms = impl_->rolling_stage_count[encoded] == 0 ? 0.0 :
+                    impl_->rolling_stage_ms[encoded] / static_cast<double>(impl_->rolling_stage_count[encoded]);
+                const float pct = sample_total_ms > 0.0F ? (100.0F * sample_ms[i] / sample_total_ms) : 0.0F;
+                std::cout << "[CUDA stage] " << std::setw(2) << i << " ";
+                if (is_cn && algorithm < cryptonight::kVariantConfigs.size()) {
+                    std::cout << cryptonight::kVariantConfigs[algorithm].name;
+                } else {
+                    static constexpr const char* kCoreNames[15] = {
+                        "BLAKE-512", "BMW-512", "Groestl-512", "JH-512", "Keccak-512",
+                        "Skein-512", "Luffa-512", "CubeHash-512", "Shavite-512", "SIMD-512",
+                        "Echo-512", "Hamsi-512", "Fugue-512", "Shabal-512", "Whirlpool"
+                    };
+                    std::cout << (algorithm < 15 ? kCoreNames[algorithm] : "UNKNOWN");
+                }
+                std::cout << " | sample=" << sample_ms[i] << " ms"
+                          << " | sample=" << std::setprecision(1) << pct << "%"
+                          << std::setprecision(3) << " | rolling-avg=" << avg_ms << " ms\n";
+            }
+            std::cout << std::defaultfloat;
+        }
+    }
+
     count = std::min<unsigned int>(count, static_cast<unsigned int>(kMaxCandidates));
     if (count == 0) return {};
     std::vector<DeviceCandidate> raw(count);
