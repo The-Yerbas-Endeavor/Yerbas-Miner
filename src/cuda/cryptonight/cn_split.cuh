@@ -18,10 +18,48 @@ struct alignas(16) SplitContext {
     std::uint64_t tweak;
 };
 
+// CryptoNight's pseudo AES pass consumes only the first ten 16-byte round
+// keys.  The generic AES-256 expansion builds 240 bytes; producing only the
+// 160 bytes actually consumed by setup/collapse cuts key-schedule work and
+// reduces per-thread local state in these two kernels.
+__device__ __forceinline__ void cn_expand_key_10rounds(const std::uint8_t key[32],
+                                                       std::uint8_t expanded[160])
+{
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) expanded[i] = key[i];
+
+    std::uint8_t rcon = 1;
+    int generated = 32;
+    while (generated < 160) {
+        std::uint8_t t[4] = {
+            expanded[generated - 4], expanded[generated - 3],
+            expanded[generated - 2], expanded[generated - 1]
+        };
+        if ((generated & 31) == 0) {
+            const std::uint8_t x = t[0];
+            t[0] = static_cast<std::uint8_t>(aes_sbox(t[1]) ^ rcon);
+            t[1] = aes_sbox(t[2]);
+            t[2] = aes_sbox(t[3]);
+            t[3] = aes_sbox(x);
+            rcon = xtime(rcon);
+        } else if ((generated & 31) == 16) {
+            t[0] = aes_sbox(t[0]);
+            t[1] = aes_sbox(t[1]);
+            t[2] = aes_sbox(t[2]);
+            t[3] = aes_sbox(t[3]);
+        }
+        #pragma unroll
+        for (int i = 0; i < 4 && generated < 160; ++i) {
+            expanded[generated] = static_cast<std::uint8_t>(expanded[generated - 32] ^ t[i]);
+            ++generated;
+        }
+    }
+}
+
 template <std::uint8_t VariantIndex>
 __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
                                             std::size_t length,
-                                            std::uint8_t* scratchpad,
+                                            std::uint8_t* __restrict__ scratchpad,
                                             SplitContext& ctx)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
@@ -34,18 +72,23 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
 
     alignas(16) std::uint8_t text[128];
     #pragma unroll
-    for (int i = 0; i < 128; ++i) text[i] = ctx.state[64 + i];
+    for (int block = 0; block < 8; ++block)
+        copy16(text + block * 16, ctx.state + 64 + block * 16);
 
-    alignas(16) std::uint8_t expanded[240];
-    aes256_expand_key(ctx.state, expanded);
+    alignas(16) std::uint8_t expanded[160];
+    cn_expand_key_10rounds(ctx.state, expanded);
 
     for (std::size_t i = 0; i < init_rounds; ++i) {
         #pragma unroll
         for (int block = 0; block < 8; ++block)
             aes_pseudo_round(text + block * 16, expanded);
-        #pragma unroll 16
-        for (int b = 0; b < 128; ++b)
-            scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
+
+        // Both buffers are 16-byte aligned.  Store the 128-byte scratchpad row
+        // as sixteen native 64-bit words instead of 128 byte stores.
+        #pragma unroll
+        for (int block = 0; block < 8; ++block)
+            copy16(scratchpad + i * 128U + static_cast<std::size_t>(block * 16),
+                   text + block * 16);
     }
 
     #pragma unroll
@@ -175,7 +218,7 @@ __device__ __forceinline__ void split_memory_loop(std::uint8_t* __restrict__ scr
 }
 
 template <std::uint8_t VariantIndex>
-__device__ __forceinline__ void split_finalize(std::uint8_t* scratchpad,
+__device__ __forceinline__ void split_finalize(std::uint8_t* __restrict__ scratchpad,
                                                SplitContext& ctx,
                                                std::uint8_t out[32])
 {
@@ -185,10 +228,11 @@ __device__ __forceinline__ void split_finalize(std::uint8_t* scratchpad,
 
     alignas(16) std::uint8_t text[128];
     #pragma unroll
-    for (int i = 0; i < 128; ++i) text[i] = ctx.state[64 + i];
+    for (int block = 0; block < 8; ++block)
+        copy16(text + block * 16, ctx.state + 64 + block * 16);
 
-    alignas(16) std::uint8_t expanded[240];
-    aes256_expand_key(ctx.state + 32, expanded);
+    alignas(16) std::uint8_t expanded[160];
+    cn_expand_key_10rounds(ctx.state + 32, expanded);
     for (std::size_t i = 0; i < init_rounds; ++i) {
         #pragma unroll
         for (int block = 0; block < 8; ++block) {
@@ -199,7 +243,9 @@ __device__ __forceinline__ void split_finalize(std::uint8_t* scratchpad,
     }
 
     #pragma unroll
-    for (int i = 0; i < 128; ++i) ctx.state[64 + i] = text[i];
+    for (int block = 0; block < 8; ++block)
+        copy16(ctx.state + 64 + block * 16, text + block * 16);
+
     keccak_permute_state(ctx.state);
     dispatch_extra_hash(static_cast<std::uint8_t>(ctx.state[0] & 3U), ctx.state, out);
 }
