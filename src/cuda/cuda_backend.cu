@@ -11,8 +11,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -25,6 +30,7 @@ namespace {
 constexpr std::size_t kMaxCandidates = 64;
 constexpr std::size_t kStateBytes = 64;
 constexpr std::size_t kCnScratchpadStride = cryptonight::max_scratchpad_bytes();
+constexpr int kCnGeometryCacheRevision = 3;
 
 struct DeviceJob {
     std::uint8_t header[80];
@@ -41,12 +47,188 @@ struct CnGeometry {
     int setup_threads{64};
     int loop_threads{64};
     int final_threads{64};
+    float setup_ms{0.0F};
+    float loop_ms{0.0F};
+    float final_ms{0.0F};
 };
 
 void check_cuda(cudaError_t status, const char* what)
 {
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(status));
+    }
+}
+
+std::filesystem::path cn_cache_directory()
+{
+#ifdef _WIN32
+    if (const char* local = std::getenv("LOCALAPPDATA"); local && *local)
+        return std::filesystem::path(local) / "Yerbas-Miner";
+#endif
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+        return std::filesystem::path(xdg) / "yerbas-miner";
+    if (const char* home = std::getenv("HOME"); home && *home)
+        return std::filesystem::path(home) / ".cache" / "yerbas-miner";
+    return std::filesystem::current_path() / ".yerbas-miner-cache";
+}
+
+std::string sanitize_cache_component(std::string value)
+{
+    for (char& c : value) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (!((u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') ||
+              (u >= '0' && u <= '9') || c == '-' || c == '_')) c = '_';
+    }
+    return value;
+}
+
+std::string cn_cache_key(int device_id,
+                         const cudaDeviceProp& props,
+                         std::size_t batch_size,
+                         int driver_version,
+                         int runtime_version)
+{
+    std::ostringstream out;
+    out << "rev" << kCnGeometryCacheRevision
+        << "-dev" << device_id
+        << '-' << sanitize_cache_component(props.name)
+        << "-cc" << props.major << props.minor
+        << "-sm" << props.multiProcessorCount
+        << "-warp" << props.warpSize
+        << "-batch" << batch_size
+        << "-drv" << driver_version
+        << "-rt" << runtime_version;
+    return out.str();
+}
+
+bool valid_cn_threads(int value, int max_threads)
+{
+    return value > 0 && value <= max_threads &&
+           (value == 32 || value == 64 || value == 128 || value == 256);
+}
+
+void print_cn_phase_measurements(int device_id,
+                                 const std::array<CnGeometry, 6>& geometries,
+                                 std::size_t sample_count,
+                                 const char* source)
+{
+    std::cout << "[GPU " << device_id << "] CryptoNight phase measurements | source="
+              << source << " | sample=" << sample_count << '\n';
+    for (std::size_t i = 0; i < geometries.size(); ++i) {
+        const auto& g = geometries[i];
+        const float total = g.setup_ms + g.loop_ms + g.final_ms;
+        const float loop_pct = total > 0.0F ? (100.0F * g.loop_ms / total) : 0.0F;
+        std::cout << "[CUDA CN profile] " << cryptonight::kVariantConfigs[i].name
+                  << " | geometry=" << g.setup_threads << '/' << g.loop_threads << '/' << g.final_threads
+                  << " | setup=" << g.setup_ms << " ms"
+                  << " | loop=" << g.loop_ms << " ms"
+                  << " | final=" << g.final_ms << " ms"
+                  << " | total=" << total << " ms"
+                  << " | loop=" << std::fixed << std::setprecision(1) << loop_pct << "%"
+                  << std::defaultfloat << '\n';
+    }
+}
+
+bool load_cn_geometry_cache(int device_id,
+                            const cudaDeviceProp& props,
+                            std::size_t batch_size,
+                            std::size_t sample_count,
+                            std::array<CnGeometry, 6>& result)
+{
+    const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
+    if (retune && *retune && std::string(retune) != "0") {
+        std::cout << "[GPU " << device_id << "] CryptoNight geometry cache bypassed by YERBAS_CUDA_RETUNE\n";
+        return false;
+    }
+
+    int driver_version = 0;
+    int runtime_version = 0;
+    if (cudaDriverGetVersion(&driver_version) != cudaSuccess ||
+        cudaRuntimeGetVersion(&runtime_version) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+
+    const std::string key = cn_cache_key(device_id, props, batch_size, driver_version, runtime_version);
+    const auto path = cn_cache_directory() / ("cn-geometry-" + key + ".txt");
+    std::ifstream in(path);
+    if (!in) return false;
+
+    std::string magic;
+    int revision = 0;
+    std::string stored_key;
+    std::size_t stored_sample = 0;
+    if (!(in >> magic >> revision >> std::quoted(stored_key) >> stored_sample) ||
+        magic != "YERBAS_CN_GEOMETRY" || revision != kCnGeometryCacheRevision ||
+        stored_key != key || stored_sample != sample_count) {
+        return false;
+    }
+
+    std::array<CnGeometry, 6> loaded{};
+    for (std::size_t i = 0; i < loaded.size(); ++i) {
+        std::size_t variant = 0;
+        CnGeometry g{};
+        if (!(in >> variant >> g.setup_threads >> g.loop_threads >> g.final_threads
+                 >> g.setup_ms >> g.loop_ms >> g.final_ms) ||
+            variant != i ||
+            !valid_cn_threads(g.setup_threads, props.maxThreadsPerBlock) ||
+            !valid_cn_threads(g.loop_threads, props.maxThreadsPerBlock) ||
+            !valid_cn_threads(g.final_threads, props.maxThreadsPerBlock) ||
+            g.setup_ms <= 0.0F || g.loop_ms <= 0.0F || g.final_ms <= 0.0F) {
+            return false;
+        }
+        loaded[i] = g;
+    }
+
+    result = loaded;
+    std::cout << "[GPU " << device_id << "] CryptoNight geometry cache loaded | " << path.string() << '\n';
+    print_cn_phase_measurements(device_id, result, sample_count, "cache");
+    return true;
+}
+
+void save_cn_geometry_cache(int device_id,
+                            const cudaDeviceProp& props,
+                            std::size_t batch_size,
+                            std::size_t sample_count,
+                            const std::array<CnGeometry, 6>& geometries)
+{
+    int driver_version = 0;
+    int runtime_version = 0;
+    if (cudaDriverGetVersion(&driver_version) != cudaSuccess ||
+        cudaRuntimeGetVersion(&runtime_version) != cudaSuccess) {
+        cudaGetLastError();
+        return;
+    }
+
+    try {
+        const auto dir = cn_cache_directory();
+        std::filesystem::create_directories(dir);
+        const std::string key = cn_cache_key(device_id, props, batch_size, driver_version, runtime_version);
+        const auto path = dir / ("cn-geometry-" + key + ".txt");
+        const auto temp = path.string() + ".tmp";
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out) return;
+        out << "YERBAS_CN_GEOMETRY " << kCnGeometryCacheRevision << ' '
+            << std::quoted(key) << ' ' << sample_count << '\n';
+        out << std::setprecision(9);
+        for (std::size_t i = 0; i < geometries.size(); ++i) {
+            const auto& g = geometries[i];
+            out << i << ' ' << g.setup_threads << ' ' << g.loop_threads << ' ' << g.final_threads
+                << ' ' << g.setup_ms << ' ' << g.loop_ms << ' ' << g.final_ms << '\n';
+        }
+        out.close();
+        if (!out) return;
+        std::error_code ec;
+        std::filesystem::rename(temp, path, ec);
+        if (ec) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+            std::filesystem::rename(temp, path, ec);
+        }
+        if (!ec)
+            std::cout << "[GPU " << device_id << "] CryptoNight geometry cache saved | " << path.string() << '\n';
+    } catch (const std::exception& e) {
+        std::cerr << "[GPU " << device_id << "] CryptoNight geometry cache write skipped: " << e.what() << '\n';
     }
 }
 
@@ -65,9 +247,7 @@ __global__ void initialize_nonce_batch(std::uint32_t start_nonce,
                                        std::size_t count)
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (index < count) {
-        nonces[index] = start_nonce + static_cast<std::uint32_t>(index);
-    }
+    if (index < count) nonces[index] = start_nonce + static_cast<std::uint32_t>(index);
 }
 
 __global__ void core512_stage(const DeviceJob* job,
@@ -79,7 +259,6 @@ __global__ void core512_stage(const DeviceJob* job,
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
     std::uint8_t digest[64];
     bool ok = false;
     if (stage_index == 0) {
@@ -93,12 +272,8 @@ __global__ void core512_stage(const DeviceJob* job,
         header[79] = static_cast<std::uint8_t>(nonce >> 24);
         ok = core::dispatch_core512(algorithm, header, 80, digest);
     } else {
-        ok = core::dispatch_core512(algorithm,
-                                    states + index * kStateBytes,
-                                    kStateBytes,
-                                    digest);
+        ok = core::dispatch_core512(algorithm, states + index * kStateBytes, kStateBytes, digest);
     }
-
     if (!ok) return;
     std::uint8_t* output = states + index * kStateBytes;
     #pragma unroll
@@ -112,15 +287,12 @@ __global__ void cryptonight_stage(std::uint8_t* states,
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
     const auto cfg = cryptonight::config_value(variant);
     const std::size_t scratchpad_stride = static_cast<std::size_t>(cfg.page_size);
     std::uint8_t* state = states + index * kStateBytes;
     std::uint8_t* scratchpad = scratchpads + index * scratchpad_stride;
     std::uint8_t digest[32];
-
     if (!cryptonight::slow_hash(variant, state, kStateBytes, scratchpad, digest)) return;
-
     #pragma unroll
     for (int i = 0; i < 32; ++i) state[i] = digest[i];
     #pragma unroll
@@ -135,7 +307,6 @@ __global__ void cryptonight_setup_stage(std::uint8_t* states,
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
     std::uint8_t* state = states + index * kStateBytes;
     std::uint8_t* scratchpad = scratchpads + index * static_cast<std::size_t>(cfg.page_size);
@@ -149,7 +320,6 @@ __global__ void cryptonight_loop_stage(std::size_t count,
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
     std::uint8_t* scratchpad = scratchpads + index * static_cast<std::size_t>(cfg.page_size);
     cryptonight::split_memory_loop<VariantIndex>(scratchpad, contexts[index]);
@@ -163,13 +333,11 @@ __global__ void cryptonight_final_stage(std::uint8_t* states,
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
     std::uint8_t* state = states + index * kStateBytes;
     std::uint8_t* scratchpad = scratchpads + index * static_cast<std::size_t>(cfg.page_size);
     std::uint8_t digest[32];
     cryptonight::split_finalize<VariantIndex>(scratchpad, contexts[index], digest);
-
     #pragma unroll
     for (int i = 0; i < 32; ++i) state[i] = digest[i];
     #pragma unroll
@@ -213,15 +381,11 @@ CnGeometry autotune_cn_variant(cudaStream_t stream,
     float best_setup_ms = 1.0e30F;
     float best_loop_ms = 1.0e30F;
     float best_final_ms = 1.0e30F;
-
     auto reset_states = [&]() {
-        check_cuda(cudaMemsetAsync(states,
-                                   static_cast<int>(0x31U + VariantIndex * 17U),
-                                   sample_count * kStateBytes,
-                                   stream),
+        check_cuda(cudaMemsetAsync(states, static_cast<int>(0x31U + VariantIndex * 17U),
+                                   sample_count * kStateBytes, stream),
                    "cudaMemsetAsync CryptoNight autotune states failed");
     };
-
     for (const int threads : candidates) {
         if (threads > max_threads) continue;
         reset_states();
@@ -231,12 +395,8 @@ CnGeometry autotune_cn_variant(cudaStream_t stream,
             cryptonight_setup_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
             check_cuda(cudaGetLastError(), "CryptoNight autotune setup launch failed");
         });
-        if (ms < best_setup_ms) {
-            best_setup_ms = ms;
-            best.setup_threads = threads;
-        }
+        if (ms < best_setup_ms) { best_setup_ms = ms; best.setup_threads = threads; }
     }
-
     for (const int threads : candidates) {
         if (threads > max_threads) continue;
         reset_states();
@@ -250,12 +410,8 @@ CnGeometry autotune_cn_variant(cudaStream_t stream,
             cryptonight_loop_stage<VariantIndex><<<blocks, threads, 0, stream>>>(sample_count, scratchpads, contexts);
             check_cuda(cudaGetLastError(), "CryptoNight autotune loop launch failed");
         });
-        if (ms < best_loop_ms) {
-            best_loop_ms = ms;
-            best.loop_threads = threads;
-        }
+        if (ms < best_loop_ms) { best_loop_ms = ms; best.loop_threads = threads; }
     }
-
     for (const int threads : candidates) {
         if (threads > max_threads) continue;
         reset_states();
@@ -273,17 +429,16 @@ CnGeometry autotune_cn_variant(cudaStream_t stream,
             cryptonight_final_stage<VariantIndex><<<blocks, threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
             check_cuda(cudaGetLastError(), "CryptoNight autotune final launch failed");
         });
-        if (ms < best_final_ms) {
-            best_final_ms = ms;
-            best.final_threads = threads;
-        }
+        if (ms < best_final_ms) { best_final_ms = ms; best.final_threads = threads; }
     }
-
+    best.setup_ms = best_setup_ms;
+    best.loop_ms = best_loop_ms;
+    best.final_ms = best_final_ms;
     std::cout << "[CUDA autotune] " << cfg.name
               << " | sample=" << sample_count
-              << " | setup=" << best.setup_threads << " (" << best_setup_ms << " ms)"
-              << " | loop=" << best.loop_threads << " (" << best_loop_ms << " ms)"
-              << " | final=" << best.final_threads << " (" << best_final_ms << " ms)\n";
+              << " | setup=" << best.setup_threads << " (" << best.setup_ms << " ms)"
+              << " | loop=" << best.loop_threads << " (" << best.loop_ms << " ms)"
+              << " | final=" << best.final_threads << " (" << best.final_ms << " ms)\n";
     return best;
 }
 
@@ -297,24 +452,24 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
     std::array<CnGeometry, 6> result{};
     cudaDeviceProp props{};
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CryptoNight autotune failed");
-
     std::size_t sample_count = std::max<std::size_t>(32U,
         static_cast<std::size_t>(std::max(1, props.multiProcessorCount)) * 2U);
     sample_count = std::min(sample_count, batch_size);
     sample_count = std::max<std::size_t>(1U, sample_count);
 
-    std::cout << "[GPU " << device_id << "] empirical CryptoNight geometry autotune starting"
-              << " | sample=" << sample_count
-              << " | candidates=32,64,128,256\n";
+    if (load_cn_geometry_cache(device_id, props, batch_size, sample_count, result)) return result;
 
+    std::cout << "[GPU " << device_id << "] empirical CryptoNight geometry autotune starting"
+              << " | sample=" << sample_count << " | candidates=32,64,128,256\n";
     result[0] = autotune_cn_variant<0>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
     result[1] = autotune_cn_variant<1>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
     result[2] = autotune_cn_variant<2>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
     result[3] = autotune_cn_variant<3>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
     result[4] = autotune_cn_variant<4>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
     result[5] = autotune_cn_variant<5>(stream, states, sample_count, scratchpads, contexts, props.maxThreadsPerBlock);
-
     std::cout << "[GPU " << device_id << "] empirical CryptoNight geometry autotune complete\n";
+    print_cn_phase_measurements(device_id, result, sample_count, "fresh-autotune");
+    save_cn_geometry_cache(device_id, props, batch_size, sample_count, result);
     return result;
 }
 
@@ -332,7 +487,6 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
     const int setup_blocks = static_cast<int>((count + setup_threads - 1) / setup_threads);
     const int loop_blocks = static_cast<int>((count + loop_threads - 1) / loop_threads);
     const int final_blocks = static_cast<int>((count + final_threads - 1) / final_threads);
-
     cryptonight_setup_stage<VariantIndex><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight setup launch failed");
     cryptonight_loop_stage<VariantIndex><<<loop_blocks, loop_threads, 0, stream>>>(count, scratchpads, contexts);
@@ -360,9 +514,7 @@ void launch_split_cryptonight(cudaStream_t stream,
     }
 }
 
-__global__ void keccak512_validation_kernel(const std::uint8_t* input,
-                                            std::size_t length,
-                                            std::uint8_t* output)
+__global__ void keccak512_validation_kernel(const std::uint8_t* input, std::size_t length, std::uint8_t* output)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     std::uint8_t digest[64];
@@ -371,9 +523,7 @@ __global__ void keccak512_validation_kernel(const std::uint8_t* input,
     for (int i = 0; i < 64; ++i) output[i] = digest[i];
 }
 
-__global__ void cubehash512_validation_kernel(const std::uint8_t* input,
-                                              std::size_t length,
-                                              std::uint8_t* output)
+__global__ void cubehash512_validation_kernel(const std::uint8_t* input, std::size_t length, std::uint8_t* output)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     std::uint8_t digest[64];
@@ -391,13 +541,10 @@ __global__ void collect_candidates(const std::uint32_t* nonces,
 {
     const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= count) return;
-
     const std::uint8_t* hash = states + index * kStateBytes;
     if (!hash_meets_target(hash, job->target_le)) return;
-
     const unsigned int slot = atomicAdd(candidate_count, 1U);
     if (slot >= kMaxCandidates) return;
-
     candidates[slot].nonce = nonces[index];
     for (int i = 0; i < 32; ++i) candidates[slot].hash[i] = hash[i];
 }
@@ -407,32 +554,21 @@ Hash512 run_validation_kernel(int device_id,
                               std::size_t length,
                               bool use_keccak)
 {
-    if (input == nullptr || length == 0) {
+    if (input == nullptr || length == 0)
         throw std::invalid_argument("CUDA core validation input must not be empty");
-    }
-
     check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
     std::uint8_t* d_input = nullptr;
     std::uint8_t* d_output = nullptr;
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_input), length),
-               "cudaMalloc validation input failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_input), length), "cudaMalloc validation input failed");
     try {
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_output), 64),
-                   "cudaMalloc validation output failed");
-        check_cuda(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice),
-                   "cudaMemcpy validation input failed");
-
-        if (use_keccak) {
-            keccak512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
-        } else {
-            cubehash512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
-        }
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_output), 64), "cudaMalloc validation output failed");
+        check_cuda(cudaMemcpy(d_input, input, length, cudaMemcpyHostToDevice), "cudaMemcpy validation input failed");
+        if (use_keccak) keccak512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
+        else cubehash512_validation_kernel<<<1, 1>>>(d_input, length, d_output);
         check_cuda(cudaGetLastError(), "CUDA core validation launch failed");
         check_cuda(cudaDeviceSynchronize(), "CUDA core validation synchronize failed");
-
         Hash512 out{};
-        check_cuda(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost),
-                   "cudaMemcpy validation output failed");
+        check_cuda(cudaMemcpy(out.data(), d_output, out.size(), cudaMemcpyDeviceToHost), "cudaMemcpy validation output failed");
         cudaFree(d_output);
         cudaFree(d_input);
         return out;
@@ -463,39 +599,22 @@ struct BatchEngine::Impl {
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
-        : device_id(id),
-          batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
-          fallback_threads(std::max(1u, requested_fallback_threads)),
-          host_states(batch_size * kStateBytes)
+        : device_id(id), batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
+          fallback_threads(std::max(1u, requested_fallback_threads)), host_states(batch_size * kStateBytes)
     {
         if (batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
-        check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
-                   "cudaStreamCreateWithFlags failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)),
-                   "cudaMalloc job failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_size * sizeof(std::uint32_t)),
-                   "cudaMalloc nonce batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_size * kStateBytes),
-                   "cudaMalloc 512-bit state batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads),
-                              batch_size * kCnScratchpadStride),
-                   "cudaMalloc CryptoNight scratchpads failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts),
-                              batch_size * sizeof(cryptonight::SplitContext)),
-                   "cudaMalloc CryptoNight split contexts failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)),
-                   "cudaMalloc candidate buffer failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)),
-                   "cudaMalloc candidate counter failed");
-
+        check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_size * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_size * kStateBytes), "cudaMalloc 512-bit state batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), batch_size * kCnScratchpadStride), "cudaMalloc CryptoNight scratchpads failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_size * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
         try {
-            cn_geometries = autotune_cn_geometries(device_id,
-                                                   stream,
-                                                   d_states,
-                                                   batch_size,
-                                                   d_cn_scratchpads,
-                                                   d_cn_contexts);
+            cn_geometries = autotune_cn_geometries(device_id, stream, d_states, batch_size,
+                                                   d_cn_scratchpads, d_cn_contexts);
         } catch (const std::exception& e) {
             cn_geometries.fill(CnGeometry{});
             cudaGetLastError();
@@ -518,12 +637,8 @@ struct BatchEngine::Impl {
     }
 };
 
-BatchEngine::BatchEngine(int device_id,
-                         std::size_t batch_size,
-                         unsigned int fallback_threads)
-    : impl_(std::make_unique<Impl>(device_id, batch_size, fallback_threads))
-{
-}
+BatchEngine::BatchEngine(int device_id, std::size_t batch_size, unsigned int fallback_threads)
+    : impl_(std::make_unique<Impl>(device_id, batch_size, fallback_threads)) {}
 BatchEngine::~BatchEngine() = default;
 BatchEngine::BatchEngine(BatchEngine&&) noexcept = default;
 BatchEngine& BatchEngine::operator=(BatchEngine&&) noexcept = default;
@@ -536,8 +651,7 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     std::memcpy(device_job.target_le, job.target_le.data(), job.target_le.size());
     std::memcpy(device_job.stages, job.stages.data(), job.stages.size());
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
-    check_cuda(cudaMemcpyAsync(impl_->d_job, &device_job, sizeof(device_job),
-                               cudaMemcpyHostToDevice, impl_->stream),
+    check_cuda(cudaMemcpyAsync(impl_->d_job, &device_job, sizeof(device_job), cudaMemcpyHostToDevice, impl_->stream),
                "cudaMemcpyAsync job failed");
     check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize job failed");
     impl_->job_loaded = true;
@@ -546,73 +660,41 @@ void BatchEngine::upload_job(const JobDescriptor& job)
 std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 {
     if (!impl_->job_loaded) throw std::runtime_error("CUDA batch scan requested before upload_job");
-    if (!hash_pipeline_ready()) {
-        throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
-    }
-
+    if (!hash_pipeline_ready()) throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
-    check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream),
-               "cudaMemsetAsync candidate counter failed");
-
+    check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream), "cudaMemsetAsync candidate counter failed");
     constexpr int core_threads = 256;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-    initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
-                                                                           impl_->d_nonces,
-                                                                           impl_->batch_size);
+    initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
-
     for (int stage_index = 0; stage_index < 18; ++stage_index) {
         const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
         const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
         const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
-
         if (is_cn) {
-            if (algorithm >= cryptonight::kVariantConfigs.size()) {
-                throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
-            }
-            launch_split_cryptonight(impl_->stream,
-                                     impl_->d_states,
-                                     impl_->batch_size,
-                                     algorithm,
-                                     impl_->d_cn_scratchpads,
-                                     impl_->d_cn_contexts,
-                                     impl_->cn_geometries[algorithm]);
+            if (algorithm >= cryptonight::kVariantConfigs.size()) throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+            launch_split_cryptonight(impl_->stream, impl_->d_states, impl_->batch_size, algorithm,
+                                     impl_->d_cn_scratchpads, impl_->d_cn_contexts, impl_->cn_geometries[algorithm]);
         } else {
-            if (!core::core512_implemented(algorithm)) {
-                throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
-            }
-            core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job,
-                                                                           impl_->d_nonces,
-                                                                           impl_->d_states,
-                                                                           impl_->batch_size,
-                                                                           stage_index,
-                                                                           algorithm);
+            if (!core::core512_implemented(algorithm)) throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
+            core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job, impl_->d_nonces,
+                                                                           impl_->d_states, impl_->batch_size,
+                                                                           stage_index, algorithm);
             check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
         }
     }
-
-    collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces,
-                                                                        impl_->d_states,
-                                                                        impl_->batch_size,
-                                                                        impl_->d_job,
-                                                                        impl_->d_candidates,
-                                                                        impl_->d_candidate_count);
+    collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
+                                                                        impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
     check_cuda(cudaGetLastError(), "collect_candidates launch failed");
-
     unsigned int count = 0;
-    check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count),
-                               cudaMemcpyDeviceToHost, impl_->stream),
+    check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count), cudaMemcpyDeviceToHost, impl_->stream),
                "cudaMemcpyAsync candidate count failed");
     check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize scan failed");
-
     count = std::min<unsigned int>(count, static_cast<unsigned int>(kMaxCandidates));
     if (count == 0) return {};
-
     std::vector<DeviceCandidate> raw(count);
-    check_cuda(cudaMemcpy(raw.data(), impl_->d_candidates,
-                          count * sizeof(DeviceCandidate), cudaMemcpyDeviceToHost),
+    check_cuda(cudaMemcpy(raw.data(), impl_->d_candidates, count * sizeof(DeviceCandidate), cudaMemcpyDeviceToHost),
                "cudaMemcpy candidates failed");
-
     std::vector<Candidate> out;
     out.reserve(count);
     for (const auto& item : raw) {
@@ -627,104 +709,67 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, BatchProfile& profile)
 {
     if (!impl_->job_loaded) throw std::runtime_error("CUDA profiled batch scan requested before upload_job");
-    if (!hash_pipeline_ready()) {
-        throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
-    }
-
+    if (!hash_pipeline_ready()) throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
     profile = BatchProfile{};
     profile.hashes = impl_->batch_size;
-
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
-    check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream),
-               "cudaMemsetAsync candidate counter failed");
-
+    check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream), "cudaMemsetAsync candidate counter failed");
     constexpr int core_threads = 256;
     const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-
     cudaEvent_t total_start{}, total_stop{}, section_start{}, section_stop{};
     check_cuda(cudaEventCreate(&total_start), "cudaEventCreate total_start failed");
     check_cuda(cudaEventCreate(&total_stop), "cudaEventCreate total_stop failed");
     check_cuda(cudaEventCreate(&section_start), "cudaEventCreate section_start failed");
     check_cuda(cudaEventCreate(&section_stop), "cudaEventCreate section_stop failed");
-
     auto elapsed = [&](float& out) {
         check_cuda(cudaEventRecord(section_stop, impl_->stream), "cudaEventRecord section stop failed");
         check_cuda(cudaEventSynchronize(section_stop), "cudaEventSynchronize section stop failed");
         check_cuda(cudaEventElapsedTime(&out, section_start, section_stop), "cudaEventElapsedTime failed");
     };
-
     try {
         check_cuda(cudaEventRecord(total_start, impl_->stream), "cudaEventRecord total start failed");
         check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord nonce start failed");
-        initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce,
-                                                                               impl_->d_nonces,
-                                                                               impl_->batch_size);
+        initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
         check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
         elapsed(profile.nonce_init_ms);
-
         for (int stage_index = 0; stage_index < 18; ++stage_index) {
             const std::uint8_t stage = impl_->host_job.stages[static_cast<std::size_t>(stage_index)];
             const bool is_cn = (stage & ghostrider::kCryptoNightStageFlag) != 0;
             const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
-
             check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord stage start failed");
             if (is_cn) {
-                if (algorithm >= cryptonight::kVariantConfigs.size()) {
-                    throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
-                }
-                launch_split_cryptonight(impl_->stream,
-                                         impl_->d_states,
-                                         impl_->batch_size,
-                                         algorithm,
-                                         impl_->d_cn_scratchpads,
-                                         impl_->d_cn_contexts,
-                                         impl_->cn_geometries[algorithm]);
+                if (algorithm >= cryptonight::kVariantConfigs.size()) throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+                launch_split_cryptonight(impl_->stream, impl_->d_states, impl_->batch_size, algorithm,
+                                         impl_->d_cn_scratchpads, impl_->d_cn_contexts, impl_->cn_geometries[algorithm]);
             } else {
-                if (!core::core512_implemented(algorithm)) {
-                    throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
-                }
-                core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job,
-                                                                               impl_->d_nonces,
-                                                                               impl_->d_states,
-                                                                               impl_->batch_size,
-                                                                               stage_index,
-                                                                               algorithm);
+                if (!core::core512_implemented(algorithm)) throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
+                core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job, impl_->d_nonces,
+                                                                               impl_->d_states, impl_->batch_size,
+                                                                               stage_index, algorithm);
                 check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
             }
-
             float stage_ms = 0.0F;
             elapsed(stage_ms);
             profile.stages[static_cast<std::size_t>(stage_index)] = StageTiming{stage_index, stage, stage_ms};
             profile.stage_total_ms += stage_ms;
         }
-
         check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord candidate start failed");
-        collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces,
-                                                                            impl_->d_states,
-                                                                            impl_->batch_size,
-                                                                            impl_->d_job,
-                                                                            impl_->d_candidates,
-                                                                            impl_->d_candidate_count);
+        collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
+                                                                            impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
         check_cuda(cudaGetLastError(), "collect_candidates launch failed");
         elapsed(profile.candidate_ms);
-
         check_cuda(cudaEventRecord(total_stop, impl_->stream), "cudaEventRecord total stop failed");
         check_cuda(cudaEventSynchronize(total_stop), "cudaEventSynchronize total stop failed");
-        check_cuda(cudaEventElapsedTime(&profile.total_gpu_ms, total_start, total_stop),
-                   "cudaEventElapsedTime total failed");
-
+        check_cuda(cudaEventElapsedTime(&profile.total_gpu_ms, total_start, total_stop), "cudaEventElapsedTime total failed");
         unsigned int count = 0;
-        check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count),
-                                   cudaMemcpyDeviceToHost, impl_->stream),
+        check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count), cudaMemcpyDeviceToHost, impl_->stream),
                    "cudaMemcpyAsync candidate count failed");
         check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize profiled scan failed");
-
         count = std::min<unsigned int>(count, static_cast<unsigned int>(kMaxCandidates));
         std::vector<Candidate> out;
         if (count != 0) {
             std::vector<DeviceCandidate> raw(count);
-            check_cuda(cudaMemcpy(raw.data(), impl_->d_candidates,
-                                  count * sizeof(DeviceCandidate), cudaMemcpyDeviceToHost),
+            check_cuda(cudaMemcpy(raw.data(), impl_->d_candidates, count * sizeof(DeviceCandidate), cudaMemcpyDeviceToHost),
                        "cudaMemcpy candidates failed");
             out.reserve(count);
             for (const auto& item : raw) {
@@ -734,7 +779,6 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
                 out.push_back(candidate);
             }
         }
-
         cudaEventDestroy(section_stop);
         cudaEventDestroy(section_start);
         cudaEventDestroy(total_stop);
@@ -751,10 +795,7 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
 
 int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
-bool BatchEngine::hash_pipeline_ready() const noexcept
-{
-    return full_ghostrider_cuda_coverage();
-}
+bool BatchEngine::hash_pipeline_ready() const noexcept { return full_ghostrider_cuda_coverage(); }
 
 Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length)
 {
@@ -786,9 +827,8 @@ std::vector<DeviceInfo> enumerate_devices()
     for (int device = 0; device < count; ++device) {
         cudaDeviceProp props{};
         check_cuda(cudaGetDeviceProperties(&props, device), "cudaGetDeviceProperties failed");
-        devices.push_back(DeviceInfo{device, props.major, props.minor,
-                                     props.totalGlobalMem, props.multiProcessorCount,
-                                     props.warpSize});
+        devices.push_back(DeviceInfo{device, props.major, props.minor, props.totalGlobalMem,
+                                     props.multiProcessorCount, props.warpSize});
     }
     return devices;
 }
@@ -798,8 +838,7 @@ void print_devices()
     for (const auto& info : enumerate_devices()) {
         cudaDeviceProp props{};
         check_cuda(cudaGetDeviceProperties(&props, info.id), "cudaGetDeviceProperties failed");
-        const double memory_gib = static_cast<double>(info.total_memory) /
-                                  (1024.0 * 1024.0 * 1024.0);
+        const double memory_gib = static_cast<double>(info.total_memory) / (1024.0 * 1024.0 * 1024.0);
         std::cout << "GPU " << info.id << ": " << props.name
                   << " | CC " << info.compute_major << '.' << info.compute_minor
                   << " | SMs " << info.multiprocessors
