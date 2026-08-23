@@ -21,11 +21,14 @@ struct BatchEngine::Impl {
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
-        : device_id(id), batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
-          batch_capacity(batch_size),
-          fallback_threads(std::max(1u, requested_fallback_threads)), host_states(batch_capacity * kStateBytes)
+        : device_id(id),
+          batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
+          batch_capacity(std::min(requested_size, cryptonight::kInitialBatchCapacity)),
+          fallback_threads(std::max(1u, requested_fallback_threads)),
+          host_states(batch_capacity * kStateBytes)
     {
-        if (batch_capacity == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
+        if (batch_size == 0 || batch_capacity == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
+        if (batch_capacity < batch_size) batch_capacity = batch_size;
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
@@ -62,6 +65,10 @@ struct BatchEngine::Impl {
                 std::cerr << "[GPU " << device_id << "] ignoring invalid YERBAS_CUDA_ACTIVE_BATCH="
                           << active_batch_env << '\n';
             }
+        } else if (batch_capacity > batch_size) {
+            std::cout << "[GPU " << device_id << "] CUDA batch tuning headroom"
+                      << " | active=" << batch_size
+                      << " | capacity=" << batch_capacity << '\n';
         }
     }
 
