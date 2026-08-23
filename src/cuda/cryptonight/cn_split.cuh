@@ -60,18 +60,22 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
     return true;
 }
 
-template <std::size_t AddressMask>
+template <std::size_t AddressMask, bool UseTTable = false>
 __device__ __forceinline__ void split_memory_iteration(std::uint8_t* scratchpad,
                                                         std::uint8_t a[16],
                                                         std::uint8_t b[32],
                                                         std::uint8_t c[16],
                                                         std::uint8_t t[16],
-                                                        std::uint64_t tweak)
+                                                        std::uint64_t tweak,
+                                                        const std::uint32_t* aes_tables = nullptr)
 {
     std::size_t j = cn_index_masked(a, AddressMask);
     std::uint8_t* slot = scratchpad + j * 16U;
 
-    aes_single_round(slot, c, a);
+    if constexpr (UseTTable)
+        aes_single_round_ttable(slot, c, a, aes_tables);
+    else
+        aes_single_round(slot, c, a);
     reinterpret_cast<std::uint64_t*>(slot)[0] =
         reinterpret_cast<const std::uint64_t*>(c)[0] ^ reinterpret_cast<const std::uint64_t*>(b)[0];
     reinterpret_cast<std::uint64_t*>(slot)[1] =
@@ -101,9 +105,10 @@ __device__ __forceinline__ void split_memory_iteration(std::uint8_t* scratchpad,
     copy16(b, c);
 }
 
-template <std::uint8_t VariantIndex, int Unroll>
+template <std::uint8_t VariantIndex, int Unroll, bool UseTTable = false>
 __device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad,
-                                                        const SplitContext& ctx)
+                                                        const SplitContext& ctx,
+                                                        const std::uint32_t* aes_tables = nullptr)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     static_assert(Unroll == 1 || Unroll == 2 || Unroll == 4, "unsupported CryptoNight loop unroll");
@@ -124,7 +129,7 @@ __device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad
     for (std::uint32_t i = 0; i < cfg.iterations; i += Unroll) {
         #pragma unroll
         for (int u = 0; u < Unroll; ++u)
-            split_memory_iteration<address_mask>(scratchpad, a, b, c, t, tweak);
+            split_memory_iteration<address_mask, UseTTable>(scratchpad, a, b, c, t, tweak, aes_tables);
     }
 }
 
@@ -135,11 +140,12 @@ __device__ __forceinline__ void split_memory_loop_tuned(std::uint8_t* scratchpad
 // architectures where the added register pressure does not reduce occupancy
 // too far. Production selects this path only after parity validation and an
 // empirical per-device/per-variant benchmark.
-template <std::uint8_t VariantIndex, int Unroll>
+template <std::uint8_t VariantIndex, int Unroll, bool UseTTable = false>
 __device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scratchpad0,
                                                              const SplitContext& ctx0,
                                                              std::uint8_t* scratchpad1,
-                                                             const SplitContext& ctx1)
+                                                             const SplitContext& ctx1,
+                                                             const std::uint32_t* aes_tables = nullptr)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     static_assert(Unroll == 1 || Unroll == 2 || Unroll == 4, "unsupported CryptoNight loop unroll");
@@ -162,8 +168,8 @@ __device__ __forceinline__ void split_memory_loop_dual_tuned(std::uint8_t* scrat
     for (std::uint32_t i = 0; i < cfg.iterations; i += Unroll) {
         #pragma unroll
         for (int u = 0; u < Unroll; ++u) {
-            split_memory_iteration<address_mask>(scratchpad0, a0, b0, c0, t0, tweak0);
-            split_memory_iteration<address_mask>(scratchpad1, a1, b1, c1, t1, tweak1);
+            split_memory_iteration<address_mask, UseTTable>(scratchpad0, a0, b0, c0, t0, tweak0, aes_tables);
+            split_memory_iteration<address_mask, UseTTable>(scratchpad1, a1, b1, c1, t1, tweak1, aes_tables);
         }
     }
 }
@@ -172,7 +178,7 @@ template <std::uint8_t VariantIndex>
 __device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
                                                   const SplitContext& ctx)
 {
-    split_memory_loop_tuned<VariantIndex, 1>(scratchpad, ctx);
+    split_memory_loop_tuned<VariantIndex, 1, false>(scratchpad, ctx, nullptr);
 }
 
 template <std::uint8_t VariantIndex, bool UseTTable = false>
