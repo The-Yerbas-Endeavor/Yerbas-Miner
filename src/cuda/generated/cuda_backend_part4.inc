@@ -85,8 +85,16 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
     }
 }
 
+void BatchEngine::set_active_batch_size(std::size_t batch_size)
+{
+    if (batch_size == 0 || batch_size > impl_->batch_capacity)
+        throw std::out_of_range("CUDA active batch size exceeds allocated capacity");
+    impl_->batch_size = batch_size;
+}
+
 int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
+std::size_t BatchEngine::batch_capacity() const noexcept { return impl_->batch_capacity; }
 bool BatchEngine::hash_pipeline_ready() const noexcept { return full_ghostrider_cuda_coverage(); }
 
 Hash512 keccak512_reference_stage(int device_id, const std::uint8_t* input, std::size_t length)
