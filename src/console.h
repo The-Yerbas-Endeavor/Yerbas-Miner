@@ -5,6 +5,7 @@
 #include <mutex>
 #include <streambuf>
 #include <string>
+#include <unordered_map>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -78,38 +79,60 @@ protected:
     int overflow(int ch) override
     {
         if (ch == traits_type::eof()) return traits_type::not_eof(ch);
-        std::lock_guard<std::mutex> lock(mutex_);
+        auto& pending = thread_pending()[this];
         const char c = static_cast<char>(ch);
         if (c == '\n') {
-            emit_line(true);
+            emit_line(pending, true);
         } else {
-            pending_.push_back(c);
+            pending.push_back(c);
         }
         return ch;
     }
 
+    std::streamsize xsputn(const char* s, std::streamsize count) override
+    {
+        auto& pending = thread_pending()[this];
+        for (std::streamsize i = 0; i < count; ++i) {
+            if (s[i] == '\n') emit_line(pending, true);
+            else pending.push_back(s[i]);
+        }
+        return count;
+    }
+
     int sync() override
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!pending_.empty()) emit_line(false);
+        auto& pending = thread_pending()[this];
+        if (!pending.empty()) emit_line(pending, false);
+        std::lock_guard<std::mutex> lock(output_mutex());
         return destination_->pubsync();
     }
 
 private:
-    void emit_line(bool newline)
+    static std::unordered_map<const LineColorBuf*, std::string>& thread_pending()
     {
-        const char* color = enabled_ ? color_for_line(pending_) : nullptr;
+        static thread_local std::unordered_map<const LineColorBuf*, std::string> buffers;
+        return buffers;
+    }
+
+    static std::mutex& output_mutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    void emit_line(std::string& pending, bool newline)
+    {
+        std::lock_guard<std::mutex> lock(output_mutex());
+        const char* color = enabled_ ? color_for_line(pending) : nullptr;
         if (color != nullptr) destination_->sputn(color, static_cast<std::streamsize>(std::char_traits<char>::length(color)));
-        if (!pending_.empty()) destination_->sputn(pending_.data(), static_cast<std::streamsize>(pending_.size()));
+        if (!pending.empty()) destination_->sputn(pending.data(), static_cast<std::streamsize>(pending.size()));
         if (color != nullptr) destination_->sputn(kReset, 4);
         if (newline) destination_->sputc('\n');
-        pending_.clear();
+        pending.clear();
     }
 
     std::streambuf* destination_{nullptr};
     bool enabled_{false};
-    std::string pending_;
-    std::mutex mutex_;
 };
 
 } // namespace detail
