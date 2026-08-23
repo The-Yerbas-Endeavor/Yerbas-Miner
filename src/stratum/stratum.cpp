@@ -156,7 +156,7 @@ SocketHandle connect_tcp(const Endpoint& endpoint)
     }
     freeaddrinfo(result);
     if (connected == kInvalidSocket) {
-        throw std::runtime_error("Could not connect to " + endpoint_.host + ':' + std::to_string(endpoint_.port));
+        throw std::runtime_error("Could not connect to " + endpoint.host + ':' + std::to_string(endpoint.port) + " (" + socket_error_string() + ')');
     }
     return connected;
 }
@@ -662,14 +662,10 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
             if (!submit_share(socket_value, task.extranonce2, candidate.nonce, source)) return false;
         }
 
-        // Immediately relaunch this GPU without waiting for any other GPU or CPU.
         launch_task(task);
     }
 
     if (job_changed) {
-        // An engine cannot be re-uploaded while its CUDA scan is still using its
-        // stream. Drain only on a real job transition; normal batches never wait
-        // for sibling GPUs.
         for (auto& task : tasks) {
             if (!task.active) continue;
             const auto candidates = task.future.get();
@@ -687,7 +683,6 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         return true;
     }
 
-    // Keep the dispatcher responsive without forcing a round barrier.
     bool any_ready = false;
     for (auto& task : tasks) {
         if (task.active && task.future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
