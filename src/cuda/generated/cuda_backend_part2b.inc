@@ -1,5 +1,3 @@
-        if (ms < best_loop_ms) { best_loop_ms = ms; best.loop_threads = threads; }
-    }
     for (const int threads : candidates) {
         if (threads > max_threads) continue;
         reset_states();
