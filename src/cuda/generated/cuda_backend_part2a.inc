@@ -50,11 +50,12 @@ bool validate_aes_ttable_backend(cudaStream_t stream)
 
 constexpr int kMaxLoopTuneDevices = 32;
 constexpr int kCnLoopCacheRevision = 1;
-constexpr int kCnLoopAesCacheRevision = 1;
+constexpr int kCnLoopAesCacheRevision = 2;
 static std::array<std::array<int, 6>, kMaxLoopTuneDevices> g_cn_loop_unroll{};
 static std::array<bool, kMaxLoopTuneDevices> g_cn_loop_ready{};
 static std::array<std::array<bool, 6>, kMaxLoopTuneDevices> g_cn_loop_ttable{};
 static std::array<bool, kMaxLoopTuneDevices> g_cn_loop_aes_ready{};
+static std::array<std::array<bool, 6>, kMaxLoopTuneDevices> g_cn_loop_runtime_reported{};
 
 template <std::uint8_t VariantIndex, int Unroll, bool UseTTable = false>
 __global__ void cryptonight_loop_stage_tuned(std::size_t count,
@@ -115,6 +116,16 @@ void launch_cn_loop_mode(cudaStream_t stream,
     if (cudaGetDevice(&device_id) == cudaSuccess && device_id >= 0 && device_id < kMaxLoopTuneDevices &&
         g_cn_loop_aes_ready[device_id]) {
         use_ttable = g_cn_loop_ttable[device_id][VariantIndex];
+        if (!g_cn_loop_runtime_reported[device_id][VariantIndex]) {
+            g_cn_loop_runtime_reported[device_id][VariantIndex] = true;
+            std::cout << "[CUDA CN runtime] GPU " << device_id
+                      << " | " << cryptonight::config_value(VariantIndex).name
+                      << " | loop_aes=" << (use_ttable ? "ttable" : "portable")
+                      << " | unroll=" << mode
+                      << " | dual=off"
+                      << " | threads=" << threads
+                      << " | hashes=" << count << '\n';
+        }
     } else if (device_id < 0 || device_id >= kMaxLoopTuneDevices) {
         cudaGetLastError();
     }
@@ -365,44 +376,45 @@ template <std::uint8_t VariantIndex>
 void autotune_cn_loop_aes_variant(int device_id,
                                   cudaStream_t stream,
                                   std::uint8_t* states,
-                                  std::size_t sample_count,
+                                  std::size_t tune_count,
                                   std::uint8_t* scratchpads,
                                   cryptonight::SplitContext* contexts,
                                   const CnGeometry& g)
 {
     const int unroll = g_cn_loop_ready[device_id] ? g_cn_loop_unroll[device_id][VariantIndex] : 1;
-    const int setup_blocks = static_cast<int>((sample_count + static_cast<std::size_t>(g.setup_threads) - 1U) /
+    const int setup_blocks = static_cast<int>((tune_count + static_cast<std::size_t>(g.setup_threads) - 1U) /
                                               static_cast<std::size_t>(g.setup_threads));
-    const int loop_blocks = static_cast<int>((sample_count + static_cast<std::size_t>(g.loop_threads) - 1U) /
+    const int loop_blocks = static_cast<int>((tune_count + static_cast<std::size_t>(g.loop_threads) - 1U) /
                                              static_cast<std::size_t>(g.loop_threads));
     auto prepare = [&]() {
         check_cuda(cudaMemsetAsync(states, static_cast<int>(0x31U + VariantIndex * 17U),
-                                   sample_count * kStateBytes, stream),
+                                   tune_count * kStateBytes, stream),
                    "cudaMemsetAsync loop AES autotune states failed");
         if (g.aes_backend == 1)
-            cryptonight_setup_stage<VariantIndex, true><<<setup_blocks, g.setup_threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
+            cryptonight_setup_stage<VariantIndex, true><<<setup_blocks, g.setup_threads, 0, stream>>>(states, tune_count, scratchpads, contexts);
         else
-            cryptonight_setup_stage<VariantIndex, false><<<setup_blocks, g.setup_threads, 0, stream>>>(states, sample_count, scratchpads, contexts);
+            cryptonight_setup_stage<VariantIndex, false><<<setup_blocks, g.setup_threads, 0, stream>>>(states, tune_count, scratchpads, contexts);
         check_cuda(cudaGetLastError(), "loop AES autotune setup failed");
     };
 
     prepare();
     const float portable_ms = time_cuda_phase(stream, [&]() {
         launch_cn_loop_backend<VariantIndex>(stream, unroll, false, loop_blocks, g.loop_threads,
-                                             sample_count, scratchpads, contexts);
+                                             tune_count, scratchpads, contexts);
         check_cuda(cudaGetLastError(), "loop AES portable benchmark failed");
     });
     prepare();
     const float ttable_ms = time_cuda_phase(stream, [&]() {
         launch_cn_loop_backend<VariantIndex>(stream, unroll, true, loop_blocks, g.loop_threads,
-                                             sample_count, scratchpads, contexts);
+                                             tune_count, scratchpads, contexts);
         check_cuda(cudaGetLastError(), "loop AES T-table benchmark failed");
     });
     const bool parity_ok = validate_cn_loop_aes_variant<VariantIndex>(stream, states, scratchpads, contexts, g, unroll);
     const bool use_ttable = parity_ok && ttable_ms < portable_ms * 0.98F;
     g_cn_loop_ttable[device_id][VariantIndex] = use_ttable;
     std::cout << std::fixed << std::setprecision(3)
-              << "[CUDA loop AES autotune] " << cryptonight::config_value(VariantIndex).name
+              << "[CUDA loop AES full-batch] " << cryptonight::config_value(VariantIndex).name
+              << " | hashes=" << tune_count
               << " | parity=" << (parity_ok ? "PASS" : "FAIL")
               << " | portable=" << portable_ms << " ms"
               << " | ttable=" << ttable_ms << " ms"
@@ -422,16 +434,19 @@ void ensure_cn_loop_aes_modes(int device_id,
 {
     if (device_id < 0 || device_id >= kMaxLoopTuneDevices) return;
     if (load_cn_loop_aes_cache(device_id, props, batch_size)) return;
-    std::cout << "[GPU " << device_id << "] empirical CryptoNight loop AES autotune starting | portable vs shared-ttable\n";
-    autotune_cn_loop_aes_variant<0>(device_id, stream, states, sample_count, scratchpads, contexts, geometries[0]);
-    autotune_cn_loop_aes_variant<1>(device_id, stream, states, sample_count, scratchpads, contexts, geometries[1]);
-    autotune_cn_loop_aes_variant<2>(device_id, stream, states, sample_count, scratchpads, contexts, geometries[2]);
-    autotune_cn_loop_aes_variant<3>(device_id, stream, states, sample_count, scratchpads, contexts, geometries[3]);
-    autotune_cn_loop_aes_variant<4>(device_id, stream, states, sample_count, scratchpads, contexts, geometries[4]);
-    autotune_cn_loop_aes_variant<5>(device_id, stream, states, sample_count, scratchpads, contexts, geometries[5]);
+    const std::size_t tune_count = std::max<std::size_t>(1U, batch_size);
+    std::cout << "[GPU " << device_id << "] empirical CryptoNight loop AES production-batch autotune starting"
+              << " | hashes=" << tune_count << " | parity sample=" << 2U << '\n';
+    autotune_cn_loop_aes_variant<0>(device_id, stream, states, tune_count, scratchpads, contexts, geometries[0]);
+    autotune_cn_loop_aes_variant<1>(device_id, stream, states, tune_count, scratchpads, contexts, geometries[1]);
+    autotune_cn_loop_aes_variant<2>(device_id, stream, states, tune_count, scratchpads, contexts, geometries[2]);
+    autotune_cn_loop_aes_variant<3>(device_id, stream, states, tune_count, scratchpads, contexts, geometries[3]);
+    autotune_cn_loop_aes_variant<4>(device_id, stream, states, tune_count, scratchpads, contexts, geometries[4]);
+    autotune_cn_loop_aes_variant<5>(device_id, stream, states, tune_count, scratchpads, contexts, geometries[5]);
     g_cn_loop_aes_ready[device_id] = true;
-    std::cout << "[GPU " << device_id << "] empirical CryptoNight loop AES autotune complete\n";
+    std::cout << "[GPU " << device_id << "] empirical CryptoNight loop AES production-batch autotune complete\n";
     save_cn_loop_aes_cache(device_id, props, batch_size);
+    (void)sample_count;
 }
 
 void ensure_cn_loop_modes(int device_id,
@@ -473,8 +488,7 @@ void benchmark_aes_backend(cudaStream_t stream,
     auto reset_states = [&]() {
         check_cuda(cudaMemsetAsync(states,
                                    static_cast<int>(0x31U + VariantIndex * 17U),
-                                   sample_count * kStateBytes,
-                                   stream),
+                                   sample_count * kStateBytes, stream),
                    "cudaMemsetAsync AES backend benchmark states failed");
     };
     const int setup_blocks = static_cast<int>((sample_count + static_cast<std::size_t>(g.setup_threads) - 1U) /
