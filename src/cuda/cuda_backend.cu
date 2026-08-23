@@ -19,10 +19,17 @@
 #include "cuda/generated/cuda_backend_prod_tune.inc"
 #undef autotune_cn_geometries
 
-// Optional parity-gated cooperative loop probe. This wrapper calls the production
-// tuner first and only runs when YERBAS_CUDA_COOP_PROBE=1; production dispatch is
-// left unchanged until the cooperative measurements prove worthwhile.
+// Keep the original cooperative probe implementation available for its parity
+// kernels/helpers, but rename its wrapper so the architecture-neutral geometry
+// sweep below becomes the public autotune wrapper.
+#define autotune_cn_geometries autotune_cn_geometries_coop_fixed128
 #include "cuda/generated/cuda_backend_coop_probe.inc"
+#undef autotune_cn_geometries
+
+// Probe the parity-proven cooperative kernel at several block sizes and compare
+// against the actual tuned production single-hash path. Production dispatch is
+// still unchanged until the measurements establish a safe per-device selector.
+#include "cuda/generated/cuda_backend_coop_tune.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
