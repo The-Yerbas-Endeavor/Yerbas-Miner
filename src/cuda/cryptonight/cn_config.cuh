@@ -28,9 +28,6 @@ inline constexpr std::array<VariantConfig, 6> kVariantConfigs{{
     {5, "CN-TurtleLite", 262144U,   65536U,   8192U,  1},
 }};
 
-// Keep the host constexpr table above for host-side sizing and validation,
-// but return literal device-local configs when called from CUDA code. This
-// avoids taking a device pointer into std::array host storage.
 __host__ __device__ inline constexpr VariantConfig config_value(std::uint8_t index)
 {
     switch (index) {
@@ -57,30 +54,20 @@ inline constexpr std::size_t max_scratchpad_bytes()
     return value;
 }
 
-// Hardware-adaptive batch ceiling used by BatchEngine auto mode.
-//
-// GhostRider's largest CryptoNight variant consumes 2 MiB of scratchpad per
-// in-flight hash, so blindly using one fixed batch for every GPU either leaves
-// large cards under-filled or pushes smaller cards into memory pressure/OOM.
-// The auto ceiling combines two independent limits:
-//   1. roughly 70% of currently free VRAM, leaving headroom for the driver,
-//      desktop, CUDA contexts, states, and split-CN bookkeeping;
-//   2. 128 in-flight hashes per SM, which scales the working set with the
-//      amount of execution hardware instead of a specific GPU model.
-//
-// The result is aligned to 128 hashes and capped at 16384 for a conservative
-// first-generation autotuner. Explicit smaller user batches remain untouched
-// because BatchEngine still takes min(requested_size, this ceiling).
-inline std::size_t adaptive_batch_limit(int device_id)
+namespace detail {
+
+inline std::size_t adaptive_batch_from_budget(int device_id,
+                                              unsigned int memory_percent,
+                                              std::size_t hashes_per_sm,
+                                              std::size_t fallback)
 {
-    constexpr std::size_t kFallbackBatch = 1024;
     constexpr std::size_t kAlignment = 128;
     constexpr std::size_t kAbsoluteCap = 16384;
     constexpr std::size_t kPerHashOverhead = 4096;
 
     int previous_device = 0;
     const bool have_previous = cudaGetDevice(&previous_device) == cudaSuccess;
-    if (cudaSetDevice(device_id) != cudaSuccess) return kFallbackBatch;
+    if (cudaSetDevice(device_id) != cudaSuccess) return fallback;
 
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
@@ -89,13 +76,12 @@ inline std::size_t adaptive_batch_limit(int device_id)
     const bool props_ok = cudaGetDeviceProperties(&props, device_id) == cudaSuccess;
 
     if (have_previous && previous_device != device_id) cudaSetDevice(previous_device);
-
-    if (!memory_ok || !props_ok || props.multiProcessorCount <= 0) return kFallbackBatch;
+    if (!memory_ok || !props_ok || props.multiProcessorCount <= 0) return fallback;
 
     const std::size_t bytes_per_hash = max_scratchpad_bytes() + kPerHashOverhead;
-    const std::size_t memory_budget = (free_bytes * 70U) / 100U;
-    std::size_t memory_limit = memory_budget / bytes_per_hash;
-    std::size_t sm_limit = static_cast<std::size_t>(props.multiProcessorCount) * 128U;
+    const std::size_t memory_budget = (free_bytes * memory_percent) / 100U;
+    const std::size_t memory_limit = memory_budget / bytes_per_hash;
+    const std::size_t sm_limit = static_cast<std::size_t>(props.multiProcessorCount) * hashes_per_sm;
 
     std::size_t selected = memory_limit < sm_limit ? memory_limit : sm_limit;
     if (selected > kAbsoluteCap) selected = kAbsoluteCap;
@@ -104,11 +90,27 @@ inline std::size_t adaptive_batch_limit(int device_id)
     return selected;
 }
 
-// Compatibility token consumed by the existing BatchEngine constructor.
-// The constructor has its device id in scope as `id`, so this expands the old
-// fixed ceiling into the per-device adaptive ceiling without changing public
-// BatchEngine APIs. Keep this local to CUDA compilation until the next backend
-// API cleanup moves auto-batch selection into an explicit constructor helper.
+} // namespace detail
+
+// Production auto batch remains deliberately conservative. This value is also
+// the batch size used by the existing CryptoNight tuning/cache keys.
+inline std::size_t adaptive_batch_limit(int device_id)
+{
+    return detail::adaptive_batch_from_budget(device_id, 70U, 128U, 1024U);
+}
+
+// Allocate modest headroom above the production batch so active-batch throughput
+// experiments can move upward without reallocating buffers or invalidating the
+// already-proven CryptoNight tuning. The extra capacity still caps scratchpad
+// use at roughly 80% of currently free VRAM and 160 hashes/SM.
+inline std::size_t adaptive_batch_capacity(int device_id)
+{
+    const std::size_t production = adaptive_batch_limit(device_id);
+    const std::size_t capacity = detail::adaptive_batch_from_budget(device_id, 80U, 160U, production);
+    return capacity < production ? production : capacity;
+}
+
 #define kInitialMaxBatch adaptive_batch_limit(id)
+#define kInitialBatchCapacity adaptive_batch_capacity(id)
 
 } // namespace yerbas::cuda::cryptonight
