@@ -75,8 +75,9 @@ __global__ void cryptonight_loop_stage_coop4(std::size_t count, std::uint8_t* sc
     }
 }
 
-// v2 is intentionally parity-gated and kept out of production.  The next
-// iteration will complete the distributed lane handoff before it is trusted.
+// v2 keeps A/B/C distributed as one 32-bit word per lane.  The dependent
+// multiply remains in lane 0, but every subwarp collective is executed by all
+// four participating lanes and the complete updated A state is handed back.
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_coop4_v2(std::size_t count, std::uint8_t* scratchpads,
                                                 const cryptonight::SplitContext* contexts)
@@ -101,25 +102,35 @@ __global__ void cryptonight_loop_stage_coop4_v2(std::size_t count, std::uint8_t*
         reinterpret_cast<std::uint32_t*>(slot)[lane]=cw^bw;
         __syncwarp(mask);
         if(lane==0U)cryptonight::variant1_mutate(slot);
+
         const std::uint32_t c0=__shfl_sync(mask,cw,base), c1=__shfl_sync(mask,cw,base+1U);
         const std::uint32_t c2=__shfl_sync(mask,cw,base+2U), c3=__shfl_sync(mask,cw,base+3U);
-        std::uint32_t next_a=aw, next_b=cw;
+        const std::uint32_t old_a0=__shfl_sync(mask,aw,base), old_a1=__shfl_sync(mask,aw,base+1U);
+        const std::uint32_t old_a2=__shfl_sync(mask,aw,base+2U), old_a3=__shfl_sync(mask,aw,base+3U);
+
+        std::uint32_t next_a0=0U,next_a1=0U,next_a2=0U,next_a3=0U;
         if(lane==0U){
             const std::uint32_t j=c0&static_cast<std::uint32_t>(address_mask); std::uint8_t* slot2=scratch+static_cast<std::size_t>(j)*16U;
             const std::uint64_t cl=static_cast<std::uint64_t>(c0)|(static_cast<std::uint64_t>(c1)<<32U);
             const std::uint64_t t0=cryptonight::cn_load64_aligned(slot2),t1=cryptonight::cn_load64_aligned(slot2+8);
             const std::uint64_t lo=cl*t0,hi=__umul64hi(cl,t0);
-            const std::uint64_t olda0=static_cast<std::uint64_t>(__shfl_sync(mask,aw,base))|(static_cast<std::uint64_t>(__shfl_sync(mask,aw,base+1U))<<32U);
-            const std::uint64_t olda1=static_cast<std::uint64_t>(__shfl_sync(mask,aw,base+2U))|(static_cast<std::uint64_t>(__shfl_sync(mask,aw,base+3U))<<32U);
-            const std::uint64_t na0=olda0+hi,na1=olda1+lo; cryptonight::cn_store64_aligned(slot2,na0);cryptonight::cn_store64_aligned(slot2+8,na1^tweak);
+            const std::uint64_t olda0=static_cast<std::uint64_t>(old_a0)|(static_cast<std::uint64_t>(old_a1)<<32U);
+            const std::uint64_t olda1=static_cast<std::uint64_t>(old_a2)|(static_cast<std::uint64_t>(old_a3)<<32U);
+            const std::uint64_t na0=olda0+hi,na1=olda1+lo;
+            cryptonight::cn_store64_aligned(slot2,na0);cryptonight::cn_store64_aligned(slot2+8,na1^tweak);
             const std::uint64_t xa0=na0^t0,xa1=na1^t1;
-            next_a=static_cast<std::uint32_t>(xa0); next_b=c0;
+            next_a0=static_cast<std::uint32_t>(xa0);
+            next_a1=static_cast<std::uint32_t>(xa0>>32U);
+            next_a2=static_cast<std::uint32_t>(xa1);
+            next_a3=static_cast<std::uint32_t>(xa1>>32U);
         }
-        // Broadcast lane-0's partial handoff.  This version is expected to fail
-        // parity until all four words are handed back explicitly; the probe is
-        // intentionally non-production and correctness-gated.
-        next_a=__shfl_sync(mask,next_a,base); next_b=__shfl_sync(mask,next_b,base);
-        aw=next_a; bw=next_b;
+
+        const std::uint32_t out_a0=__shfl_sync(mask,next_a0,base);
+        const std::uint32_t out_a1=__shfl_sync(mask,next_a1,base);
+        const std::uint32_t out_a2=__shfl_sync(mask,next_a2,base);
+        const std::uint32_t out_a3=__shfl_sync(mask,next_a3,base);
+        aw=lane==0U?out_a0:lane==1U?out_a1:lane==2U?out_a2:out_a3;
+        bw=cw;
         __syncwarp(mask);
     }
 }
