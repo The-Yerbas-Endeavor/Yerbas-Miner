@@ -7,10 +7,6 @@
 
 namespace yerbas::cuda::cryptonight {
 
-// Persistent state carried between the three split CryptoNight kernels.
-// Keeping the 200-byte Keccak state and loop seeds in global memory lets the
-// scratchpad-fill, memory-hard loop, and collapse/finalizer kernels have much
-// smaller independent live ranges than the original monolithic slow_hash().
 struct alignas(16) SplitContext {
     std::uint8_t state[200];
     std::uint8_t a[16];
@@ -18,11 +14,12 @@ struct alignas(16) SplitContext {
     std::uint64_t tweak;
 };
 
-template <std::uint8_t VariantIndex>
+template <std::uint8_t VariantIndex, bool UseTTable = false>
 __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
                                             std::size_t length,
                                             std::uint8_t* scratchpad,
-                                            SplitContext& ctx)
+                                            SplitContext& ctx,
+                                            const std::uint32_t* aes_tables = nullptr)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     if (scratchpad == nullptr || input == nullptr || length < 43) return false;
@@ -41,8 +38,12 @@ __device__ __forceinline__ bool split_setup(const std::uint8_t* input,
 
     for (std::size_t i = 0; i < init_rounds; ++i) {
         #pragma unroll
-        for (int block = 0; block < 8; ++block)
-            aes_pseudo_round(text + block * 16, expanded);
+        for (int block = 0; block < 8; ++block) {
+            if constexpr (UseTTable)
+                aes_pseudo_round_ttable(text + block * 16, expanded, aes_tables);
+            else
+                aes_pseudo_round(text + block * 16, expanded);
+        }
         #pragma unroll 16
         for (int b = 0; b < 128; ++b)
             scratchpad[i * 128U + static_cast<std::size_t>(b)] = text[b];
@@ -112,10 +113,11 @@ __device__ __forceinline__ void split_memory_loop(std::uint8_t* scratchpad,
     }
 }
 
-template <std::uint8_t VariantIndex>
+template <std::uint8_t VariantIndex, bool UseTTable = false>
 __device__ __forceinline__ void split_finalize(std::uint8_t* scratchpad,
                                                SplitContext& ctx,
-                                               std::uint8_t out[32])
+                                               std::uint8_t out[32],
+                                               const std::uint32_t* aes_tables = nullptr)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     constexpr VariantConfig cfg = config_value(VariantIndex);
@@ -132,7 +134,10 @@ __device__ __forceinline__ void split_finalize(std::uint8_t* scratchpad,
         for (int block = 0; block < 8; ++block) {
             std::uint8_t* x = text + block * 16;
             xor16(x, scratchpad + i * 128U + static_cast<std::size_t>(block * 16));
-            aes_pseudo_round(x, expanded);
+            if constexpr (UseTTable)
+                aes_pseudo_round_ttable(x, expanded, aes_tables);
+            else
+                aes_pseudo_round(x, expanded);
         }
     }
 
