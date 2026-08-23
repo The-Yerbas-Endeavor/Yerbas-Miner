@@ -84,12 +84,13 @@ __global__ void cryptonight_loop_stage_coop4(std::size_t count,
                                                     cryptonight::aes_sbox(x1),
                                                     cryptonight::aes_sbox(x2),
                                                     cryptonight::aes_sbox(x3)) ^ key_word;
+        // All four lanes must execute each _sync shuffle in the subgroup mask.
+        const std::uint32_t c0 = __shfl_sync(mask, cword, group_base + 0U);
+        const std::uint32_t c1 = __shfl_sync(mask, cword, group_base + 1U);
+        const std::uint32_t c2 = __shfl_sync(mask, cword, group_base + 2U);
+        const std::uint32_t c3 = __shfl_sync(mask, cword, group_base + 3U);
 
         if (lane == 0U) {
-            const std::uint32_t c0 = __shfl_sync(mask, cword, group_base + 0U);
-            const std::uint32_t c1 = __shfl_sync(mask, cword, group_base + 1U);
-            const std::uint32_t c2 = __shfl_sync(mask, cword, group_base + 2U);
-            const std::uint32_t c3 = __shfl_sync(mask, cword, group_base + 3U);
             cryptonight::store32le_aligned(c + 0, c0);
             cryptonight::store32le_aligned(c + 4, c1);
             cryptonight::store32le_aligned(c + 8, c2);
@@ -189,6 +190,7 @@ void coop4_benchmark_variant(int device_id,
                              cryptonight::SplitContext* contexts,
                              const CnGeometry& g)
 {
+    (void)device_id;
     const bool parity = coop4_parity_probe<VariantIndex>(stream, g, states);
     if (!parity) {
         std::cout << "[CUDA CN coop4 probe] " << cryptonight::config_value(VariantIndex).name
