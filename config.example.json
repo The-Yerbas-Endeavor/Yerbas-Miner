@@ -9,7 +9,8 @@
     "cpu_enabled": true,
     "threads": 0,
     "hybrid": true,
-    "cpu_batch": 0
+    "cpu_batch": 0,
+    "cpu_tune": "off"
   },
   "gpu": {
     "enabled": true,
