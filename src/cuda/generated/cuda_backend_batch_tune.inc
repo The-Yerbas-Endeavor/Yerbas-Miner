@@ -122,6 +122,38 @@ void save_cuda_batch_cache(int device_id,
     }
 }
 
+template <std::uint8_t VariantIndex>
+void launch_cuda_batch_cn_variant(cudaStream_t stream,
+                                  std::uint8_t* states,
+                                  std::size_t count,
+                                  std::uint8_t* scratchpads,
+                                  cryptonight::SplitContext* contexts,
+                                  const CnGeometry& geometry)
+{
+    launch_split_cryptonight_variant_legacy<VariantIndex>(stream, states, count,
+                                                          scratchpads, contexts,
+                                                          geometry);
+}
+
+void launch_cuda_batch_cn_variant(std::uint8_t variant,
+                                  cudaStream_t stream,
+                                  std::uint8_t* states,
+                                  std::size_t count,
+                                  std::uint8_t* scratchpads,
+                                  cryptonight::SplitContext* contexts,
+                                  const CnGeometry& geometry)
+{
+    switch (variant) {
+    case 0: launch_cuda_batch_cn_variant<0>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 1: launch_cuda_batch_cn_variant<1>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 2: launch_cuda_batch_cn_variant<2>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 3: launch_cuda_batch_cn_variant<3>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 4: launch_cuda_batch_cn_variant<4>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 5: launch_cuda_batch_cn_variant<5>(stream, states, count, scratchpads, contexts, geometry); break;
+    default: throw std::runtime_error("CUDA batch autotune received invalid CryptoNight variant");
+    }
+}
+
 float benchmark_cuda_batch_candidate(int device_id,
                                      cudaStream_t stream,
                                      std::uint8_t* states,
@@ -129,6 +161,7 @@ float benchmark_cuda_batch_candidate(int device_id,
                                      std::uint8_t* scratchpads,
                                      cryptonight::SplitContext* contexts)
 {
+    (void)device_id;
     // Use the established legacy split implementation with conservative default
     // geometry so batch selection is independent of later per-batch geometry and
     // backend tuning. Sum all six variant times and compare aggregate hashes/s.
@@ -141,8 +174,8 @@ float benchmark_cuda_batch_candidate(int device_id,
                                        count * kStateBytes, stream),
                        "CUDA batch autotune state reset failed");
             total_ms += time_cuda_phase(stream, [&]() {
-                launch_split_cryptonight_variant_legacy(stream, states, count, variant,
-                                                        scratchpads, contexts, geometry);
+                launch_cuda_batch_cn_variant(variant, stream, states, count,
+                                             scratchpads, contexts, geometry);
             });
             check_cuda(cudaGetLastError(), "CUDA batch autotune CryptoNight launch failed");
         }
