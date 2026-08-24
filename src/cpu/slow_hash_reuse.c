@@ -150,9 +150,6 @@ void yerbas_cn_fast_candidate(const char* input,
 #define malloc yerbas_tls_cn_malloc
 #define free yerbas_tls_cn_free
 #if defined(_MSC_VER)
-/* Core uses _malloca/_freea directly on MSVC, so hook those names too.
- * This keeps the reusable production path consistent with Linux while the
- * pristine reference copy retains Core's original Windows allocation behavior. */
 #define _malloca yerbas_tls_cn_malloc
 #define _freea yerbas_tls_cn_free
 #endif
@@ -181,6 +178,32 @@ void yerbas_cn_fast_candidate(const char* input,
 #undef aesb_pseudo_round
 #endif
 
+/* Backend-neutral AES helpers for profiling. The production slow-hash copy above
+ * still selects its backend at compile time; these wrappers merely let the
+ * diagnostic phase probe compile and follow the same available backend in both
+ * native and portable release builds. */
+static void yerbas_profile_aes_single_round(const uint8_t* in,
+                                            uint8_t* out,
+                                            const uint8_t* expanded_key)
+{
+#if YERBAS_CN_AESNI
+    (void)yerbas_aesni_single_round(in, out, expanded_key);
+#else
+    aesb_single_round(in, out, expanded_key);
+#endif
+}
+
+static void yerbas_profile_aes_pseudo_round(const uint8_t* in,
+                                            uint8_t* out,
+                                            const uint8_t* expanded_key)
+{
+#if YERBAS_CN_AESNI
+    (void)yerbas_aesni_pseudo_round(in, out, expanded_key);
+#else
+    aesb_pseudo_round(in, out, expanded_key);
+#endif
+}
+
 static void yerbas_cn_fast_ab_tune(const char* input,
                                    const char* known_good_output,
                                    uint32_t len,
@@ -196,8 +219,6 @@ static void yerbas_cn_fast_ab_tune(const char* input,
     double baseline_ms = 0.0;
     double candidate_ms = 0.0;
 
-    /* Two rounds each are enough to reject obvious regressions while keeping
-     * startup overhead small. Alternate implementations to reduce thermal drift. */
     for (int round = 0; round < 2; ++round) {
         double start = yerbas_now_ms();
         yerbas_cn_slow_hash_reuse_impl(input, baseline_output, (int)len, variant,
@@ -220,14 +241,11 @@ static void yerbas_cn_fast_ab_tune(const char* input,
 
     g_yerbas_cn_fast_ab_state = (parity_ok && faster) ? 2 : 1;
 
-    printf("[CPU CN A/B] CN-Fast | baseline=%.3f ms | unroll2=%.3f ms | parity=%s | selected=%s\n",
+    printf("[CPU CN A/B] CN-Fast | baseline=%.3f ms | candidate=%.3f ms | parity=%s | selected=%s\n",
            baseline_ms, candidate_ms, parity_ok ? "PASS" : "FAIL",
-           g_yerbas_cn_fast_ab_state == 2 ? "unroll2" : "baseline");
+           g_yerbas_cn_fast_ab_state == 2 ? "candidate" : "baseline");
 }
 
-/* Profiling-only clone of cn_slow_hash(). It uses the exact same helpers,
- * AES backend, scratchpad and algorithm as the production copy above, but
- * records phase boundaries for CN-Fast. Mining never uses this result. */
 static void yerbas_cn_fast_phase_probe(const char* input,
                                        int len,
                                        int variant,
@@ -257,9 +275,9 @@ static void yerbas_cn_fast_phase_probe(const char* input,
     oaes_key_import_data(aes_ctx, aes_key, AES_KEY_SIZE);
     for (i = 0; i < init_rounds; ++i) {
         for (j = 0; j < INIT_SIZE_BLK; ++j) {
-            yerbas_aesni_pseudo_round(&text[AES_BLOCK_SIZE * j],
-                                      &text[AES_BLOCK_SIZE * j],
-                                      aes_ctx->key->exp_data);
+            yerbas_profile_aes_pseudo_round(&text[AES_BLOCK_SIZE * j],
+                                            &text[AES_BLOCK_SIZE * j],
+                                            aes_ctx->key->exp_data);
         }
         memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE);
     }
@@ -271,7 +289,7 @@ static void yerbas_cn_fast_phase_probe(const char* input,
 
     for (i = 0; i < iterations; ++i) {
         j = e2i(a, aes_rounds);
-        yerbas_aesni_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
+        yerbas_profile_aes_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
         VARIANT2_SHUFFLE_ADD(long_state, j * AES_BLOCK_SIZE, a, b);
         xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);
         VARIANT1_1((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);
@@ -301,9 +319,9 @@ static void yerbas_cn_fast_phase_probe(const char* input,
         for (j = 0; j < INIT_SIZE_BLK; ++j) {
             xor_blocks(&text[j * AES_BLOCK_SIZE],
                        &long_state[i * INIT_SIZE_BYTE + j * AES_BLOCK_SIZE]);
-            yerbas_aesni_pseudo_round(&text[j * AES_BLOCK_SIZE],
-                                      &text[j * AES_BLOCK_SIZE],
-                                      aes_ctx->key->exp_data);
+            yerbas_profile_aes_pseudo_round(&text[j * AES_BLOCK_SIZE],
+                                            &text[j * AES_BLOCK_SIZE],
+                                            aes_ctx->key->exp_data);
         }
     }
     memcpy(state.init, text, INIT_SIZE_BYTE);
@@ -341,39 +359,24 @@ void yerbas_cn_slow_hash_reuse(const char* input,
     }
 
     const int profile_variant = yerbas_cn_profile_variant(page_size, iterations, aes_rounds);
-    const unsigned int bit = (profile_variant >= 0 && profile_variant < 6)
-        ? (1u << (unsigned int)profile_variant) : 0u;
-    const int profile = bit != 0u && (g_yerbas_cn_profiled_mask & bit) == 0u;
-    const double start_ms = profile ? yerbas_now_ms() : 0.0;
+    const double start = yerbas_now_ms();
 
-    if (profile_variant == 2 && g_yerbas_cn_fast_ab_state == 2) {
-        yerbas_cn_fast_candidate(input, output, len, variant,
-                                 page_size, iterations, aes_rounds);
-    } else {
-        yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant,
-                                       page_size, iterations, aes_rounds);
+    yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant,
+                                   page_size, iterations, aes_rounds);
+
+    const double elapsed = yerbas_now_ms() - start;
+    if (profile_variant >= 0 && (g_yerbas_cn_profiled_mask & (1u << profile_variant)) == 0) {
+        printf("[CPU CN profile] %s | backend=%s | page=%u KiB | iterations=%u | elapsed=%.3f ms\n",
+               yerbas_cn_variant_name(profile_variant), yerbas_cn_reuse_backend(),
+               page_size / 1024u, iterations, elapsed);
+        g_yerbas_cn_profiled_mask |= 1u << profile_variant;
     }
 
     if (profile_variant == 2 && g_yerbas_cn_fast_ab_state == 0) {
-        /* The first CN-Fast result returned to the external parity gate is the
-         * established baseline. Tune only after that known-good output exists. */
-        yerbas_cn_fast_ab_tune(input, output, len, variant,
-                               page_size, iterations, aes_rounds);
+        yerbas_cn_fast_ab_tune(input, output, len, variant, page_size, iterations, aes_rounds);
     }
-
-    if (profile) {
-        const double elapsed_ms = yerbas_now_ms() - start_ms;
-        g_yerbas_cn_profiled_mask |= bit;
-        printf("[CPU CN profile] %s | backend=%s | page=%u KiB | iterations=%u | elapsed=%.3f ms\n",
-               yerbas_cn_variant_name(profile_variant), yerbas_cn_reuse_backend(),
-               page_size / 1024u, iterations, elapsed_ms);
-
-#if YERBAS_CN_AESNI
-        if (profile_variant == 2 && !g_yerbas_cn_fast_phase_reported) {
-            g_yerbas_cn_fast_phase_reported = 1;
-            yerbas_cn_fast_phase_probe(input, (int)len, variant,
-                                       page_size, iterations, aes_rounds);
-        }
-#endif
+    if (profile_variant == 2 && !g_yerbas_cn_fast_phase_reported) {
+        yerbas_cn_fast_phase_probe(input, (int)len, variant, page_size, iterations, aes_rounds);
+        g_yerbas_cn_fast_phase_reported = 1;
     }
 }
