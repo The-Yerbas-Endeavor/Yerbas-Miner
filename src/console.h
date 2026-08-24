@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstdio>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <streambuf>
 #include <string>
 #include <unordered_map>
@@ -66,6 +69,57 @@ inline const char* color_for_line(const std::string& line)
     if (line.find("warning") != std::string::npos || line.find("Warning") != std::string::npos) return kYellow;
     if (line.find("Yerbas Miner") != std::string::npos) return kBold;
     return nullptr;
+}
+
+struct GpuPowerSnapshot {
+    std::string summary;
+    double total_watts{0.0};
+    bool available{false};
+};
+
+inline GpuPowerSnapshot query_gpu_power()
+{
+    GpuPowerSnapshot result;
+#ifdef _WIN32
+    FILE* pipe = _popen("nvidia-smi --query-gpu=index,power.draw --format=csv,noheader,nounits 2>NUL", "r");
+#else
+    FILE* pipe = popen("nvidia-smi --query-gpu=index,power.draw --format=csv,noheader,nounits 2>/dev/null", "r");
+#endif
+    if (pipe == nullptr) return result;
+
+    char buffer[256];
+    std::ostringstream summary;
+    bool first = true;
+    while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        std::string row(buffer);
+        while (!row.empty() && (row.back() == '\n' || row.back() == '\r')) row.pop_back();
+        const std::size_t comma = row.find(',');
+        if (comma == std::string::npos) continue;
+        std::string id = row.substr(0, comma);
+        std::string watts = row.substr(comma + 1);
+        const std::size_t first_nonspace = watts.find_first_not_of(" \t");
+        if (first_nonspace == std::string::npos) continue;
+        watts.erase(0, first_nonspace);
+        try {
+            const double value = std::stod(watts);
+            if (!first) summary << "  ";
+            summary << "GPU " << id << ' ' << std::fixed << std::setprecision(1) << value << " W";
+            result.total_watts += value;
+            result.available = true;
+            first = false;
+        } catch (...) {
+        }
+    }
+#ifdef _WIN32
+    _pclose(pipe);
+#else
+    pclose(pipe);
+#endif
+    if (result.available) {
+        summary << "  | TOTAL GPU " << std::fixed << std::setprecision(1) << result.total_watts << " W";
+        result.summary = summary.str();
+    }
+    return result;
 }
 
 class LineColorBuf final : public std::streambuf {
@@ -183,6 +237,8 @@ private:
         if (newline && pending.find("PROOF OF GRASS | STATUS UPDATE") != std::string::npos) {
             if (!rotation_fingerprint().empty()) write_raw_line("ROTATION      " + rotation_fingerprint());
             if (!rotation_cn_variants().empty()) write_raw_line("CRYPTONIGHT   " + rotation_cn_variants());
+            const auto power = query_gpu_power();
+            write_raw_line(power.available ? "POWER         " + power.summary : "POWER         GPU power unavailable");
         }
         pending.clear();
     }
