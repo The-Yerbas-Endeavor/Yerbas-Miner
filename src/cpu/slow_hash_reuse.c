@@ -197,16 +197,8 @@ void yerbas_cn_slow_hash_reuse(const char* input,
                                    page_size, iterations, aes_rounds);
 }
 
-/*
- * 2-way development API.
- *
- * This is deliberately a correctness/reference baseline, not the production
- * 2-way kernel. It defines the pair interface and produces the two canonical
- * outputs using the validated 1-way implementation. The genuine 2-way kernel
- * will replace this baseline with two lane-local states/scratchpads whose hot
- * dependency loops are interleaved in one execution path. Until that kernel
- * passes parity and beats two 1-way calls, yerbas_cn_2way_ready() remains 0.
- */
+#include "cn_2way_impl.c"
+
 int yerbas_cn_hash_pair_reference(const char* input0,
                                   const char* input1,
                                   char* output0,
@@ -227,7 +219,14 @@ int yerbas_cn_hash_pair_reference(const char* input0,
     return 1;
 }
 
+/* Production selection remains disabled until the startup parity/speed gate is
+ * connected. The genuine kernel is available through yerbas_cn_hash_pair_2way(). */
 int yerbas_cn_2way_ready(void)
+{
+    return 0;
+}
+
+int yerbas_cn_4way_ready(void)
 {
     return 0;
 }
