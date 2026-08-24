@@ -290,9 +290,40 @@ inline std::string format_fan(const GpuTelemetry& t)
     std::ostringstream ss; ss << std::fixed << std::setprecision(0) << t.fan_percent << '%'; return ss.str();
 }
 
+inline std::string strip_ansi(const std::string& line)
+{
+    std::string clean;
+    clean.reserve(line.size());
+    for (std::size_t i = 0; i < line.size();) {
+        if (line[i] == '\x1b' && i + 1 < line.size() && line[i + 1] == '[') {
+            i += 2;
+            while (i < line.size()) {
+                const unsigned char c = static_cast<unsigned char>(line[i++]);
+                if (c >= 0x40 && c <= 0x7e) break;
+            }
+            continue;
+        }
+        clean.push_back(line[i++]);
+    }
+    return clean;
+}
+
+inline std::size_t visible_width(const std::string& line)
+{
+    return strip_ansi(line).size();
+}
+
+inline void pad_to_visible_column(std::string& line, std::size_t column)
+{
+    const std::size_t width = visible_width(line);
+    if (width < column) line.append(column - width, ' ');
+    else line.push_back(' ');
+}
+
 inline double status_row_hashrate_hps(const std::string& line)
 {
-    std::istringstream ss(line);
+    const std::string clean = strip_ansi(line);
+    std::istringstream ss(clean);
     std::string source;
     double value = 0.0;
     std::string unit;
@@ -319,7 +350,7 @@ inline std::string telemetry_columns(const std::string& power, const std::string
                                      const std::string& fan, const std::string& efficiency)
 {
     std::ostringstream ss;
-    ss << "  " << std::left
+    ss << std::left
        << std::setw(11) << power
        << std::setw(9) << temp
        << std::setw(9) << fan
@@ -402,9 +433,10 @@ private:
 
     static int gpu_id_from_status_row(const std::string& line)
     {
-        const std::size_t pos = line.find("GPU ");
+        const std::string clean = strip_ansi(line);
+        const std::size_t pos = clean.find("GPU ");
         if (pos == std::string::npos) return -1;
-        try { return std::stoi(line.substr(pos + 4)); } catch (...) { return -1; }
+        try { return std::stoi(clean.substr(pos + 4)); } catch (...) { return -1; }
     }
 
     void write_raw_line(const std::string& line)
@@ -427,9 +459,11 @@ private:
 
         std::string rendered = pending;
         if (in_status_table() && rendered.find("SOURCE") != std::string::npos && rendered.find("HASHRATE") != std::string::npos) {
+            pad_to_visible_column(rendered, 72);
             rendered += telemetry_columns("POWER", "TEMP", "FAN", "EFFICIENCY");
         } else if (in_status_table() && rendered.find("CPU") != std::string::npos && rendered.find("H/s") != std::string::npos) {
             const double hps = status_row_hashrate_hps(rendered);
+            pad_to_visible_column(rendered, 72);
             rendered += telemetry_columns(format_power(status_cpu_telemetry()),
                                           format_temperature(status_cpu_telemetry()),
                                           "-",
@@ -437,8 +471,9 @@ private:
         } else if (in_status_table() && rendered.find("GPU ") != std::string::npos && rendered.find("H/s") != std::string::npos) {
             const int id = gpu_id_from_status_row(rendered);
             const auto it = status_telemetry().devices.find(id);
+            const double hps = status_row_hashrate_hps(rendered);
+            pad_to_visible_column(rendered, 72);
             if (it != status_telemetry().devices.end()) {
-                const double hps = status_row_hashrate_hps(rendered);
                 rendered += telemetry_columns(format_power(it->second),
                                               format_temperature(it->second),
                                               format_fan(it->second),
