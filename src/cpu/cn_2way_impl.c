@@ -148,9 +148,6 @@ int yerbas_cn_hash_pair_2way(const char* input0,
 
     if (input0 == NULL || input1 == NULL || output0 == NULL || output1 == NULL)
         return 0;
-    /* Yerbas GhostRider currently invokes CryptoNight variant 1 for all six
-     * profiles. Keep production eligibility strict until other variants have
-     * their own parity coverage. */
     if (variant != 1 || len < 43U || page_size > YERBAS_CN_MAX_PAGE_SIZE)
         return 0;
     if (!yerbas_cn_2way_resources()) return 0;
@@ -178,3 +175,5 @@ int yerbas_cn_hash_pair_2way(const char* input0,
                           g_yerbas_cn_2way_oaes1, page_size, output1);
     return 1;
 }
+
+#include "cn_4way_impl.c"
