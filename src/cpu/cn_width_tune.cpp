@@ -12,6 +12,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" const char* yerbas_cn_reuse_backend(void);
