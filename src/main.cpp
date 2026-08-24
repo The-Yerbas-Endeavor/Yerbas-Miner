@@ -4,7 +4,9 @@
 
 #include <exception>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #ifdef _WIN32
@@ -22,6 +24,23 @@ void write_startup_log(const std::string& message)
 }
 
 #ifdef _WIN32
+LONG WINAPI windows_unhandled_exception_filter(EXCEPTION_POINTERS* info)
+{
+    std::ostringstream ss;
+    ss << "Fatal Windows exception";
+    if (info != nullptr && info->ExceptionRecord != nullptr) {
+        ss << " | code=0x" << std::hex << std::uppercase
+           << static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode)
+           << " | address=0x"
+           << reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+    }
+    const std::string message = ss.str();
+    write_startup_log(message);
+    std::ofstream crash("yerbas-miner-crash.log", std::ios::app);
+    if (crash) crash << message << '\n';
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 void pause_on_windows_error()
 {
     std::cerr << "\nPress Enter to close..." << std::flush;
@@ -33,6 +52,10 @@ void pause_on_windows_error()
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(windows_unhandled_exception_filter);
+#endif
+
     yerbas::console::enable_colors();
     write_startup_log("Yerbas Miner starting");
 
