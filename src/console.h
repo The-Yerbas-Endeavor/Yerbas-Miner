@@ -98,7 +98,6 @@ inline GpuTelemetrySnapshot query_gpu_telemetry()
     while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         std::string row(buffer);
         while (!row.empty() && (row.back() == '\n' || row.back() == '\r')) row.pop_back();
-
         std::string fields[4];
         std::size_t begin = 0;
         int field = 0;
@@ -109,7 +108,6 @@ inline GpuTelemetrySnapshot query_gpu_telemetry()
             begin = comma + 1;
         }
         if (field < 4) continue;
-
         try {
             const int id = std::stoi(fields[0]);
             GpuTelemetry telemetry;
@@ -206,8 +204,8 @@ inline double query_cpu_temperature_c(bool& available)
         std::string name;
         if (!read_text_file(entry.path() / "name", name)) continue;
         int priority = 0;
-        if (name.find("k10temp") != std::string::npos || name.find("zenpower") != std::string::npos) priority = 3;
-        else if (name.find("coretemp") != std::string::npos) priority = 3;
+        if (name.find("k10temp") != std::string::npos || name.find("zenpower") != std::string::npos ||
+            name.find("coretemp") != std::string::npos) priority = 3;
         else if (name.find("cpu") != std::string::npos) priority = 1;
         if (priority == 0) continue;
         for (int i = 1; i <= 32; ++i) {
@@ -266,44 +264,30 @@ inline CpuTelemetry query_cpu_telemetry()
     return telemetry;
 }
 
-inline std::string format_power(const GpuTelemetry& telemetry)
+inline std::string format_power(const GpuTelemetry& t)
 {
-    if (!telemetry.power_available) return "n/a";
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(1) << telemetry.watts << " W";
-    return ss.str();
+    if (!t.power_available) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(1) << t.watts << " W"; return ss.str();
 }
-
-inline std::string format_power(const CpuTelemetry& telemetry)
+inline std::string format_power(const CpuTelemetry& t)
 {
-    if (!telemetry.power_available) return "n/a";
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(1) << telemetry.watts << " W";
-    return ss.str();
+    if (!t.power_available) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(1) << t.watts << " W"; return ss.str();
 }
-
-inline std::string format_temperature(const GpuTelemetry& telemetry)
+inline std::string format_temperature(const GpuTelemetry& t)
 {
-    if (!telemetry.temperature_available) return "n/a";
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(0) << telemetry.temperature_c << " C";
-    return ss.str();
+    if (!t.temperature_available) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(0) << t.temperature_c << " C"; return ss.str();
 }
-
-inline std::string format_temperature(const CpuTelemetry& telemetry)
+inline std::string format_temperature(const CpuTelemetry& t)
 {
-    if (!telemetry.temperature_available) return "n/a";
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(0) << telemetry.temperature_c << " C";
-    return ss.str();
+    if (!t.temperature_available) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(0) << t.temperature_c << " C"; return ss.str();
 }
-
-inline std::string format_fan(const GpuTelemetry& telemetry)
+inline std::string format_fan(const GpuTelemetry& t)
 {
-    if (!telemetry.fan_available) return "n/a";
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(0) << telemetry.fan_percent << '%';
-    return ss.str();
+    if (!t.fan_available) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(0) << t.fan_percent << '%'; return ss.str();
 }
 
 inline double status_row_hashrate_hps(const std::string& line)
@@ -313,29 +297,33 @@ inline double status_row_hashrate_hps(const std::string& line)
     double value = 0.0;
     std::string unit;
     if (!(ss >> source)) return 0.0;
-    if (source == "GPU") {
-        int id = 0;
-        if (!(ss >> id)) return 0.0;
-    }
+    if (source == "GPU") { int id = 0; if (!(ss >> id)) return 0.0; }
     if (!(ss >> value >> unit)) return 0.0;
     if (unit == "MH/s") return value * 1000000.0;
     if (unit == "kH/s") return value * 1000.0;
     return unit == "H/s" ? value : 0.0;
 }
 
-inline std::string format_efficiency(double hps, const GpuTelemetry& telemetry)
+inline std::string format_efficiency(double hps, const GpuTelemetry& t)
 {
-    if (!telemetry.power_available || telemetry.watts <= 0.0 || hps <= 0.0) return "n/a";
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(2) << hps / telemetry.watts << " H/W";
-    return ss.str();
+    if (!t.power_available || t.watts <= 0.0 || hps <= 0.0) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(2) << hps / t.watts << " H/W"; return ss.str();
+}
+inline std::string format_efficiency(double hps, const CpuTelemetry& t)
+{
+    if (!t.power_available || t.watts <= 0.0 || hps <= 0.0) return "n/a";
+    std::ostringstream ss; ss << std::fixed << std::setprecision(2) << hps / t.watts << " H/W"; return ss.str();
 }
 
-inline std::string format_efficiency(double hps, const CpuTelemetry& telemetry)
+inline std::string telemetry_columns(const std::string& power, const std::string& temp,
+                                     const std::string& fan, const std::string& efficiency)
 {
-    if (!telemetry.power_available || telemetry.watts <= 0.0 || hps <= 0.0) return "n/a";
     std::ostringstream ss;
-    ss << std::fixed << std::setprecision(2) << hps / telemetry.watts << " H/W";
+    ss << "  " << std::left
+       << std::setw(11) << power
+       << std::setw(9) << temp
+       << std::setw(9) << fan
+       << std::setw(12) << efficiency;
     return ss.str();
 }
 
@@ -439,23 +427,24 @@ private:
 
         std::string rendered = pending;
         if (in_status_table() && rendered.find("SOURCE") != std::string::npos && rendered.find("HASHRATE") != std::string::npos) {
-            rendered += "POWER       TEMP     FAN      EFFICIENCY";
+            rendered += telemetry_columns("POWER", "TEMP", "FAN", "EFFICIENCY");
         } else if (in_status_table() && rendered.find("CPU") != std::string::npos && rendered.find("H/s") != std::string::npos) {
             const double hps = status_row_hashrate_hps(rendered);
-            rendered += "        " + format_power(status_cpu_telemetry())
-                      + "    " + format_temperature(status_cpu_telemetry())
-                      + "    -        " + format_efficiency(hps, status_cpu_telemetry());
+            rendered += telemetry_columns(format_power(status_cpu_telemetry()),
+                                          format_temperature(status_cpu_telemetry()),
+                                          "-",
+                                          format_efficiency(hps, status_cpu_telemetry()));
         } else if (in_status_table() && rendered.find("GPU ") != std::string::npos && rendered.find("H/s") != std::string::npos) {
             const int id = gpu_id_from_status_row(rendered);
             const auto it = status_telemetry().devices.find(id);
             if (it != status_telemetry().devices.end()) {
                 const double hps = status_row_hashrate_hps(rendered);
-                rendered += "        " + format_power(it->second)
-                          + "    " + format_temperature(it->second)
-                          + "    " + format_fan(it->second)
-                          + "    " + format_efficiency(hps, it->second);
+                rendered += telemetry_columns(format_power(it->second),
+                                              format_temperature(it->second),
+                                              format_fan(it->second),
+                                              format_efficiency(hps, it->second));
             } else {
-                rendered += "        n/a         n/a      n/a      n/a";
+                rendered += telemetry_columns("n/a", "n/a", "n/a", "n/a");
             }
         }
 
