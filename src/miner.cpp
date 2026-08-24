@@ -1,4 +1,5 @@
 #include "miner.h"
+#include "cpu/cpu_autotune.h"
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
 
@@ -65,10 +66,25 @@ Miner::Miner(AppConfig config)
 
 int Miner::run()
 {
+    g_stop_requested.store(false);
     std::signal(SIGINT, handle_signal);
 #ifdef SIGTERM
     std::signal(SIGTERM, handle_signal);
 #endif
+
+    const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    if (config_.miner.cpu_enabled && !config_.pool.url.empty() && !config_.pool.user.empty()) {
+        const auto tune = cpu::production_autotune(hw_threads,
+                                                   config_.miner.threads,
+                                                   config_.miner.cpu_batch,
+                                                   &g_stop_requested);
+        if (tune.interrupted || g_stop_requested.load()) {
+            std::cout << "[CPU autotune] interrupted by user\n";
+            return 130;
+        }
+        config_.miner.threads = tune.threads;
+        config_.miner.cpu_batch = tune.batch;
+    }
 
     std::cout << "Yerbas Miner 0.5.2\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
@@ -77,7 +93,6 @@ int Miner::run()
     std::cout << "GhostRider reference: "
               << (ghostrider::reference_ready() ? "ready" : "scaffold") << "\n";
 
-    const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
     const unsigned int cpu_threads = config_.miner.threads == 0 ? hw_threads : config_.miner.threads;
     std::cout << "CPU mining: " << (config_.miner.cpu_enabled ? "enabled" : "disabled")
               << " | threads " << cpu_threads
