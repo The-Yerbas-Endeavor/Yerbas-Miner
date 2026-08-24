@@ -9,20 +9,26 @@
 
 /* Experimental CN-Fast A/B candidate.
  *
- * This path keeps the pinned Core algorithm and memory ordering, but removes
- * the prior forced-unroll experiment. The hot multiply/write/XOR dependency
- * chain keeps the two 64-bit words of state A in scalar locals so the compiler
- * has a cleaner register lifetime and fewer repeated pointer casts/reloads.
+ * Keep the pinned Core loop/dataflow unchanged. This candidate isolates a
+ * lower-risk AES-NI code-generation experiment: force-inline the AES round and,
+ * on 64-bit x86 where malloc/_malloca provide at least 16-byte alignment, use an
+ * aligned load for the scratchpad block. Key/output accesses remain unaligned.
  *
  * Runtime parity/timing selection in slow_hash_reuse.c remains the safety gate:
- * this candidate is never used for production mining unless it is bit-identical
- * and at least 2% faster than the established baseline on the current machine. */
-#define YERBAS_CN_CANDIDATE_MODE "register-state"
+ * this candidate is never used for mining unless it is bit-identical and at
+ * least 2% faster than the established baseline on the current machine. */
+#define YERBAS_CN_CANDIDATE_MODE "aligned-aes"
 
 #if defined(_MSC_VER)
 #define YERBAS_TLS __declspec(thread)
+#define YERBAS_FORCE_INLINE __forceinline
 #else
 #define YERBAS_TLS _Thread_local
+#if defined(__GNUC__) || defined(__clang__)
+#define YERBAS_FORCE_INLINE inline __attribute__((always_inline))
+#else
+#define YERBAS_FORCE_INLINE inline
+#endif
 #endif
 
 #define YERBAS_CN_MAX_PAGE_SIZE 2097152u
@@ -60,15 +66,23 @@ static void candidate_oaes_free(OAES_CTX** ctx)
 #include <wmmintrin.h>
 #define YERBAS_CANDIDATE_AESNI 1
 
-static int candidate_aes_single_round(const uint8_t* in, uint8_t* out, const uint8_t* expanded_key)
+static YERBAS_FORCE_INLINE int candidate_aes_single_round(const uint8_t* in,
+                                                           uint8_t* out,
+                                                           const uint8_t* expanded_key)
 {
+#if defined(__x86_64__) || defined(_M_X64)
+    const __m128i state = _mm_load_si128((const __m128i*)in);
+#else
     const __m128i state = _mm_loadu_si128((const __m128i*)in);
+#endif
     const __m128i key = _mm_loadu_si128((const __m128i*)expanded_key);
     _mm_storeu_si128((__m128i*)out, _mm_aesenc_si128(state, key));
     return 0;
 }
 
-static int candidate_aes_pseudo_round(const uint8_t* in, uint8_t* out, const uint8_t* expanded_key)
+static YERBAS_FORCE_INLINE int candidate_aes_pseudo_round(const uint8_t* in,
+                                                           uint8_t* out,
+                                                           const uint8_t* expanded_key)
 {
     __m128i state = _mm_loadu_si128((const __m128i*)in);
     for (int round = 0; round < 10; ++round) {
@@ -94,9 +108,8 @@ static int candidate_aes_pseudo_round(const uint8_t* in, uint8_t* out, const uin
 #define aesb_pseudo_round candidate_aes_pseudo_round
 #endif
 
-/* Keep the generated pinned-Core copy in this translation unit because it
- * supplies the exact static CryptoNight helpers/macros used below. The custom
- * register-state candidate does not call its forced-unroll slow-hash function. */
+/* Include the generated pinned-Core copy for the exact helpers/macros. Its
+ * generated slow-hash function is not used by the candidate below. */
 #include "cn_fast_candidate_impl.c"
 
 #undef do_groestl_hash
@@ -121,13 +134,13 @@ static int candidate_aes_pseudo_round(const uint8_t* in, uint8_t* out, const uin
 #define YERBAS_CANDIDATE_AES_PSEUDO aesb_pseudo_round
 #endif
 
-static void yerbas_cn_fast_register_state_impl(const char* input,
-                                               char* output,
-                                               int len,
-                                               int variant,
-                                               uint32_t page_size,
-                                               uint32_t iterations,
-                                               size_t aes_rounds)
+static void yerbas_cn_fast_aligned_aes_impl(const char* input,
+                                            char* output,
+                                            int len,
+                                            int variant,
+                                            uint32_t page_size,
+                                            uint32_t iterations,
+                                            size_t aes_rounds)
 {
     union cn_slow_hash_state state;
     uint8_t text[INIT_SIZE_BYTE];
@@ -163,9 +176,8 @@ static void yerbas_cn_fast_register_state_impl(const char* input,
         b[i] = state.k[16 + i] ^ state.k[48 + i];
     }
 
-    /* No forced loop unrolling here. Keep the exact dependency order from
-     * pinned Core, but carry the A state through the multiply/write/XOR chain
-     * in scalar locals before committing it back to a[]. */
+    /* Exact pinned-Core dependency order; no forced loop unrolling and no
+     * register-state rewrite. Only the AES helper above differs. */
     for (i = 0; i < iterations; ++i) {
         j = e2i(a, aes_rounds);
         YERBAS_CANDIDATE_AES_SINGLE(&long_state[j * AES_BLOCK_SIZE], c, a);
@@ -175,7 +187,9 @@ static void yerbas_cn_fast_register_state_impl(const char* input,
 
         j = e2i(c, aes_rounds);
         uint64_t* dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
-        uint64_t t[2] = { dst[0], dst[1] };
+        uint64_t t[2];
+        t[0] = dst[0];
+        t[1] = dst[1];
 
         VARIANT2_INTEGER_MATH(t, c);
 
@@ -185,16 +199,14 @@ static void yerbas_cn_fast_register_state_impl(const char* input,
         VARIANT2_2();
         VARIANT2_SHUFFLE_ADD(long_state, j * AES_BLOCK_SIZE, a, b);
 
-        uint64_t a0 = ((uint64_t*)a)[0] + hi;
-        uint64_t a1 = ((uint64_t*)a)[1] + lo;
+        ((uint64_t*)a)[0] += hi;
+        ((uint64_t*)a)[1] += lo;
 
-        dst[0] = a0;
-        dst[1] = a1;
+        dst[0] = ((uint64_t*)a)[0];
+        dst[1] = ((uint64_t*)a)[1];
 
-        a0 ^= t[0];
-        a1 ^= t[1];
-        ((uint64_t*)a)[0] = a0;
-        ((uint64_t*)a)[1] = a1;
+        ((uint64_t*)a)[0] ^= t[0];
+        ((uint64_t*)a)[1] ^= t[1];
 
         VARIANT1_2((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);
         copy_block(b + AES_BLOCK_SIZE, b);
@@ -234,9 +246,10 @@ void yerbas_cn_fast_candidate(const char* input,
         g_candidate_mode_reported = 1;
     }
 
-    yerbas_cn_fast_register_state_impl(input, output, (int)len, variant,
-                                       page_size, iterations, aes_rounds);
+    yerbas_cn_fast_aligned_aes_impl(input, output, (int)len, variant,
+                                    page_size, iterations, aes_rounds);
 }
 
 #undef YERBAS_CANDIDATE_AES_SINGLE
 #undef YERBAS_CANDIDATE_AES_PSEUDO
+#undef YERBAS_FORCE_INLINE
