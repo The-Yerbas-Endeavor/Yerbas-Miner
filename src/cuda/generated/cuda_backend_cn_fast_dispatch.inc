@@ -1,6 +1,7 @@
 // Public wrapper for the final CN-Fast family tuner.
 // Preserve an existing production unroll-4 result because the focused challenger
-// set intentionally compares only u1/u2, dual u1/u2, and coop4.
+// set intentionally compares only u1/u2, dual u1/u2, and coop4. If coop4 already
+// won the broad production selector, continue into the final family comparison.
 
 std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                                  cudaStream_t stream,
@@ -12,7 +13,10 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
     auto result = autotune_cn_geometries_coop(device_id, stream, states, batch_size,
                                               scratchpads, contexts);
 
-    const bool preserve_u4 = device_id >= 0 && device_id < kMaxLoopTuneDevices &&
+    const bool valid_device = device_id >= 0 && device_id < kMaxLoopTuneDevices;
+    const bool coop_active = valid_device && g_cn_coop_ready[device_id] &&
+                             g_cn_coop_enabled[device_id][2];
+    const bool preserve_u4 = valid_device && !coop_active &&
                              g_cn_loop_ready[device_id] &&
                              g_cn_loop_unroll[device_id][2] == 4;
     if (preserve_u4) {
