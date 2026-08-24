@@ -1,10 +1,7 @@
 #include "config.h"
 #include "cpu/cpu_autotune.h"
-// The CPU production tuner is kept as a self-contained implementation fragment
-// for now so release/source builds pick it up without duplicating the existing
-// executable source list. It exposes only the interface declared above.
-#include "cpu/cpu_autotune.cpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -140,9 +137,9 @@ void print_config_help(const char* program)
         << "  --log-level LEVEL   debug, info, warn, error\n"
         << "  -h, --help          Show this help\n\n"
         << "CPU autotune environment:\n"
-        << "  YERBAS_CPU_RETUNE=1          Ignore cached CPU tuning and benchmark again\n"
+        << "  YERBAS_CPU_RETUNE=1            Ignore cached CPU tuning and benchmark again\n"
         << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Use configured/default CPU threads and batch\n"
-        << "  YERBAS_DIAGNOSTICS=1        Show individual CPU autotune benchmark results\n";
+        << "  YERBAS_DIAGNOSTICS=1          Show individual CPU autotune benchmark results\n";
 }
 
 } // namespace yerbas
