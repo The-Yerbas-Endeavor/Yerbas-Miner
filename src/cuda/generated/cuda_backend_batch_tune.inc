@@ -11,6 +11,12 @@ namespace {
 constexpr int kCudaBatchTuneRevision = 1;
 constexpr std::size_t kCudaBatchAlignment = 128U;
 
+void throw_if_cuda_autotune_cancelled()
+{
+    if (::yerbas::stop_requested())
+        throw std::runtime_error("CUDA autotune cancelled by user");
+}
+
 std::filesystem::path cuda_batch_cache_path(int device_id,
                                             const cudaDeviceProp& props,
                                             std::size_t capacity)
@@ -54,9 +60,6 @@ std::vector<std::size_t> cuda_batch_candidates(std::size_t initial,
         if (std::find(out.begin(), out.end(), value) == out.end()) out.push_back(value);
     };
 
-    // Cover the useful range without making first-run tuning excessive. Include
-    // the adaptive production estimate, progressively larger fractions of the
-    // safe capacity, and the capacity ceiling itself.
     add(initial / 2U);
     add((initial * 3U) / 4U);
     add(initial);
@@ -118,7 +121,6 @@ void save_cuda_batch_cache(int device_id,
             std::filesystem::rename(temp, path, ec);
         }
     } catch (...) {
-        // Cache failure is non-fatal.
     }
 }
 
@@ -162,14 +164,13 @@ float benchmark_cuda_batch_candidate(int device_id,
                                      cryptonight::SplitContext* contexts)
 {
     (void)device_id;
-    // Use the established legacy split implementation with conservative default
-    // geometry so batch selection is independent of later per-batch geometry and
-    // backend tuning. Sum all six variant times and compare aggregate hashes/s.
     CnGeometry geometry{};
     float total_ms = 0.0F;
     constexpr int repeats = 2;
     for (int repeat = 0; repeat < repeats; ++repeat) {
+        throw_if_cuda_autotune_cancelled();
         for (std::uint8_t variant = 0; variant < 6; ++variant) {
+            throw_if_cuda_autotune_cancelled();
             check_cuda(cudaMemsetAsync(states, static_cast<int>(0x31 + variant),
                                        count * kStateBytes, stream),
                        "CUDA batch autotune state reset failed");
@@ -177,6 +178,7 @@ float benchmark_cuda_batch_candidate(int device_id,
                 launch_cuda_batch_cn_variant(variant, stream, states, count,
                                              scratchpads, contexts, geometry);
             });
+            throw_if_cuda_autotune_cancelled();
             check_cuda(cudaGetLastError(), "CUDA batch autotune CryptoNight launch failed");
         }
     }
@@ -193,9 +195,9 @@ std::size_t autotune_cuda_active_batch(int device_id,
                                        std::uint8_t* scratchpads,
                                        cryptonight::SplitContext* contexts)
 {
+    throw_if_cuda_autotune_cancelled();
     if (capacity == 0) return initial_batch;
 
-    // Explicit user override always wins and bypasses batch autotuning.
     const char* override_env = std::getenv("YERBAS_CUDA_ACTIVE_BATCH");
     if (override_env && *override_env) {
         try {
@@ -236,12 +238,14 @@ std::size_t autotune_cuda_active_batch(int device_id,
               << candidates.size() << " | capacity=" << capacity << '\n';
 
     for (const std::size_t candidate : candidates) {
+        throw_if_cuda_autotune_cancelled();
         float hps = 0.0F;
         try {
             hps = benchmark_cuda_batch_candidate(device_id, stream, states, candidate,
                                                  scratchpads, contexts);
         } catch (const std::exception& e) {
             cudaGetLastError();
+            if (::yerbas::stop_requested()) throw;
             if (diagnostics)
                 std::cerr << "[GPU " << device_id << "] CUDA batch candidate " << candidate
                           << " failed: " << e.what() << '\n';
@@ -259,6 +263,7 @@ std::size_t autotune_cuda_active_batch(int device_id,
         }
     }
 
+    throw_if_cuda_autotune_cancelled();
     save_cuda_batch_cache(device_id, props, capacity, best_batch);
     std::cout << std::fixed << std::setprecision(2)
               << "[GPU " << device_id << "] CUDA active batch selected | active=" << best_batch
