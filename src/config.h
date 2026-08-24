@@ -16,9 +16,14 @@ struct MinerConfig {
     bool cpu_enabled{true};
     unsigned int threads{0};
     bool hybrid{true};
-    // 16 hashes per worker better amortizes scheduler/thread-launch overhead
-    // while keeping Stratum job switching responsive on the reference backend.
+    // 16 hashes per worker is the portable out-of-box default when tuning is off.
     unsigned int cpu_batch{16};
+    // CPU tuning policy:
+    //   off     = start mining immediately with configured/default settings
+    //   simple  = quick production tuning
+    //   default = balanced production tuning
+    //   full    = exhaustive production + GhostRider rotation tuning where supported
+    std::string cpu_tune{"off"};
 };
 
 struct GpuConfig {
