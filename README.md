@@ -105,57 +105,75 @@ Priority is command line, then JSON config, then built-in defaults.
 
 ## Build
 
-CPU reference build:
+### Recommended: generic portable CPU + CUDA build
+
+For normal development, testing, and release validation, use the portable release script:
 
 ```bash
-cmake -S . -B build -DYERBAS_ENABLE_CUDA=OFF
+bash scripts/configure-release.sh
+```
+
+This creates `build-release/yerbas-miner` with:
+
+- `YERBAS_NATIVE_CPU=OFF`, so CPU code is not compiled with `-march=native` / `-mtune=native`.
+- A multi-architecture CUDA fat binary for compute capabilities `52;60;61;70;75;80;86;89;90`.
+- Runtime CPU and GPU autotuning so production settings are selected on the target machine.
+
+Run it with:
+
+```bash
+./build-release/yerbas-miner
+```
+
+Keep this as the normal development/testing path when validating behavior intended for general users.
+
+### Optional: native benchmark build
+
+For local performance experiments only:
+
+```bash
+bash scripts/configure-native-cpu.sh
+```
+
+This creates `build-native/yerbas-miner` and intentionally enables host-specific CPU optimization plus native CUDA architecture detection. It may be faster on the machine that compiled it, but it should not be redistributed or used to validate portability.
+
+### CPU-only reference build
+
+```bash
+cmake -S . -B build -DYERBAS_ENABLE_CUDA=OFF -DYERBAS_NATIVE_CPU=OFF
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ./build/yerbas-miner
 ```
 
-CUDA build (requires the NVIDIA CUDA Toolkit):
+### Manual generic CUDA build
 
 ```bash
-cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=ON
-cmake --build build-cuda --parallel
-ctest --test-dir build-cuda --output-on-failure
-./build-cuda/yerbas-miner
-```
-
-Local CUDA builds default to the GPU architecture detected on the development machine (`native`) so rebuilds remain fast. This does not limit release compatibility; CI/release builds compile a multi-architecture CUDA fat binary for the supported NVIDIA generations.
-
-To force a specific local target, for example Pascal / compute capability 6.1:
-
-```bash
-cmake -S . -B build-cuda -G Ninja \
+cmake -S . -B build-release -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DYERBAS_ENABLE_CUDA=ON \
-  -DYERBAS_CUDA_ARCHITECTURES=61
+  -DYERBAS_NATIVE_CPU=OFF \
+  -DYERBAS_CUDA_ARCHITECTURES="52;60;61;70;75;80;86;89;90"
+cmake --build build-release --parallel
+ctest --test-dir build-release --output-on-failure
+./build-release/yerbas-miner
 ```
 
-To explicitly request native detection:
-
-```bash
-cmake -S . -B build-cuda -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DYERBAS_ENABLE_CUDA=ON \
-  -DYERBAS_CUDA_ARCHITECTURES=native
-```
-
-For faster repeated builds, keep the same `build-cuda` directory and run only:
+For faster repeated portable builds, keep the same `build-release` directory and run only:
 
 ```bash
 git pull
-cmake --build build-cuda --parallel $(nproc)
+cmake --build build-release --parallel $(nproc)
 ```
 
 Optional `ccache` support can be enabled when installed:
 
 ```bash
-cmake -S . -B build-cuda -G Ninja \
+cmake -S . -B build-release -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DYERBAS_ENABLE_CUDA=ON \
+  -DYERBAS_NATIVE_CPU=OFF \
+  -DYERBAS_CUDA_ARCHITECTURES="52;60;61;70;75;80;86;89;90" \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
 ```
