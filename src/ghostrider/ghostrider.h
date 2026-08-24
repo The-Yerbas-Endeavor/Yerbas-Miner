@@ -10,9 +10,6 @@ using Hash256 = std::array<std::uint8_t, 32>;
 using Hash512 = std::array<std::uint8_t, 64>;
 using StageSchedule = std::array<std::uint8_t, 18>;
 
-// Stage encoding used by the GPU scheduler:
-//   0x00..0x0e = one of the 15 core hashes
-//   0x80..0x85 = one of the 6 CryptoNight variants
 constexpr std::uint8_t kCryptoNightStageFlag = 0x80;
 
 struct Work {
@@ -20,42 +17,25 @@ struct Work {
     std::size_t size{0};
 };
 
-// CPU reference implementation wired to the exact GhostRider primitives and
-// hash-selection logic from Yerbas Core. For normal mining input, data is the
-// serialized 80-byte Yerbas block header (nVersion through nNonce).
 Hash256 hash_reference(const Work& work);
-
-// Production CPU path. It uses reusable per-thread CryptoNight resources only
-// after all six CN variants pass parity against the untouched Core reference.
 Hash256 hash_optimized(const Work& work);
 bool optimized_cpu_ready() noexcept;
 
-// Stage-by-stage CPU path that mirrors the validated CUDA pipeline exactly.
-// Use this for live CPU mining so CPU candidate selection follows the same
-// explicit 18-stage dispatch semantics as the pool-proven CUDA path.
+// Production multilaned CPU path. All works must belong to the same Stratum
+// job/schedule. count must be 1..4. Per-CN widths are the qualified 1/2/4-way
+// choices for Dark, DarkLite, Fast, Lite, Turtle and TurtleLite.
+bool hash_optimized_batch(const Work* works,
+                          Hash256* outputs,
+                          std::size_t count,
+                          const std::array<unsigned int, 6>& cn_widths);
+
 Hash256 hash_staged_reference(const Work& work);
-
-// Exposes one of the 15 512-bit core hashes for GPU validation. algorithm must
-// be in the same 0..14 index space used by Yerbas Core's coreHash().
 Hash512 core_hash_reference(const Work& work, int algorithm);
-
-// Run exactly one encoded GhostRider stage using the pinned Yerbas Core
-// implementation. This is used by the CUDA bootstrap pipeline as a correctness
-// fallback until every selectable core/CryptoNight stage has a native kernel.
-// Core stages use 0x00..0x0e; CryptoNight stages use 0x80..0x85.
 Hash512 stage_reference(const Work& work, std::uint8_t stage);
-
-// GhostRider selection depends only on hashPrevBlock, so one schedule can be
-// computed once per Stratum job and reused for every nonce in the GPU batch.
 StageSchedule stage_schedule(const Work& work);
-
-// Quiet metadata helpers used by performance instrumentation. These use the same
-// canonical schedule/fingerprint implementation as the normal GhostRider logger,
-// so CPU and CUDA performance records share one stable rotation identity.
 StageSchedule stage_schedule_quiet(const Work& work);
 std::uint64_t schedule_fingerprint(const StageSchedule& schedule) noexcept;
 const char* cryptonight_name(std::uint8_t index) noexcept;
-
 bool reference_ready() noexcept;
 
 } // namespace yerbas::ghostrider
