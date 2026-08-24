@@ -41,7 +41,10 @@ Example:
   },
   "miner": {
     "worker": "rig1",
-    "threads": 0
+    "cpu_enabled": true,
+    "threads": 0,
+    "cpu_batch": 0,
+    "cpu_tune": "off"
   },
   "gpu": {
     "enabled": true,
@@ -55,6 +58,32 @@ Example:
 ```
 
 `config.json` is ignored by Git so local wallet/pool information is not accidentally committed. `config.example.json` is included in release artifacts.
+
+### CPU tuning modes
+
+CPU tuning is optional. The default example config uses `"cpu_tune": "off"`, which starts mining immediately with the configured/default CPU thread count and batch size.
+
+Available modes:
+
+```text
+off      no CPU benchmark; start mining immediately
+simple   quick thread/batch production tuning
+default  balanced thread/batch production tuning
+full     exhaustive thread/batch tuning and future full GhostRider rotation tuning
+```
+
+Command-line equivalents:
+
+```bash
+./yerbas-miner --no-tune
+./yerbas-miner --tune simple
+./yerbas-miner --tune default
+./yerbas-miner --tune full
+```
+
+`threads` is a ceiling when tuning is enabled. `threads: 0` allows the tuner to use all logical CPUs; for example, `threads: 6` on a 12-thread machine limits the search to configurations using at most 6 CPU workers.
+
+The current production tuner selects CPU thread count and per-thread batch size by measuring full GhostRider throughput across representative schedules. True cpuminer-gr-style per-rotation `1way/2way/4way` CryptoNight selection requires genuine multi-lane CryptoNight kernels. Yerbas-Miner currently has the validated 1-way CPU CN engine only; 2-way/4-way modes will not be advertised or selected until those implementations exist and pass parity against Yerbas Core.
 
 Command-line options override values from the configuration file:
 
@@ -77,6 +106,9 @@ Common options:
 --password PASS
 --worker NAME
 --threads N
+--cpu-batch N
+--tune off|simple|default|full
+--no-tune
 --devices 0,1
 --intensity N
 --no-gpu
@@ -98,10 +130,10 @@ Priority is command line, then JSON config, then built-in defaults.
 - CUDA GPU discovery and device reporting
 - JSON config file support
 - command-line configuration overrides
+- optional CPU production autotuning with direct no-tune startup
 - pool URL/user/password/worker settings
 - GPU device/intensity settings
 - Stratum endpoint parsing and configuration plumbing
-- Stratum socket/session protocol and share submission not implemented yet
 
 ## Build
 
@@ -117,7 +149,7 @@ This creates `build-release/yerbas-miner` with:
 
 - `YERBAS_NATIVE_CPU=OFF`, so CPU code is not compiled with `-march=native` / `-mtune=native`.
 - A multi-architecture CUDA fat binary for compute capabilities `52;60;61;70;75;80;86;89;90`.
-- Runtime CPU and GPU autotuning so production settings are selected on the target machine.
+- Runtime CPU and GPU tuning when explicitly enabled so production settings can be selected on the target machine.
 
 Run it with:
 
@@ -207,7 +239,3 @@ Restart Yerbas-Miner after changing the permission. Once package power is readab
 The exact powercap path can vary by CPU, kernel, and Linux distribution. Yerbas-Miner discovers supported telemetry interfaces at runtime; the path above is the common Intel `package-0` RAPL location. Do not run Yerbas-Miner as root solely for telemetry. Systems that do not expose a readable CPU package-power interface will continue mining normally and display `n/a` for unavailable power and efficiency values.
 
 Note that permissions under `/sys` may be reset after reboot. If persistent CPU power telemetry is desired, configure the appropriate system permission/udev policy for the machine rather than running the miner as root.
-
-## Next milestone
-
-Complete the Stratum TCP session: connect, subscribe, authorize, receive jobs, construct Yerbas block headers, scan nonces, validate shares with the CPU reference, and submit accepted shares. The same real block-header vectors remain the correctness gate for the CUDA implementation.
