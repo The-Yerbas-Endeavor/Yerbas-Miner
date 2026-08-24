@@ -80,7 +80,8 @@ int Miner::run()
     const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
     const unsigned int cpu_threads = config_.miner.threads == 0 ? hw_threads : config_.miner.threads;
     std::cout << "CPU mining: " << (config_.miner.cpu_enabled ? "enabled" : "disabled")
-              << " | threads " << cpu_threads << (config_.miner.threads == 0 ? " (auto)" : "") << "\n";
+              << " | threads " << cpu_threads
+              << " | batch " << config_.miner.cpu_batch << " / thread\n";
     print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
 
