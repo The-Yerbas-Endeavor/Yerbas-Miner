@@ -30,11 +30,12 @@ inline bool suppress_normal_line(const std::string& line)
     if (line.find("] candidate | job=") != std::string::npos) return true;
 
     // Detailed startup profiler lines stay available in diagnostics mode. Keep
-    // compact autotune winner summaries visible in normal mode.
+    // compact CUDA autotune winner summaries visible in normal mode.
     if (line.find("[CUDA CN profile]") != std::string::npos) return true;
     if (line.find("[CPU CN profile]") != std::string::npos) return true;
     if (line.find("[CPU CN phase]") != std::string::npos) return true;
     if (line.find("[CPU CN candidate]") != std::string::npos) return true;
+    if (line.find("[CPU CN A/B]") != std::string::npos) return true;
     if (line.find("[CUDA CN production test]") != std::string::npos) return true;
     if (line.find("[CUDA CN coop test]") != std::string::npos) return true;
     if (line.find("[CUDA dual-state test]") != std::string::npos) return true;
