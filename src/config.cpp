@@ -1,12 +1,9 @@
 #include "config.h"
-#include "cpu/cpu_autotune.h"
 
-#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
-#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -103,18 +100,6 @@ AppConfig load_config(int argc, char** argv)
     }
 
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
-
-    // A configured thread count is a ceiling for production autotuning, not an
-    // assumption that every logical worker improves GhostRider throughput.
-    // Skip the benchmark for incomplete pool configs so setup/help remains fast.
-    if (cfg.miner.cpu_enabled && !cfg.pool.url.empty() && !cfg.pool.user.empty()) {
-        const unsigned int hardware_threads = std::max(1U, std::thread::hardware_concurrency());
-        const auto tune = cpu::production_autotune(hardware_threads,
-                                                   cfg.miner.threads,
-                                                   cfg.miner.cpu_batch);
-        cfg.miner.threads = tune.threads;
-        cfg.miner.cpu_batch = tune.batch;
-    }
     return cfg;
 }
 
