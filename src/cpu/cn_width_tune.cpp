@@ -22,6 +22,7 @@ namespace {
 
 constexpr int kWidthTuneRevision = 1;
 constexpr double kMinimumGain = 1.02;
+std::array<unsigned int, 6> g_active_widths{{1,1,1,1,1,1}};
 
 struct Params {
     const char* name;
@@ -143,16 +144,23 @@ void print_summary(const CnWidthTuneResult& result, const char* source)
 
 } // namespace
 
+std::array<unsigned int, 6> active_cn_widths() noexcept
+{
+    return g_active_widths;
+}
+
 CnWidthTuneResult qualify_cn_widths(const std::string& mode)
 {
     CnWidthTuneResult result{};
     if (mode == "off" || mode == "simple") {
+        g_active_widths = result.widths;
         print_summary(result, "default");
         return result;
     }
 
     const auto path = cache_path();
     if (load_cache(path, result)) {
+        g_active_widths = result.widths;
         print_summary(result, "cache");
         return result;
     }
@@ -223,6 +231,7 @@ CnWidthTuneResult qualify_cn_widths(const std::string& mode)
                   << " | selected=" << selected << "way" << std::defaultfloat << '\n';
     }
 
+    g_active_widths = result.widths;
     save_cache(path, result);
     print_summary(result, "fresh");
     return result;
