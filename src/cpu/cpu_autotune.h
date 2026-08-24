@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace yerbas::cpu {
 
@@ -14,12 +15,13 @@ struct TuneResult {
 };
 
 // Benchmarks representative GhostRider schedules and selects a production CPU
-// thread count + per-thread batch size. Results are cached per CPU/build so
-// normal launches do not repeat the benchmark unless YERBAS_CPU_RETUNE is set.
-// stop_requested may be supplied by the miner so Ctrl+C can abort tuning cleanly.
+// thread count + per-thread batch size. mode is simple/default/full. Results are
+// cached per CPU/build/mode so normal launches do not repeat the benchmark unless
+// YERBAS_CPU_RETUNE is set. stop_requested lets Ctrl+C abort tuning cleanly.
 TuneResult production_autotune(unsigned int hardware_threads,
                                unsigned int configured_threads,
                                unsigned int configured_batch,
+                               const std::string& mode,
                                const std::atomic_bool* stop_requested = nullptr);
 
 } // namespace yerbas::cpu
