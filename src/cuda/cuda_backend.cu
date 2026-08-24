@@ -20,6 +20,10 @@
 #undef launch_split_cryptonight_variant
 #undef autotune_cn_geometries
 
+// Select the production mining batch before per-batch geometry/backend tuning.
+// The explicit YERBAS_CUDA_ACTIVE_BATCH environment variable remains an override.
+#include "cuda/generated/cuda_backend_batch_tune.inc"
+
 // Preserve production-batch thread/unroll tuning as the second-stage implementation.
 #define autotune_cn_geometries autotune_cn_geometries_prod
 #include "cuda/generated/cuda_backend_prod_tune.inc"
