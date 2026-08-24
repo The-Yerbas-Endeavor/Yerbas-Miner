@@ -184,6 +184,21 @@ StageSchedule stage_schedule(const Work& work)
     return schedule;
 }
 
+StageSchedule stage_schedule_quiet(const Work& work)
+{
+    return compute_schedule(work);
+}
+
+std::uint64_t schedule_fingerprint(const StageSchedule& schedule) noexcept
+{
+    return schedule_fingerprint64(schedule);
+}
+
+const char* cryptonight_name(std::uint8_t index) noexcept
+{
+    return cn_name(index);
+}
+
 Hash256 hash_staged_reference(const Work& work)
 {
     if (work.data == nullptr || work.size == 0) throw std::invalid_argument("GhostRider work buffer must not be empty");
