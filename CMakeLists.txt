@@ -177,8 +177,11 @@ else()
         target_compile_options(yerbas-ghostrider-reference PRIVATE
             $<$<CONFIG:Release>:-march=native>
             $<$<CONFIG:Release>:-mtune=native>
+            $<$<CONFIG:Release>:-fno-lto>
         )
         target_compile_definitions(yerbas-ghostrider-reference PRIVATE YERBAS_NATIVE_CPU_BUILD=1)
+        set_property(TARGET yerbas-ghostrider-reference PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+        set_property(TARGET yerbas-ghostrider-reference PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
     endif()
 endif()
 
@@ -220,8 +223,12 @@ else()
         target_compile_options(yerbas-miner PRIVATE
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-march=native>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-mtune=native>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-fno-lto>
         )
+        target_link_options(yerbas-miner PRIVATE $<$<CONFIG:Release>:-fno-lto>)
         target_compile_definitions(yerbas-miner PRIVATE YERBAS_NATIVE_CPU_BUILD=1)
+        set_property(TARGET yerbas-miner PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+        set_property(TARGET yerbas-miner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
     endif()
 endif()
 
@@ -382,7 +389,7 @@ if(BUILD_TESTING)
             tests
             "${YERBAS_CUDA_GENERATED_DIR}"
             "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonote"
+            "${YERBAS_CORE_SRC}/cryptonight"
         )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
         target_compile_options(cuda-keccak-validation PRIVATE
@@ -405,7 +412,7 @@ if(BUILD_TESTING)
             tests
             "${YERBAS_CUDA_GENERATED_DIR}"
             "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonote"
+            "${YERBAS_CORE_SRC}/cryptonight"
         )
         target_link_libraries(cuda-batch-benchmark PRIVATE yerbas-ghostrider-reference)
         target_compile_options(cuda-batch-benchmark PRIVATE
