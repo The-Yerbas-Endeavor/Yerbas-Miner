@@ -32,6 +32,11 @@ bool diagnostics_enabled()
     return env_enabled("YERBAS_DIAGNOSTICS");
 }
 
+bool stop_requested(const std::atomic_bool* stop)
+{
+    return stop != nullptr && stop->load(std::memory_order_relaxed);
+}
+
 std::uint64_t fnv1a64(const std::string& text)
 {
     std::uint64_t value = 14695981039346656037ULL;
@@ -130,32 +135,47 @@ double median(std::vector<double> values)
     return (values[mid - 1U] + values[mid]) * 0.5;
 }
 
-double benchmark_pair(unsigned int threads, unsigned int batch)
+double benchmark_pair(unsigned int threads,
+                      unsigned int batch,
+                      const std::atomic_bool* stop,
+                      bool& interrupted)
 {
+    interrupted = false;
+    if (stop_requested(stop)) {
+        interrupted = true;
+        return 0.0;
+    }
+
     WorkerPool pool(threads);
     const auto headers = representative_headers();
     std::array<std::uint8_t, 32> impossible_target{};
 
-    // Warm the worker pool, CryptoNight reusable contexts and instruction/data
-    // caches before collecting production timing samples.
     auto warm = headers.front();
     write_nonce(warm, 0x13572468U);
     (void)pool.run(warm, impossible_target, 0x13572468U, std::max(1U, std::min(batch, 4U)));
+    if (stop_requested(stop)) {
+        interrupted = true;
+        return 0.0;
+    }
 
     std::vector<double> samples;
     samples.reserve(headers.size());
     std::uint32_t nonce = 0x24680000U;
     for (auto header : headers) {
+        if (stop_requested(stop)) {
+            interrupted = true;
+            break;
+        }
         write_nonce(header, nonce);
         const auto start = std::chrono::steady_clock::now();
         (void)pool.run(header, impossible_target, nonce, batch);
-        const auto stop = std::chrono::steady_clock::now();
-        const double seconds = std::chrono::duration<double>(stop - start).count();
+        const auto stop_time = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(stop_time - start).count();
         const double hashes = static_cast<double>(threads) * static_cast<double>(batch);
         if (seconds > 0.0) samples.push_back(hashes / seconds);
         nonce += static_cast<std::uint32_t>(threads * batch + 0x100U);
     }
-    return median(std::move(samples));
+    return interrupted ? 0.0 : median(std::move(samples));
 }
 
 std::vector<unsigned int> batch_candidates(unsigned int configured_batch)
@@ -197,7 +217,6 @@ void save_cache(const std::filesystem::path& path, const TuneResult& result)
             std::filesystem::rename(temp, path, ec);
         }
     } catch (...) {
-        // Cache persistence is optional; mining remains valid without it.
     }
 }
 
@@ -205,7 +224,8 @@ void save_cache(const std::filesystem::path& path, const TuneResult& result)
 
 TuneResult production_autotune(unsigned int hardware_threads,
                                unsigned int configured_threads,
-                               unsigned int configured_batch)
+                               unsigned int configured_batch,
+                               const std::atomic_bool* stop)
 {
     hardware_threads = std::max(1U, hardware_threads);
     const unsigned int max_threads = configured_threads == 0U
@@ -213,8 +233,11 @@ TuneResult production_autotune(unsigned int hardware_threads,
         : std::max(1U, std::min(configured_threads, hardware_threads));
     const unsigned int fallback_batch = configured_batch == 0U ? 16U : configured_batch;
 
+    if (stop_requested(stop))
+        return TuneResult{max_threads, fallback_batch, 0.0, false, true};
+
     if (env_enabled("YERBAS_CPU_DISABLE_AUTOTUNE"))
-        return TuneResult{max_threads, fallback_batch, 0.0, false};
+        return TuneResult{max_threads, fallback_batch, 0.0, false, false};
 
     TuneResult cached{};
     const auto path = cache_path(hardware_threads, max_threads);
@@ -236,13 +259,29 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | combinations=" << matrix_size
               << " | schedules=5 | metric=median GhostRider H/s\n";
 
-    TuneResult best{1U, batches.front(), 0.0, false};
+    TuneResult best{1U, batches.front(), 0.0, false, false};
     bool have_best = false;
 
     for (unsigned int threads = 1U; threads <= max_threads; ++threads) {
-        TuneResult row_best{threads, batches.front(), 0.0, false};
+        if (stop_requested(stop)) {
+            best.interrupted = true;
+            return best;
+        }
+
+        TuneResult row_best{threads, batches.front(), 0.0, false, false};
         for (const unsigned int batch : batches) {
-            const double hps = benchmark_pair(threads, batch);
+            if (stop_requested(stop)) {
+                best.interrupted = true;
+                return best;
+            }
+
+            bool interrupted = false;
+            const double hps = benchmark_pair(threads, batch, stop, interrupted);
+            if (interrupted || stop_requested(stop)) {
+                best.interrupted = true;
+                return best;
+            }
+
             if (diagnostics_enabled()) {
                 std::cout << "[CPU autotune test] threads=" << threads
                           << " | batch=" << batch << " | "
@@ -265,6 +304,11 @@ TuneResult production_autotune(unsigned int hardware_threads,
             best = row_best;
             have_best = true;
         }
+    }
+
+    if (stop_requested(stop)) {
+        best.interrupted = true;
+        return best;
     }
 
     save_cache(path, best);
