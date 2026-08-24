@@ -12,6 +12,7 @@
 #include <streambuf>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -157,19 +158,61 @@ inline bool read_u64_file(const std::filesystem::path& path, std::uint64_t& valu
     return !file.fail();
 }
 
-inline std::string find_rapl_energy_path()
+inline bool is_package_power_domain_name(const std::string& name)
+{
+    std::string lower;
+    lower.reserve(name.size());
+    for (unsigned char c : name)
+        lower.push_back(static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c));
+    return lower.find("package") != std::string::npos ||
+           lower.find("pkg") != std::string::npos ||
+           lower == "cpu" ||
+           lower == "socket";
+}
+
+inline std::string find_package_energy_path()
 {
 #ifndef _WIN32
-    const std::filesystem::path root("/sys/class/powercap");
-    std::error_code ec;
-    if (!std::filesystem::exists(root, ec)) return {};
-    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
-        if (ec || !entry.is_directory()) continue;
-        std::string name;
-        read_text_file(entry.path() / "name", name);
-        if (name.find("package") == std::string::npos && name.find("Package") == std::string::npos) continue;
-        const auto energy = entry.path() / "energy_uj";
-        if (std::filesystem::exists(energy, ec)) return energy.string();
+    const std::vector<std::filesystem::path> roots = {
+        "/sys/class/powercap",
+        "/sys/devices/virtual/powercap"
+    };
+
+    std::string readable_fallback;
+    for (const auto& root : roots) {
+        std::error_code ec;
+        if (!std::filesystem::exists(root, ec)) continue;
+
+        std::filesystem::recursive_directory_iterator it(
+            root,
+            std::filesystem::directory_options::skip_permission_denied,
+            ec);
+        const std::filesystem::recursive_directory_iterator end;
+        for (; !ec && it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_directory(ec)) {
+                ec.clear();
+                continue;
+            }
+
+            const auto dir = it->path();
+            const auto energy = dir / "energy_uj";
+            if (!std::filesystem::exists(energy, ec)) {
+                ec.clear();
+                continue;
+            }
+
+            std::uint64_t probe = 0;
+            if (!read_u64_file(energy, probe)) continue;
+
+            std::string name;
+            if (read_text_file(dir / "name", name) && is_package_power_domain_name(name))
+                return energy.string();
+
+            if (readable_fallback.empty())
+                readable_fallback = energy.string();
+        }
+        if (!readable_fallback.empty()) return readable_fallback;
     }
 #endif
     return {};
@@ -179,7 +222,7 @@ inline RaplSample read_rapl_sample(const std::string& existing_path = {})
 {
     RaplSample sample;
 #ifndef _WIN32
-    sample.energy_path = existing_path.empty() ? find_rapl_energy_path() : existing_path;
+    sample.energy_path = existing_path.empty() ? find_package_energy_path() : existing_path;
     if (sample.energy_path.empty()) return sample;
     if (!read_u64_file(sample.energy_path, sample.energy_uj)) return sample;
     const std::filesystem::path base = std::filesystem::path(sample.energy_path).parent_path();
@@ -204,8 +247,8 @@ inline double query_cpu_temperature_c(bool& available)
         std::string name;
         if (!read_text_file(entry.path() / "name", name)) continue;
         int priority = 0;
-        if (name.find("k10temp") != std::string::npos || name.find("zenpower") != std::string::npos ||
-            name.find("coretemp") != std::string::npos) priority = 3;
+        if (name.find("coretemp") != std::string::npos || name.find("k10temp") != std::string::npos ||
+            name.find("zenpower") != std::string::npos) priority = 3;
         else if (name.find("cpu") != std::string::npos) priority = 1;
         if (priority == 0) continue;
         for (int i = 1; i <= 32; ++i) {
