@@ -76,16 +76,25 @@ int Miner::run()
 
     const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
     if (config_.miner.cpu_enabled && !config_.pool.url.empty() && !config_.pool.user.empty()) {
-        const auto tune = cpu::production_autotune(hw_threads,
-                                                   config_.miner.threads,
-                                                   config_.miner.cpu_batch,
-                                                   &g_mining_stop_requested);
-        if (tune.interrupted || stop_requested()) {
-            std::cout << "[CPU autotune] interrupted by user\n";
-            return 130;
+        if (config_.miner.cpu_tune == "off") {
+            if (config_.miner.threads == 0) config_.miner.threads = hw_threads;
+            std::cout << "[CPU tuning] off | direct startup"
+                      << " | hardware_threads=" << hw_threads
+                      << " | threads=" << config_.miner.threads
+                      << " | batch=" << config_.miner.cpu_batch << '\n';
+        } else {
+            const auto tune = cpu::production_autotune(hw_threads,
+                                                       config_.miner.threads,
+                                                       config_.miner.cpu_batch,
+                                                       config_.miner.cpu_tune,
+                                                       &g_mining_stop_requested);
+            if (tune.interrupted || stop_requested()) {
+                std::cout << "[CPU autotune] interrupted by user\n";
+                return 130;
+            }
+            config_.miner.threads = tune.threads;
+            config_.miner.cpu_batch = tune.batch;
         }
-        config_.miner.threads = tune.threads;
-        config_.miner.cpu_batch = tune.batch;
     }
 
     std::cout << "Yerbas Miner 0.5.2\n";
@@ -98,7 +107,8 @@ int Miner::run()
     const unsigned int cpu_threads = config_.miner.threads == 0 ? hw_threads : config_.miner.threads;
     std::cout << "CPU mining: " << (config_.miner.cpu_enabled ? "enabled" : "disabled")
               << " | threads " << cpu_threads
-              << " | batch " << config_.miner.cpu_batch << " / thread\n";
+              << " | batch " << config_.miner.cpu_batch << " / thread"
+              << " | tune " << config_.miner.cpu_tune << "\n";
     print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
 
