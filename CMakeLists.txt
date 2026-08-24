@@ -149,7 +149,11 @@ endforeach()
 
 add_library(yerbas-ghostrider-reference STATIC
     src/ghostrider/ghostrider.cpp
+    src/cpu/slow_hash_reuse.c
     ${YERBAS_GR_CORE_SOURCES}
+)
+target_include_directories(yerbas-ghostrider-reference BEFORE PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/yerbas_core_pristine"
 )
 target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE
     ${YERBAS_CORE_SRC}
