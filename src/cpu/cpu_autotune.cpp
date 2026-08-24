@@ -18,7 +18,8 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuTuneRevision = 1;
+constexpr int kCpuTuneRevision = 2;
+constexpr double kCpuTuneMinimumWin = 1.01;
 
 bool env_enabled(const char* name)
 {
@@ -157,21 +158,10 @@ double benchmark_pair(unsigned int threads, unsigned int batch)
     return median(std::move(samples));
 }
 
-std::vector<unsigned int> thread_candidates(unsigned int max_threads)
-{
-    std::set<unsigned int> values;
-    values.insert(1U);
-    values.insert(std::max(1U, max_threads / 2U));
-    values.insert(std::max(1U, (max_threads * 3U) / 4U));
-    if (max_threads > 2U) values.insert(max_threads - 1U);
-    values.insert(max_threads);
-    return {values.begin(), values.end()};
-}
-
 std::vector<unsigned int> batch_candidates(unsigned int configured_batch)
 {
-    std::set<unsigned int> values{8U, 16U, 24U, 32U};
-    if (configured_batch > 0U) values.insert(std::min(configured_batch, 64U));
+    std::set<unsigned int> values{8U, 12U, 16U, 20U, 24U, 28U, 32U, 40U, 48U, 64U};
+    if (configured_batch > 0U && configured_batch <= 64U) values.insert(configured_batch);
     return {values.begin(), values.end()};
 }
 
@@ -229,53 +219,62 @@ TuneResult production_autotune(unsigned int hardware_threads,
     TuneResult cached{};
     const auto path = cache_path(hardware_threads, max_threads);
     if (load_cache(path, cached) && cached.threads <= max_threads) {
-        std::cout << "[CPU autotune] cached | threads=" << cached.threads
-                  << '/' << max_threads << " | batch=" << cached.batch
+        std::cout << "[CPU autotune] cached | hardware_threads=" << hardware_threads
+                  << " | threads=" << cached.threads << '/' << max_threads
+                  << " | batch=" << cached.batch
                   << " | throughput=" << std::fixed << std::setprecision(2)
                   << cached.throughput_hps << " H/s" << std::defaultfloat << '\n';
         return cached;
     }
 
-    std::cout << "[CPU autotune] production tuning starting | max_threads=" << max_threads
+    const auto batches = batch_candidates(fallback_batch);
+    const std::size_t matrix_size = static_cast<std::size_t>(max_threads) * batches.size();
+    std::cout << "[CPU autotune] production matrix tuning starting"
+              << " | hardware_threads=" << hardware_threads
+              << " | thread_ceiling=" << max_threads
+              << " | batches=" << batches.size()
+              << " | combinations=" << matrix_size
               << " | schedules=5 | metric=median GhostRider H/s\n";
 
-    TuneResult best{max_threads, fallback_batch, 0.0, false};
+    TuneResult best{1U, batches.front(), 0.0, false};
+    bool have_best = false;
 
-    // Stage 1: choose thread count using the configured/default batch size.
-    for (const unsigned int threads : thread_candidates(max_threads)) {
-        const double hps = benchmark_pair(threads, fallback_batch);
-        if (diagnostics_enabled())
-            std::cout << "[CPU autotune test] threads=" << threads
-                      << " | batch=" << fallback_batch << " | "
-                      << std::fixed << std::setprecision(2) << hps << " H/s"
-                      << std::defaultfloat << '\n';
-        if (hps > best.throughput_hps) {
-            best.threads = threads;
-            best.batch = fallback_batch;
-            best.throughput_hps = hps;
+    for (unsigned int threads = 1U; threads <= max_threads; ++threads) {
+        TuneResult row_best{threads, batches.front(), 0.0, false};
+        for (const unsigned int batch : batches) {
+            const double hps = benchmark_pair(threads, batch);
+            if (diagnostics_enabled()) {
+                std::cout << "[CPU autotune test] threads=" << threads
+                          << " | batch=" << batch << " | "
+                          << std::fixed << std::setprecision(2) << hps << " H/s"
+                          << std::defaultfloat << '\n';
+            }
+            if (hps > row_best.throughput_hps) {
+                row_best.batch = batch;
+                row_best.throughput_hps = hps;
+            }
         }
-    }
 
-    // Stage 2: keep the winning thread count and tune scheduler batch size.
-    for (const unsigned int batch : batch_candidates(fallback_batch)) {
-        if (batch == fallback_batch) continue;
-        const double hps = benchmark_pair(best.threads, batch);
-        if (diagnostics_enabled())
-            std::cout << "[CPU autotune test] threads=" << best.threads
-                      << " | batch=" << batch << " | "
-                      << std::fixed << std::setprecision(2) << hps << " H/s"
-                      << std::defaultfloat << '\n';
-        if (hps > best.throughput_hps * 1.01) {
-            best.batch = batch;
-            best.throughput_hps = hps;
+        std::cout << "[CPU autotune] threads=" << threads
+                  << " | best_batch=" << row_best.batch
+                  << " | median=" << std::fixed << std::setprecision(2)
+                  << row_best.throughput_hps << " H/s"
+                  << std::defaultfloat << '\n';
+
+        if (!have_best || row_best.throughput_hps > best.throughput_hps * kCpuTuneMinimumWin) {
+            best = row_best;
+            have_best = true;
         }
     }
 
     save_cache(path, best);
-    std::cout << "[CPU autotune] selected | threads=" << best.threads
-              << '/' << max_threads << " | batch=" << best.batch
+    std::cout << "[CPU autotune] selected"
+              << " | hardware_threads=" << hardware_threads
+              << " | threads=" << best.threads << '/' << max_threads
+              << " | batch=" << best.batch
               << " | median=" << std::fixed << std::setprecision(2)
-              << best.throughput_hps << " H/s | cached=yes"
+              << best.throughput_hps << " H/s"
+              << " | min-win=1% | cached=yes"
               << std::defaultfloat << '\n';
     return best;
 }
