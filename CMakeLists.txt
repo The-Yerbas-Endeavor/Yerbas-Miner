@@ -16,6 +16,7 @@ endif()
 
 option(YERBAS_ENABLE_CUDA "Build the NVIDIA CUDA backend" ON)
 option(YERBAS_FETCH_CORE "Fetch the pinned Yerbas Core GhostRider reference sources" ON)
+option(YERBAS_NATIVE_CPU "Tune CPU mining code for the current host CPU" OFF)
 
 if(NOT YERBAS_FETCH_CORE)
     message(FATAL_ERROR "Yerbas Core GhostRider sources are required for the CPU reference implementation")
@@ -160,7 +161,7 @@ target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE
     ${YERBAS_CORE_SRC}/cryptonote
 )
 
-if(YERBAS_IPO_SUPPORTED)
+if(YERBAS_IPO_SUPPORTED AND NOT YERBAS_NATIVE_CPU)
     set_property(TARGET yerbas-ghostrider-reference PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
@@ -172,6 +173,13 @@ if(MSVC)
     )
 else()
     target_compile_options(yerbas-ghostrider-reference PRIVATE $<$<CONFIG:Release>:-O3>)
+    if(YERBAS_NATIVE_CPU)
+        target_compile_options(yerbas-ghostrider-reference PRIVATE
+            $<$<CONFIG:Release>:-march=native>
+            $<$<CONFIG:Release>:-mtune=native>
+        )
+        target_compile_definitions(yerbas-ghostrider-reference PRIVATE YERBAS_NATIVE_CPU_BUILD=1)
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -208,6 +216,13 @@ else()
     target_compile_options(yerbas-miner PRIVATE
         $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-O3>
     )
+    if(YERBAS_NATIVE_CPU)
+        target_compile_options(yerbas-miner PRIVATE
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-march=native>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-mtune=native>
+        )
+        target_compile_definitions(yerbas-miner PRIVATE YERBAS_NATIVE_CPU_BUILD=1)
+    endif()
 endif()
 
 if(WIN32)
