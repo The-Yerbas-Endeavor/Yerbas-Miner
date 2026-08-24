@@ -16,11 +16,12 @@
 
 namespace yerbas {
 namespace {
-std::atomic_bool g_stop_requested{false};
+std::atomic_bool g_mining_stop_requested{false};
 
 void handle_signal(int)
 {
-    g_stop_requested.store(true);
+    g_mining_stop_requested.store(true, std::memory_order_relaxed);
+    request_stop();
 }
 
 void print_cpu_capabilities()
@@ -66,7 +67,8 @@ Miner::Miner(AppConfig config)
 
 int Miner::run()
 {
-    g_stop_requested.store(false);
+    g_mining_stop_requested.store(false, std::memory_order_relaxed);
+    g_stop_requested.store(false, std::memory_order_relaxed);
     std::signal(SIGINT, handle_signal);
 #ifdef SIGTERM
     std::signal(SIGTERM, handle_signal);
@@ -77,8 +79,8 @@ int Miner::run()
         const auto tune = cpu::production_autotune(hw_threads,
                                                    config_.miner.threads,
                                                    config_.miner.cpu_batch,
-                                                   &g_stop_requested);
-        if (tune.interrupted || g_stop_requested.load()) {
+                                                   &g_mining_stop_requested);
+        if (tune.interrupted || stop_requested()) {
             std::cout << "[CPU autotune] interrupted by user\n";
             return 130;
         }
@@ -101,6 +103,10 @@ int Miner::run()
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
 
     stratum::Client stratum_client(config_);
+    if (stop_requested()) {
+        std::cout << "Startup cancelled by user.\n";
+        return 130;
+    }
     stratum_client.print_connection_plan();
 
 #ifdef YERBAS_HAS_CUDA
@@ -210,7 +216,7 @@ int Miner::run()
         return 2;
     }
 
-    return stratum_client.run(g_stop_requested);
+    return stratum_client.run(g_mining_stop_requested);
 }
 
 } // namespace yerbas
