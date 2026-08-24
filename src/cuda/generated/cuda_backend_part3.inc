@@ -167,12 +167,36 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         }
         for (auto& event : stage_boundaries) cudaEventDestroy(event);
 
+        std::uint64_t fingerprint = 1469598103934665603ULL;
+        for (const std::uint8_t stage : impl_->host_job.stages) {
+            fingerprint ^= stage;
+            fingerprint *= 1099511628211ULL;
+        }
+
+        const double gr_hps = sample_total_ms > 0.0F
+            ? (static_cast<double>(impl_->batch_size) * 1000.0 / static_cast<double>(sample_total_ms))
+            : 0.0;
+        std::ostringstream cn_names;
+        bool first_cn = true;
+        for (const std::uint8_t encoded : impl_->host_job.stages) {
+            if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
+            const std::uint8_t algorithm = static_cast<std::uint8_t>(encoded & 0x7fU);
+            if (algorithm >= cryptonight::kVariantConfigs.size()) continue;
+            if (!first_cn) cn_names << '/';
+            cn_names << cryptonight::kVariantConfigs[algorithm].name;
+            first_cn = false;
+        }
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[CUDA GR perf] GPU " << impl_->device_id
+                  << " | fingerprint=" << std::hex << std::setw(16) << std::setfill('0') << fingerprint
+                  << std::dec << std::setfill(' ')
+                  << " | CN=" << cn_names.str()
+                  << " | batch=" << impl_->batch_size
+                  << " | stages=" << sample_total_ms << " ms"
+                  << " | throughput=" << gr_hps << " H/s"
+                  << std::defaultfloat << '\n';
+
         if ((impl_->stage_profile_samples % 4U) == 0U) {
-            std::uint64_t fingerprint = 1469598103934665603ULL;
-            for (const std::uint8_t stage : impl_->host_job.stages) {
-                fingerprint ^= stage;
-                fingerprint *= 1099511628211ULL;
-            }
             std::cout << std::fixed << std::setprecision(3)
                       << "[GPU " << impl_->device_id << "] GhostRider rolling stage profile"
                       << " | samples=" << impl_->stage_profile_samples
