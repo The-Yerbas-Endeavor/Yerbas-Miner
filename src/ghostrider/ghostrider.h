@@ -44,6 +44,13 @@ Hash512 stage_reference(const Work& work, std::uint8_t stage);
 // computed once per Stratum job and reused for every nonce in the GPU batch.
 StageSchedule stage_schedule(const Work& work);
 
+// Quiet metadata helpers used by performance instrumentation. These use the same
+// canonical schedule/fingerprint implementation as the normal GhostRider logger,
+// so CPU and CUDA performance records share one stable rotation identity.
+StageSchedule stage_schedule_quiet(const Work& work);
+std::uint64_t schedule_fingerprint(const StageSchedule& schedule) noexcept;
+const char* cryptonight_name(std::uint8_t index) noexcept;
+
 bool reference_ready() noexcept;
 
 } // namespace yerbas::ghostrider
