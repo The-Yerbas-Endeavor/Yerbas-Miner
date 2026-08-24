@@ -1,11 +1,11 @@
 #include "ghostrider/ghostrider.h"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -135,10 +135,9 @@ std::uint64_t schedule_fingerprint64(const StageSchedule& schedule)
     return value;
 }
 
-void reusable_cn_hash(const uint512& input, uint512& output, int variant)
+bool reusable_cn_hash(const uint512& input, uint512& output, int variant) noexcept
 {
-    if (variant < 0 || variant >= static_cast<int>(kCnParams.size()))
-        throw std::invalid_argument("CryptoNight stage index must be 0..5");
+    if (variant < 0 || variant >= static_cast<int>(kCnParams.size())) return false;
     output = uint512{};
     const auto& params = kCnParams[static_cast<std::size_t>(variant)];
     yerbas_cn_slow_hash_reuse(reinterpret_cast<const char*>(&input),
@@ -148,27 +147,24 @@ void reusable_cn_hash(const uint512& input, uint512& output, int variant)
                               params.page_size,
                               params.iterations,
                               params.aes_rounds);
+    return true;
 }
 
 bool validate_reusable_cn() noexcept
 {
-    try {
-        uint512 input{};
-        for (std::size_t i = 0; i < 64; ++i)
-            input.begin()[i] = static_cast<unsigned char>((i * 37U + 11U) & 0xffU);
+    uint512 input{};
+    for (std::size_t i = 0; i < 64; ++i)
+        input.begin()[i] = static_cast<unsigned char>((i * 37U + 11U) & 0xffU);
 
-        for (int variant = 0; variant < 6; ++variant) {
-            uint512 reference{};
-            uint512 candidate{};
-            cnHash(&input, &reference, 64, variant);
-            reusable_cn_hash(input, candidate, variant);
-            if (std::memcmp(reference.begin(), candidate.begin(), 64) != 0)
-                return false;
-        }
-        return true;
-    } catch (...) {
-        return false;
+    for (int variant = 0; variant < 6; ++variant) {
+        uint512 reference{};
+        uint512 candidate{};
+        cnHash(&input, &reference, 64, variant);
+        if (!reusable_cn_hash(input, candidate, variant)) return false;
+        if (std::memcmp(reference.begin(), candidate.begin(), 64) != 0)
+            return false;
     }
+    return true;
 }
 
 void log_schedule(const StageSchedule& schedule)
@@ -313,24 +309,33 @@ Hash256 hash_reference(const Work& work)
 
 bool optimized_cpu_ready() noexcept
 {
-    static std::once_flag once;
-    static bool ready = false;
-    std::call_once(once, [] {
-        ready = validate_reusable_cn();
+    // 0 = uninitialized, 1 = initializing, 2 = ready, 3 = failed.
+    static std::atomic<int> state{0};
+    int current = state.load(std::memory_order_acquire);
+    if (current == 2) return true;
+    if (current == 3) return false;
+
+    int expected = 0;
+    if (state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+        const bool ready = validate_reusable_cn();
         std::cout << "CPU CryptoNight reusable contexts: "
                   << (ready ? "parity PASS (6/6)" : "parity FAIL; reference fallback")
                   << '\n';
-    });
-    return ready;
+        state.store(ready ? 2 : 3, std::memory_order_release);
+        return ready;
+    }
+
+    do {
+        current = state.load(std::memory_order_acquire);
+    } while (current == 1);
+    return current == 2;
 }
 
 Hash256 hash_optimized(const Work& work)
 {
     if (!optimized_cpu_ready()) return hash_reference(work);
-    if (work.data == nullptr || work.size == 0)
-        throw std::invalid_argument("GhostRider work buffer must not be empty");
-    if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-        throw std::invalid_argument("GhostRider work buffer is too large");
+    if (work.data == nullptr || work.size == 0) return hash_reference(work);
+    if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max())) return hash_reference(work);
 
     const auto& schedule = cached_schedule(work);
     uint512 hash[18];
@@ -339,7 +344,7 @@ Hash256 hash_optimized(const Work& work)
         const bool is_cn = (stage & kCryptoNightStageFlag) != 0;
         const int algorithm = static_cast<int>(stage & 0x7fU);
         if (is_cn) {
-            reusable_cn_hash(hash[i - 1], hash[i], algorithm);
+            if (!reusable_cn_hash(hash[i - 1], hash[i], algorithm)) return hash_reference(work);
         } else {
             const void* input = (i == 0)
                 ? static_cast<const void*>(work.data)
