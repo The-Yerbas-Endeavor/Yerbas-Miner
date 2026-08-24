@@ -167,7 +167,7 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         }
         for (auto& event : stage_boundaries) cudaEventDestroy(event);
 
-        std::uint64_t fingerprint = 1469598103934665603ULL;
+        std::uint64_t fingerprint = 14695981039346656037ULL;
         for (const std::uint8_t stage : impl_->host_job.stages) {
             fingerprint ^= stage;
             fingerprint *= 1099511628211ULL;
