@@ -77,6 +77,9 @@ struct WorkerPool::Impl {
     void worker_loop(unsigned int index)
     {
         std::uint64_t seen_generation = 0;
+        bool multilane_validated = false;
+        bool multilane_disabled = false;
+
         for (;;) {
             std::array<std::uint8_t, 80> header{};
             std::array<std::uint8_t, 32> target{};
@@ -112,7 +115,31 @@ struct WorkerPool::Impl {
                     works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
                 }
 
-                if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), lanes, widths)) {
+                bool batch_ok = !multilane_disabled &&
+                    ghostrider::hash_optimized_batch(works.data(), hashes.data(), lanes, widths);
+
+                if (batch_ok && !multilane_validated) {
+                    bool parity = true;
+                    for (std::size_t lane = 0; lane < lanes; ++lane) {
+                        const auto reference = ghostrider::hash_optimized(works[lane]);
+                        if (reference != hashes[lane]) {
+                            parity = false;
+                            break;
+                        }
+                    }
+                    if (parity) {
+                        multilane_validated = true;
+                        if (index == 0)
+                            std::cout << "CPU GhostRider multilaned pipeline: parity PASS | production enabled\n";
+                    } else {
+                        multilane_disabled = true;
+                        batch_ok = false;
+                        if (index == 0)
+                            std::cout << "CPU GhostRider multilaned pipeline: parity FAIL | 1-way fallback\n";
+                    }
+                }
+
+                if (!batch_ok) {
                     for (std::size_t lane = 0; lane < lanes; ++lane)
                         hashes[lane] = ghostrider::hash_optimized(works[lane]);
                 }
