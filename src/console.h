@@ -120,14 +120,70 @@ private:
         return mutex;
     }
 
+    static std::string& rotation_fingerprint()
+    {
+        static std::string value;
+        return value;
+    }
+
+    static std::string& rotation_cn_variants()
+    {
+        static std::string value;
+        return value;
+    }
+
+    static void capture_rotation_metadata(const std::string& line)
+    {
+        constexpr const char* kFingerprintPrefix = "[GhostRider] schedule fingerprint=";
+        if (line.rfind(kFingerprintPrefix, 0) == 0) {
+            const std::size_t begin = std::char_traits<char>::length(kFingerprintPrefix);
+            const std::size_t end = line.find_first_of(" |", begin);
+            rotation_fingerprint() = line.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            return;
+        }
+
+        constexpr const char* kSchedulePrefix = "[GhostRider] schedule ";
+        if (line.rfind(kSchedulePrefix, 0) != 0 || line.rfind(kFingerprintPrefix, 0) == 0) return;
+
+        std::string variants;
+        std::size_t pos = std::char_traits<char>::length(kSchedulePrefix);
+        while (pos < line.size()) {
+            while (pos < line.size() && line[pos] == ' ') ++pos;
+            if (pos >= line.size()) break;
+            const std::size_t token_end = line.find(' ', pos);
+            const std::string token = line.substr(pos, token_end == std::string::npos ? std::string::npos : token_end - pos);
+            const std::size_t colon = token.find(':');
+            if (colon != std::string::npos && token.compare(colon + 1, 3, "CN-") == 0) {
+                if (!variants.empty()) variants += " / ";
+                variants += token.substr(colon + 1);
+            }
+            if (token_end == std::string::npos) break;
+            pos = token_end + 1;
+        }
+        if (!variants.empty()) rotation_cn_variants() = variants;
+    }
+
+    void write_raw_line(const std::string& line)
+    {
+        if (!line.empty()) destination_->sputn(line.data(), static_cast<std::streamsize>(line.size()));
+        destination_->sputc('\n');
+    }
+
     void emit_line(std::string& pending, bool newline)
     {
         std::lock_guard<std::mutex> lock(output_mutex());
+        capture_rotation_metadata(pending);
+
         const char* color = enabled_ ? color_for_line(pending) : nullptr;
         if (color != nullptr) destination_->sputn(color, static_cast<std::streamsize>(std::char_traits<char>::length(color)));
         if (!pending.empty()) destination_->sputn(pending.data(), static_cast<std::streamsize>(pending.size()));
         if (color != nullptr) destination_->sputn(kReset, 4);
         if (newline) destination_->sputc('\n');
+
+        if (newline && pending.find("PROOF OF GRASS | STATUS UPDATE") != std::string::npos) {
+            if (!rotation_fingerprint().empty()) write_raw_line("ROTATION      " + rotation_fingerprint());
+            if (!rotation_cn_variants().empty()) write_raw_line("CRYPTONIGHT   " + rotation_cn_variants());
+        }
         pending.clear();
     }
 
