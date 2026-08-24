@@ -2,9 +2,36 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "slow-hash.h"
 #include "oaes_lib.h"
+
+/* Experimental CN-Fast A/B candidate.
+ *
+ * The generated candidate still preserves the exact pinned Core algorithm and
+ * memory ordering. On GCC we ask the backend to spend more effort on register
+ * renaming, instruction scheduling and loop register-pressure decisions. The
+ * runtime parity/timing gate in slow_hash_reuse.c decides whether this path is
+ * ever used for mining; unsupported compilers simply build the normal code.
+ *
+ * Note: the generated candidate currently also carries the conservative x2
+ * unroll hint from the first A/B experiment. The startup report below makes
+ * that explicit so benchmark results are not mistaken for a pure scheduler
+ * experiment. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize ("rename-registers")
+#pragma GCC optimize ("schedule-insns2")
+#pragma GCC optimize ("ira-loop-pressure")
+#define YERBAS_CN_CANDIDATE_MODE "sched-reg+unroll2"
+#elif defined(__clang__)
+#define YERBAS_CN_CANDIDATE_MODE "unroll2"
+#elif defined(_MSC_VER)
+#pragma optimize("t", on)
+#define YERBAS_CN_CANDIDATE_MODE "msvc-speed+unroll2"
+#else
+#define YERBAS_CN_CANDIDATE_MODE "unroll2"
+#endif
 
 #if defined(_MSC_VER)
 #define YERBAS_TLS __declspec(thread)
@@ -16,6 +43,7 @@
 
 static YERBAS_TLS uint8_t* g_candidate_scratchpad = NULL;
 static YERBAS_TLS OAES_CTX* g_candidate_oaes = NULL;
+static int g_candidate_mode_reported = 0;
 
 static void* candidate_malloc(size_t requested)
 {
@@ -104,6 +132,12 @@ void yerbas_cn_fast_candidate(const char* input,
                               uint32_t iterations,
                               size_t aes_rounds)
 {
+    if (!g_candidate_mode_reported) {
+        printf("[CPU CN candidate] CN-Fast | mode=%s | algorithm=pinned-core | runtime-gated=yes\n",
+               YERBAS_CN_CANDIDATE_MODE);
+        g_candidate_mode_reported = 1;
+    }
+
     yerbas_cn_fast_candidate_impl(input, output, (int)len, variant,
                                   page_size, iterations, aes_rounds);
 }
