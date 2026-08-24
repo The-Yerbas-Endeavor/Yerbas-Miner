@@ -67,31 +67,53 @@ inline const char* color_for_line(const std::string& line)
     return nullptr;
 }
 
-struct GpuPowerSnapshot {
-    std::unordered_map<int, double> watts;
-    double total_watts{0.0};
+struct GpuTelemetry {
+    double watts{0.0};
+    double temperature_c{0.0};
+    double fan_percent{0.0};
+    bool power_available{false};
+    bool temperature_available{false};
+    bool fan_available{false};
+};
+
+struct GpuTelemetrySnapshot {
+    std::unordered_map<int, GpuTelemetry> devices;
     bool available{false};
 };
 
-inline GpuPowerSnapshot query_gpu_power()
+inline GpuTelemetrySnapshot query_gpu_telemetry()
 {
-    GpuPowerSnapshot result;
+    GpuTelemetrySnapshot result;
 #ifdef _WIN32
-    FILE* pipe = _popen("nvidia-smi --query-gpu=index,power.draw --format=csv,noheader,nounits 2>NUL", "r");
+    FILE* pipe = _popen("nvidia-smi --query-gpu=index,power.draw,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>NUL", "r");
 #else
-    FILE* pipe = popen("nvidia-smi --query-gpu=index,power.draw --format=csv,noheader,nounits 2>/dev/null", "r");
+    FILE* pipe = popen("nvidia-smi --query-gpu=index,power.draw,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null", "r");
 #endif
     if (pipe == nullptr) return result;
+
     char buffer[256];
     while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         std::string row(buffer);
-        const std::size_t comma = row.find(',');
-        if (comma == std::string::npos) continue;
+        while (!row.empty() && (row.back() == '\n' || row.back() == '\r')) row.pop_back();
+
+        std::string fields[4];
+        std::size_t begin = 0;
+        int field = 0;
+        while (field < 4) {
+            const std::size_t comma = row.find(',', begin);
+            fields[field++] = row.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+        if (field < 4) continue;
+
         try {
-            const int id = std::stoi(row.substr(0, comma));
-            const double watts = std::stod(row.substr(comma + 1));
-            result.watts[id] = watts;
-            result.total_watts += watts;
+            const int id = std::stoi(fields[0]);
+            GpuTelemetry telemetry;
+            try { telemetry.watts = std::stod(fields[1]); telemetry.power_available = true; } catch (...) {}
+            try { telemetry.temperature_c = std::stod(fields[2]); telemetry.temperature_available = true; } catch (...) {}
+            try { telemetry.fan_percent = std::stod(fields[3]); telemetry.fan_available = true; } catch (...) {}
+            result.devices[id] = telemetry;
             result.available = true;
         } catch (...) {}
     }
@@ -103,10 +125,55 @@ inline GpuPowerSnapshot query_gpu_power()
     return result;
 }
 
-inline std::string format_power(double watts)
+inline std::string format_power(const GpuTelemetry& telemetry)
 {
+    if (!telemetry.power_available) return "n/a";
     std::ostringstream ss;
-    ss << std::fixed << std::setprecision(1) << watts << " W";
+    ss << std::fixed << std::setprecision(1) << telemetry.watts << " W";
+    return ss.str();
+}
+
+inline std::string format_temperature(const GpuTelemetry& telemetry)
+{
+    if (!telemetry.temperature_available) return "n/a";
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(0) << telemetry.temperature_c << " C";
+    return ss.str();
+}
+
+inline std::string format_fan(const GpuTelemetry& telemetry)
+{
+    if (!telemetry.fan_available) return "n/a";
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(0) << telemetry.fan_percent << '%';
+    return ss.str();
+}
+
+inline double status_row_hashrate_hps(const std::string& line)
+{
+    const std::size_t gpu = line.find("GPU ");
+    if (gpu == std::string::npos) return 0.0;
+    const std::size_t after_id = line.find_first_of(" \t", gpu + 4);
+    if (after_id == std::string::npos) return 0.0;
+    const std::size_t value_begin = line.find_first_not_of(" \t", after_id);
+    if (value_begin == std::string::npos) return 0.0;
+    try {
+        std::size_t consumed = 0;
+        const double value = std::stod(line.substr(value_begin), &consumed);
+        const std::string suffix = line.substr(value_begin + consumed, 8);
+        if (suffix.find("MH/s") != std::string::npos) return value * 1000000.0;
+        if (suffix.find("kH/s") != std::string::npos) return value * 1000.0;
+        return value;
+    } catch (...) {
+        return 0.0;
+    }
+}
+
+inline std::string format_efficiency(double hps, const GpuTelemetry& telemetry)
+{
+    if (!telemetry.power_available || telemetry.watts <= 0.0 || hps <= 0.0) return "n/a";
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2) << hps / telemetry.watts << " H/W";
     return ss.str();
 }
 
@@ -150,7 +217,7 @@ private:
     static std::mutex& output_mutex() { static std::mutex mutex; return mutex; }
     static std::string& rotation_fingerprint() { static std::string value; return value; }
     static std::string& rotation_cn_variants() { static std::string value; return value; }
-    static GpuPowerSnapshot& status_power() { static GpuPowerSnapshot value; return value; }
+    static GpuTelemetrySnapshot& status_telemetry() { static GpuTelemetrySnapshot value; return value; }
     static bool& in_status_table() { static bool value = false; return value; }
 
     static void capture_rotation_metadata(const std::string& line)
@@ -202,19 +269,27 @@ private:
 
         const bool top = pending.find("PROOF OF GRASS | STATUS UPDATE") != std::string::npos;
         if (top) {
-            status_power() = query_gpu_power();
+            status_telemetry() = query_gpu_telemetry();
             in_status_table() = true;
         }
 
         std::string rendered = pending;
-        if (in_status_table() && rendered.find("SOURCE") != std::string::npos && rendered.find("HASHRATE") != std::string::npos)
-            rendered += "POWER";
-        else if (in_status_table() && rendered.find("CPU") != std::string::npos && rendered.find("H/s") != std::string::npos)
-            rendered += "        -";
-        else if (in_status_table() && rendered.find("GPU ") != std::string::npos && rendered.find("H/s") != std::string::npos) {
+        if (in_status_table() && rendered.find("SOURCE") != std::string::npos && rendered.find("HASHRATE") != std::string::npos) {
+            rendered += "POWER       TEMP     FAN      EFFICIENCY";
+        } else if (in_status_table() && rendered.find("CPU") != std::string::npos && rendered.find("H/s") != std::string::npos) {
+            rendered += "        -           -        -        -";
+        } else if (in_status_table() && rendered.find("GPU ") != std::string::npos && rendered.find("H/s") != std::string::npos) {
             const int id = gpu_id_from_status_row(rendered);
-            const auto it = status_power().watts.find(id);
-            rendered += "        " + (it != status_power().watts.end() ? format_power(it->second) : std::string("n/a"));
+            const auto it = status_telemetry().devices.find(id);
+            if (it != status_telemetry().devices.end()) {
+                const double hps = status_row_hashrate_hps(rendered);
+                rendered += "        " + format_power(it->second)
+                          + "    " + format_temperature(it->second)
+                          + "    " + format_fan(it->second)
+                          + "    " + format_efficiency(hps, it->second);
+            } else {
+                rendered += "        n/a         n/a      n/a      n/a";
+            }
         }
 
         const char* color = enabled_ ? color_for_line(pending) : nullptr;
