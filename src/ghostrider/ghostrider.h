@@ -25,6 +25,11 @@ struct Work {
 // serialized 80-byte Yerbas block header (nVersion through nNonce).
 Hash256 hash_reference(const Work& work);
 
+// Production CPU path. It uses reusable per-thread CryptoNight resources only
+// after all six CN variants pass parity against the untouched Core reference.
+Hash256 hash_optimized(const Work& work);
+bool optimized_cpu_ready() noexcept;
+
 // Stage-by-stage CPU path that mirrors the validated CUDA pipeline exactly.
 // Use this for live CPU mining so CPU candidate selection follows the same
 // explicit 18-stage dispatch semantics as the pool-proven CUDA path.
