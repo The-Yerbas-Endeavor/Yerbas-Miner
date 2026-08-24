@@ -1,3 +1,5 @@
+#include "miner.h"
+
 // Split into implementation fragments so the CUDA backend can be maintained
 // safely through GitHub's bounded file-edit interface. The fragments are
 // textual includes and compile as one CUDA translation unit.
