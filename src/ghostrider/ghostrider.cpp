@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -12,12 +13,35 @@
 #include "hash_selection.h"
 #include "uint256.h"
 
+extern "C" void yerbas_cn_slow_hash_reuse(const char* input,
+                                           char* output,
+                                           uint32_t len,
+                                           int variant,
+                                           uint32_t page_size,
+                                           uint32_t iterations,
+                                           size_t aes_rounds);
+
 namespace yerbas::ghostrider {
 
 namespace {
 constexpr std::size_t kVersionSize = 4;
 constexpr std::size_t kPrevHashSize = 32;
 constexpr std::size_t kMinimumHeaderPrefix = kVersionSize + kPrevHashSize;
+
+struct CnParams {
+    std::uint32_t page_size;
+    std::uint32_t iterations;
+    std::size_t aes_rounds;
+};
+
+constexpr std::array<CnParams, 6> kCnParams{{
+    {524288U, 131072U, 32768U},
+    {524288U, 131072U, 16384U},
+    {2097152U, 262144U, 131072U},
+    {1048576U, 262144U, 65536U},
+    {262144U, 65536U, 16384U},
+    {262144U, 65536U, 8192U},
+}};
 
 uint256 previous_block_hash(const Work& work)
 {
@@ -109,6 +133,42 @@ std::uint64_t schedule_fingerprint64(const StageSchedule& schedule)
         value *= 1099511628211ULL;
     }
     return value;
+}
+
+void reusable_cn_hash(const uint512& input, uint512& output, int variant)
+{
+    if (variant < 0 || variant >= static_cast<int>(kCnParams.size()))
+        throw std::invalid_argument("CryptoNight stage index must be 0..5");
+    output = uint512{};
+    const auto& params = kCnParams[static_cast<std::size_t>(variant)];
+    yerbas_cn_slow_hash_reuse(reinterpret_cast<const char*>(&input),
+                              reinterpret_cast<char*>(&output),
+                              64U,
+                              1,
+                              params.page_size,
+                              params.iterations,
+                              params.aes_rounds);
+}
+
+bool validate_reusable_cn() noexcept
+{
+    try {
+        uint512 input{};
+        for (std::size_t i = 0; i < 64; ++i)
+            input.begin()[i] = static_cast<unsigned char>((i * 37U + 11U) & 0xffU);
+
+        for (int variant = 0; variant < 6; ++variant) {
+            uint512 reference{};
+            uint512 candidate{};
+            cnHash(&input, &reference, 64, variant);
+            reusable_cn_hash(input, candidate, variant);
+            if (std::memcmp(reference.begin(), candidate.begin(), 64) != 0)
+                return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 void log_schedule(const StageSchedule& schedule)
@@ -226,11 +286,6 @@ Hash256 hash_reference(const Work& work)
     if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         throw std::invalid_argument("GhostRider work buffer is too large");
 
-    // The GhostRider schedule depends only on hashPrevBlock (header bytes 4..35),
-    // not on the nonce. CPU miners hash thousands of nonces for the same job, so
-    // recomputing HashSelection and allocating its vectors for every nonce wastes
-    // significant host time. Cache the 18-stage schedule independently in each
-    // worker thread and refresh it only when the pool changes previous block hash.
     const auto& schedule = cached_schedule(work);
 
     uint512 hash[18];
@@ -240,9 +295,51 @@ Hash256 hash_reference(const Work& work)
         const int algorithm = static_cast<int>(stage & 0x7fU);
 
         if (is_cn) {
-            // GhostRider's CN positions are 5, 11 and 17, so the input is always
-            // the preceding 64-byte state.
             cnHash(&hash[i - 1], &hash[i], 64, algorithm);
+        } else {
+            const void* input = (i == 0)
+                ? static_cast<const void*>(work.data)
+                : static_cast<const void*>(&hash[i - 1]);
+            const int length = (i == 0) ? static_cast<int>(work.size) : 64;
+            coreHash(input, &hash[i], length, algorithm);
+        }
+    }
+
+    const uint256 result = hash[17].trim256();
+    Hash256 out{};
+    std::memcpy(out.data(), result.begin(), out.size());
+    return out;
+}
+
+bool optimized_cpu_ready() noexcept
+{
+    static std::once_flag once;
+    static bool ready = false;
+    std::call_once(once, [] {
+        ready = validate_reusable_cn();
+        std::cout << "CPU CryptoNight reusable contexts: "
+                  << (ready ? "parity PASS (6/6)" : "parity FAIL; reference fallback")
+                  << '\n';
+    });
+    return ready;
+}
+
+Hash256 hash_optimized(const Work& work)
+{
+    if (!optimized_cpu_ready()) return hash_reference(work);
+    if (work.data == nullptr || work.size == 0)
+        throw std::invalid_argument("GhostRider work buffer must not be empty");
+    if (work.size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("GhostRider work buffer is too large");
+
+    const auto& schedule = cached_schedule(work);
+    uint512 hash[18];
+    for (std::size_t i = 0; i < schedule.size(); ++i) {
+        const std::uint8_t stage = schedule[i];
+        const bool is_cn = (stage & kCryptoNightStageFlag) != 0;
+        const int algorithm = static_cast<int>(stage & 0x7fU);
+        if (is_cn) {
+            reusable_cn_hash(hash[i - 1], hash[i], algorithm);
         } else {
             const void* input = (i == 0)
                 ? static_cast<const void*>(work.data)
