@@ -233,6 +233,47 @@ inline RaplSample read_rapl_sample(const std::string& existing_path = {})
     return sample;
 }
 
+inline double query_hwmon_cpu_power_watts(bool& available)
+{
+    available = false;
+#ifndef _WIN32
+    const std::filesystem::path root("/sys/class/hwmon");
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) return 0.0;
+
+    double fallback = 0.0;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (ec || !entry.is_directory()) continue;
+
+        std::string device_name;
+        read_text_file(entry.path() / "name", device_name);
+
+        for (int i = 1; i <= 32; ++i) {
+            std::uint64_t microwatts = 0;
+            const auto input = entry.path() / ("power" + std::to_string(i) + "_input");
+            if (!read_u64_file(input, microwatts)) continue;
+
+            const double watts = static_cast<double>(microwatts) / 1000000.0;
+            if (watts <= 0.0 || watts > 2000.0) continue;
+
+            std::string label;
+            read_text_file(entry.path() / ("power" + std::to_string(i) + "_label"), label);
+            if (is_package_power_domain_name(label) || is_package_power_domain_name(device_name)) {
+                available = true;
+                return watts;
+            }
+            if (fallback <= 0.0) fallback = watts;
+        }
+    }
+
+    if (fallback > 0.0) {
+        available = true;
+        return fallback;
+    }
+#endif
+    return 0.0;
+}
+
 inline double query_cpu_temperature_c(bool& available)
 {
     available = false;
@@ -287,22 +328,26 @@ inline CpuTelemetry query_cpu_telemetry()
     CpuTelemetry telemetry;
     telemetry.temperature_c = query_cpu_temperature_c(telemetry.temperature_available);
 #ifndef _WIN32
-    RaplSample current = read_rapl_sample(previous_rapl_sample().energy_path);
-    RaplSample& previous = previous_rapl_sample();
-    if (current.valid && previous.valid) {
-        const double seconds = std::chrono::duration<double>(current.time - previous.time).count();
-        if (seconds > 0.0) {
-            std::uint64_t delta = 0;
-            if (current.energy_uj >= previous.energy_uj) delta = current.energy_uj - previous.energy_uj;
-            else if (current.max_energy_uj > previous.energy_uj)
-                delta = (current.max_energy_uj - previous.energy_uj) + current.energy_uj;
-            if (delta > 0) {
-                telemetry.watts = (static_cast<double>(delta) / 1000000.0) / seconds;
-                telemetry.power_available = true;
+    telemetry.watts = query_hwmon_cpu_power_watts(telemetry.power_available);
+
+    if (!telemetry.power_available) {
+        RaplSample current = read_rapl_sample(previous_rapl_sample().energy_path);
+        RaplSample& previous = previous_rapl_sample();
+        if (current.valid && previous.valid) {
+            const double seconds = std::chrono::duration<double>(current.time - previous.time).count();
+            if (seconds > 0.0) {
+                std::uint64_t delta = 0;
+                if (current.energy_uj >= previous.energy_uj) delta = current.energy_uj - previous.energy_uj;
+                else if (current.max_energy_uj > previous.energy_uj)
+                    delta = (current.max_energy_uj - previous.energy_uj) + current.energy_uj;
+                if (delta > 0) {
+                    telemetry.watts = (static_cast<double>(delta) / 1000000.0) / seconds;
+                    telemetry.power_available = true;
+                }
             }
         }
+        if (current.valid) previous = current;
     }
-    if (current.valid) previous = current;
 #endif
     return telemetry;
 }
