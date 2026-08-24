@@ -1,9 +1,15 @@
 #include "config.h"
+#include "cpu/cpu_autotune.h"
+// The CPU production tuner is kept as a self-contained implementation fragment
+// for now so release/source builds pick it up without duplicating the existing
+// executable source list. It exposes only the interface declared above.
+#include "cpu/cpu_autotune.cpp"
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -100,6 +106,18 @@ AppConfig load_config(int argc, char** argv)
     }
 
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
+
+    // A configured thread count is a ceiling for production autotuning, not an
+    // assumption that every logical worker improves GhostRider throughput.
+    // Skip the benchmark for incomplete pool configs so setup/help remains fast.
+    if (cfg.miner.cpu_enabled && !cfg.pool.url.empty() && !cfg.pool.user.empty()) {
+        const unsigned int hardware_threads = std::max(1U, std::thread::hardware_concurrency());
+        const auto tune = cpu::production_autotune(hardware_threads,
+                                                   cfg.miner.threads,
+                                                   cfg.miner.cpu_batch);
+        cfg.miner.threads = tune.threads;
+        cfg.miner.cpu_batch = tune.batch;
+    }
     return cfg;
 }
 
@@ -111,8 +129,8 @@ void print_config_help(const char* program)
         << "  --user USER         Wallet/address or pool username\n"
         << "  --password PASS     Pool password (default: x)\n"
         << "  --worker NAME       Worker name\n"
-        << "  --threads N         CPU worker threads (0 = auto)\n"
-        << "  --cpu-batch N       CPU hashes per hybrid round/thread (0 = auto)\n"
+        << "  --threads N         CPU thread ceiling (0 = all logical CPUs, autotuned)\n"
+        << "  --cpu-batch N       CPU autotune starting batch (0 = default 16)\n"
         << "  --no-cpu            Disable CPU mining\n"
         << "  --no-hybrid         Do not combine CPU and GPU\n"
         << "  --devices 0,1       GPU device ids\n"
@@ -120,7 +138,11 @@ void print_config_help(const char* program)
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
-        << "  -h, --help          Show this help\n";
+        << "  -h, --help          Show this help\n\n"
+        << "CPU autotune environment:\n"
+        << "  YERBAS_CPU_RETUNE=1          Ignore cached CPU tuning and benchmark again\n"
+        << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Use configured/default CPU threads and batch\n"
+        << "  YERBAS_DIAGNOSTICS=1        Show individual CPU autotune benchmark results\n";
 }
 
 } // namespace yerbas
