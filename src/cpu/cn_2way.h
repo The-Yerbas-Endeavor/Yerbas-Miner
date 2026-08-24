@@ -18,7 +18,10 @@ int yerbas_cn_hash_pair_reference(const char* input0,
                                   uint32_t iterations,
                                   size_t aes_rounds);
 
-/* Genuine two-lane CryptoNight kernel. */
+/* Genuine two-lane CryptoNight kernel. Both lanes have independent state and
+ * scratchpads; their dependency-heavy loops are interleaved in one execution
+ * path. This function remains experimental until yerbas_cn_2way_ready() is
+ * non-zero after parity/performance validation. */
 int yerbas_cn_hash_pair_2way(const char* input0,
                              const char* input1,
                              char* output0,
@@ -29,7 +32,9 @@ int yerbas_cn_hash_pair_2way(const char* input0,
                              uint32_t iterations,
                              size_t aes_rounds);
 
-/* Genuine four-lane CryptoNight kernel. */
+/* Genuine four-lane CryptoNight kernel. Four lane-local dependency chains are
+ * interleaved in one execution path. Production selection remains gated by
+ * parity and measured throughput. */
 int yerbas_cn_hash_quad_4way(const char* input0,
                              const char* input1,
                              const char* input2,
@@ -44,8 +49,8 @@ int yerbas_cn_hash_quad_4way(const char* input0,
                              uint32_t iterations,
                              size_t aes_rounds);
 
-/* These remain false until the startup parity/performance gate explicitly
- * qualifies the corresponding kernel for production mining. */
+/* Returns non-zero only after the corresponding kernel passes parity and the
+ * production performance gate. */
 int yerbas_cn_2way_ready(void);
 int yerbas_cn_4way_ready(void);
 
