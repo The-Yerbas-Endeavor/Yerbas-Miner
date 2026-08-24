@@ -5,8 +5,7 @@ BUILD_DIR="${1:-build-cuda}"
 
 cmake -S . -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS_RELEASE="-O3 -march=native -mtune=native" \
-  -DCMAKE_CXX_FLAGS_RELEASE="-O3 -march=native -mtune=native"
+  -DYERBAS_NATIVE_CPU=ON
 
 cmake --build "${BUILD_DIR}" \
   --target yerbas-miner \
