@@ -3,10 +3,14 @@
 #include "ghostrider/ghostrider.h"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -30,6 +34,20 @@ bool hash_meets_target(const ghostrider::Hash256& hash,
         if (hash[index] > target_le[index]) return false;
     }
     return true;
+}
+
+std::string cn_summary(const ghostrider::StageSchedule& schedule)
+{
+    std::ostringstream out;
+    bool first = true;
+    for (const std::uint8_t stage : schedule) {
+        if ((stage & ghostrider::kCryptoNightStageFlag) == 0) continue;
+        const auto variant = static_cast<std::uint8_t>(stage & 0x7fU);
+        if (!first) out << '/';
+        out << ghostrider::cryptonight_name(variant);
+        first = false;
+    }
+    return out.str();
 }
 
 } // namespace
@@ -100,6 +118,7 @@ struct WorkerPool::Impl {
                                std::uint32_t start,
                                unsigned int count)
     {
+        const auto perf_start = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex);
             base_header = header;
@@ -119,6 +138,11 @@ struct WorkerPool::Impl {
                 active_header_key = header_key;
                 active_target = target;
                 active_target_valid = true;
+
+                const ghostrider::Work work{header.data(), header.size()};
+                active_schedule = ghostrider::stage_schedule_quiet(work);
+                active_fingerprint = ghostrider::schedule_fingerprint(active_schedule);
+                active_cn_summary = cn_summary(active_schedule);
             }
             target_le = active_target;
 
@@ -132,6 +156,24 @@ struct WorkerPool::Impl {
 
         std::unique_lock<std::mutex> lock(mutex);
         all_done.wait(lock, [&] { return completed == threads; });
+        lock.unlock();
+
+        const auto perf_end = std::chrono::steady_clock::now();
+        ++run_count;
+        if ((run_count % 4U) == 0U) {
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(perf_end - perf_start).count();
+            const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
+            const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[CPU GR perf] fingerprint=" << std::hex << std::setw(16) << std::setfill('0')
+                      << active_fingerprint << std::dec << std::setfill(' ')
+                      << " | CN=" << active_cn_summary
+                      << " | threads=" << threads
+                      << " | hashes=" << hashes
+                      << " | elapsed=" << elapsed_ms << " ms"
+                      << " | throughput=" << hps << " H/s"
+                      << std::defaultfloat << '\n';
+        }
 
         std::size_t total_candidates = 0;
         for (const auto& result : results) total_candidates += result.size();
@@ -152,6 +194,7 @@ struct WorkerPool::Impl {
     bool stopping{false};
     std::uint64_t generation{0};
     unsigned int completed{0};
+    std::uint64_t run_count{0};
 
     std::array<std::uint8_t, 80> base_header{};
     std::array<std::uint8_t, 32> target_le{};
@@ -161,6 +204,9 @@ struct WorkerPool::Impl {
     std::array<std::uint8_t, 76> active_header_key{};
     std::array<std::uint8_t, 32> active_target{};
     bool active_target_valid{false};
+    ghostrider::StageSchedule active_schedule{};
+    std::uint64_t active_fingerprint{0};
+    std::string active_cn_summary;
 };
 
 WorkerPool::WorkerPool(unsigned int thread_count)
