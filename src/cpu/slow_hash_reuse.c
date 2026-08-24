@@ -117,6 +117,25 @@ static const char* yerbas_cn_variant_name(int variant)
     return (variant >= 0 && variant < 6) ? names[variant] : "CN?";
 }
 
+/*
+ * GhostRider always calls the underlying CryptoNight protocol as variant 1.
+ * The six GhostRider CN flavors are distinguished by their page/iteration/
+ * AES-round parameter sets, so profiling must identify them from those
+ * parameters rather than from slow-hash.c's protocol-variant argument.
+ */
+static int yerbas_cn_profile_variant(uint32_t page_size,
+                                     uint32_t iterations,
+                                     size_t aes_rounds)
+{
+    if (page_size == 524288u && iterations == 131072u && aes_rounds == 32768u) return 0;
+    if (page_size == 524288u && iterations == 131072u && aes_rounds == 16384u) return 1;
+    if (page_size == 2097152u && iterations == 262144u && aes_rounds == 131072u) return 2;
+    if (page_size == 1048576u && iterations == 262144u && aes_rounds == 65536u) return 3;
+    if (page_size == 262144u && iterations == 65536u && aes_rounds == 16384u) return 4;
+    if (page_size == 262144u && iterations == 65536u && aes_rounds == 8192u) return 5;
+    return -1;
+}
+
 static unsigned int g_yerbas_cn_profiled_mask = 0;
 static int g_yerbas_cn_backend_reported = 0;
 
@@ -171,7 +190,9 @@ void yerbas_cn_slow_hash_reuse(const char* input,
         g_yerbas_cn_backend_reported = 1;
     }
 
-    const unsigned int bit = (variant >= 0 && variant < 6) ? (1u << variant) : 0u;
+    const int profile_variant = yerbas_cn_profile_variant(page_size, iterations, aes_rounds);
+    const unsigned int bit = (profile_variant >= 0 && profile_variant < 6)
+        ? (1u << (unsigned int)profile_variant) : 0u;
     const int profile = bit != 0u && (g_yerbas_cn_profiled_mask & bit) == 0u;
     const double start_ms = profile ? yerbas_now_ms() : 0.0;
 
@@ -182,7 +203,7 @@ void yerbas_cn_slow_hash_reuse(const char* input,
         const double elapsed_ms = yerbas_now_ms() - start_ms;
         g_yerbas_cn_profiled_mask |= bit;
         printf("[CPU CN profile] %s | backend=%s | page=%u KiB | iterations=%u | elapsed=%.3f ms\n",
-               yerbas_cn_variant_name(variant), yerbas_cn_reuse_backend(),
+               yerbas_cn_variant_name(profile_variant), yerbas_cn_reuse_backend(),
                page_size / 1024u, iterations, elapsed_ms);
     }
 }
