@@ -22,6 +22,33 @@ void handle_signal(int)
     g_stop_requested.store(true);
 }
 
+void print_cpu_capabilities()
+{
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+    __builtin_cpu_init();
+    std::cout << "CPU features:"
+              << " AES=" << (__builtin_cpu_supports("aes") ? "yes" : "no")
+              << " AVX=" << (__builtin_cpu_supports("avx") ? "yes" : "no")
+              << " AVX2=" << (__builtin_cpu_supports("avx2") ? "yes" : "no")
+              << " BMI2=" << (__builtin_cpu_supports("bmi2") ? "yes" : "no")
+              << " SSE4.2=" << (__builtin_cpu_supports("sse4.2") ? "yes" : "no")
+#ifdef YERBAS_NATIVE_CPU_TUNING
+              << " | build=native"
+#else
+              << " | build=portable"
+#endif
+              << '\n';
+#else
+    std::cout << "CPU features: runtime x86 feature reporting unavailable"
+#ifdef YERBAS_NATIVE_CPU_TUNING
+              << " | build=native"
+#else
+              << " | build=portable"
+#endif
+              << '\n';
+#endif
+}
+
 #ifdef _WIN32
 void pause_before_exit()
 {
@@ -54,6 +81,7 @@ int Miner::run()
     const unsigned int cpu_threads = config_.miner.threads == 0 ? hw_threads : config_.miner.threads;
     std::cout << "CPU mining: " << (config_.miner.cpu_enabled ? "enabled" : "disabled")
               << " | threads " << cpu_threads << (config_.miner.threads == 0 ? " (auto)" : "") << "\n";
+    print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
 
     stratum::Client stratum_client(config_);
@@ -95,12 +123,6 @@ int Miner::run()
             }
             std::cout << '\n';
 
-            // The real per-device BatchEngine instances have already been created by
-            // the Stratum client and run the CUDA parity/autotune gates at their full
-            // production batch size. Do not construct a one-hash BatchEngine here:
-            // doing so reruns the complete CryptoNight tuner against batch=1 and can
-            // invalidate parity scratch allocations. Coverage is the readiness gate;
-            // kernel correctness is enforced by the production engine validation.
             const bool pipeline_ready = cuda::full_ghostrider_cuda_coverage();
             if (config_.gpu.skip_validation)
                 std::cout << "CUDA startup validation: skipped by configuration\n";
