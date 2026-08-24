@@ -162,6 +162,34 @@ cmake -S . -B build-cuda -G Ninja \
 
 The first configure requires network access so CMake can fetch the pinned Yerbas Core source tree and the header-only JSON dependency.
 
+## CPU power and efficiency telemetry on Linux
+
+Yerbas-Miner can display CPU package power and calculate CPU mining efficiency in hashes per watt (`H/W`) when the operating system exposes a readable package-energy or power sensor.
+
+On many Intel Linux systems, package energy is exposed through the kernel's RAPL powercap interface. Some distributions restrict unprivileged access to the RAPL `energy_uj` file. If the status table shows CPU temperature but reports `n/a` for CPU `POWER` and `EFFICIENCY`, check whether the package energy counter is readable:
+
+```bash
+cat /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/energy_uj
+```
+
+If this returns `Permission denied`, allow read access with:
+
+```bash
+sudo chmod a+r /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/energy_uj
+```
+
+Verify the counter can then be read without `sudo`:
+
+```bash
+cat /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/energy_uj
+```
+
+Restart Yerbas-Miner after changing the permission. Once package power is readable, the status table can report CPU watts and calculate CPU `H/W` efficiency.
+
+The exact powercap path can vary by CPU, kernel, and Linux distribution. Yerbas-Miner discovers supported telemetry interfaces at runtime; the path above is the common Intel `package-0` RAPL location. Do not run Yerbas-Miner as root solely for telemetry. Systems that do not expose a readable CPU package-power interface will continue mining normally and display `n/a` for unavailable power and efficiency values.
+
+Note that permissions under `/sys` may be reset after reboot. If persistent CPU power telemetry is desired, configure the appropriate system permission/udev policy for the machine rather than running the miner as root.
+
 ## Next milestone
 
 Complete the Stratum TCP session: connect, subscribe, authorize, receive jobs, construct Yerbas block headers, scan nonces, validate shares with the CPU reference, and submit accepted shares. The same real block-header vectors remain the correctness gate for the CUDA implementation.
