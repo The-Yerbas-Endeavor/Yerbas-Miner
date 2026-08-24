@@ -5,6 +5,7 @@
 #include "cpu/cn_width_tune.h"
 #include "cpu/cpu_lane_scheduler_tune.h"
 
+#include <algorithm>
 #include <exception>
 #include <fstream>
 #include <iomanip>
