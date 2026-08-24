@@ -7,6 +7,12 @@
 #include "slow-hash.h"
 #include "oaes_lib.h"
 
+/* Core's portable AES helpers are compiled from cryptonote/aesb.c into the
+ * GhostRider reference library. Declare them before the runtime-dispatch
+ * wrappers below so generic C11 builds never rely on implicit declarations. */
+void aesb_single_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
+void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 #define YERBAS_TLS __declspec(thread)
@@ -109,7 +115,8 @@ static int yerbas_selected_single_round(const uint8_t* in, uint8_t* out, const u
     if (yerbas_runtime_has_aes_avx2())
         return yerbas_aesni_single_round(in, out, expanded_key);
 #endif
-    return aesb_single_round(in, out, expanded_key);
+    aesb_single_round(in, out, (uint8_t*)expanded_key);
+    return 0;
 }
 
 static int yerbas_selected_pseudo_round(const uint8_t* in, uint8_t* out, const uint8_t* expanded_key)
@@ -118,7 +125,8 @@ static int yerbas_selected_pseudo_round(const uint8_t* in, uint8_t* out, const u
     if (yerbas_runtime_has_aes_avx2())
         return yerbas_aesni_pseudo_round(in, out, expanded_key);
 #endif
-    return aesb_pseudo_round(in, out, expanded_key);
+    aesb_pseudo_round(in, out, (uint8_t*)expanded_key);
+    return 0;
 }
 
 const char* yerbas_cn_reuse_backend(void)
