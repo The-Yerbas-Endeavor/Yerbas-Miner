@@ -1,5 +1,6 @@
 #include "config.h"
 #include "console.h"
+#include "console_quiet.h"
 #include "miner.h"
 
 #include <exception>
@@ -57,6 +58,7 @@ int main(int argc, char** argv)
 #endif
 
     yerbas::console::enable_colors();
+    yerbas::console::enable_quiet_output();
     write_startup_log("Yerbas Miner starting");
 
     std::cout << "\nYerbas Miner starting...\n"
