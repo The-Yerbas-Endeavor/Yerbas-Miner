@@ -99,7 +99,7 @@ struct WorkerPool::Impl {
                 const std::uint32_t nonce = start + i;
                 write_nonce(header, nonce);
                 const ghostrider::Work work{header.data(), header.size()};
-                const auto hash = ghostrider::hash_reference(work);
+                const auto hash = ghostrider::hash_optimized(work);
                 if (hash_meets_target(hash, target))
                     found.push_back({nonce});
             }
