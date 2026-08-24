@@ -1,7 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -125,7 +128,153 @@ inline GpuTelemetrySnapshot query_gpu_telemetry()
     return result;
 }
 
+struct CpuTelemetry {
+    double watts{0.0};
+    double temperature_c{0.0};
+    bool power_available{false};
+    bool temperature_available{false};
+};
+
+struct RaplSample {
+    std::uint64_t energy_uj{0};
+    std::uint64_t max_energy_uj{0};
+    std::chrono::steady_clock::time_point time{};
+    std::string energy_path;
+    bool valid{false};
+};
+
+inline bool read_text_file(const std::filesystem::path& path, std::string& value)
+{
+    std::ifstream file(path);
+    if (!file) return false;
+    std::getline(file, value);
+    return !value.empty();
+}
+
+inline bool read_u64_file(const std::filesystem::path& path, std::uint64_t& value)
+{
+    std::ifstream file(path);
+    if (!file) return false;
+    file >> value;
+    return !file.fail();
+}
+
+inline std::string find_rapl_energy_path()
+{
+#ifndef _WIN32
+    const std::filesystem::path root("/sys/class/powercap");
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) return {};
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (ec || !entry.is_directory()) continue;
+        std::string name;
+        read_text_file(entry.path() / "name", name);
+        if (name.find("package") == std::string::npos && name.find("Package") == std::string::npos) continue;
+        const auto energy = entry.path() / "energy_uj";
+        if (std::filesystem::exists(energy, ec)) return energy.string();
+    }
+#endif
+    return {};
+}
+
+inline RaplSample read_rapl_sample(const std::string& existing_path = {})
+{
+    RaplSample sample;
+#ifndef _WIN32
+    sample.energy_path = existing_path.empty() ? find_rapl_energy_path() : existing_path;
+    if (sample.energy_path.empty()) return sample;
+    if (!read_u64_file(sample.energy_path, sample.energy_uj)) return sample;
+    const std::filesystem::path base = std::filesystem::path(sample.energy_path).parent_path();
+    read_u64_file(base / "max_energy_range_uj", sample.max_energy_uj);
+    sample.time = std::chrono::steady_clock::now();
+    sample.valid = true;
+#endif
+    return sample;
+}
+
+inline double query_cpu_temperature_c(bool& available)
+{
+    available = false;
+#ifndef _WIN32
+    const std::filesystem::path root("/sys/class/hwmon");
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) return 0.0;
+    double best = 0.0;
+    int best_priority = -1;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (ec || !entry.is_directory()) continue;
+        std::string name;
+        if (!read_text_file(entry.path() / "name", name)) continue;
+        int priority = 0;
+        if (name.find("k10temp") != std::string::npos || name.find("zenpower") != std::string::npos) priority = 3;
+        else if (name.find("coretemp") != std::string::npos) priority = 3;
+        else if (name.find("cpu") != std::string::npos) priority = 1;
+        if (priority == 0) continue;
+        for (int i = 1; i <= 32; ++i) {
+            std::uint64_t millideg = 0;
+            if (!read_u64_file(entry.path() / ("temp" + std::to_string(i) + "_input"), millideg)) continue;
+            const double temp = static_cast<double>(millideg) / 1000.0;
+            if (temp < 0.0 || temp > 130.0) continue;
+            if (priority > best_priority || (priority == best_priority && temp > best)) {
+                best_priority = priority;
+                best = temp;
+                available = true;
+            }
+        }
+    }
+    return best;
+#else
+    return 0.0;
+#endif
+}
+
+inline RaplSample& previous_rapl_sample()
+{
+    static RaplSample sample;
+    return sample;
+}
+
+inline void prime_cpu_power_sample()
+{
+#ifndef _WIN32
+    previous_rapl_sample() = read_rapl_sample();
+#endif
+}
+
+inline CpuTelemetry query_cpu_telemetry()
+{
+    CpuTelemetry telemetry;
+    telemetry.temperature_c = query_cpu_temperature_c(telemetry.temperature_available);
+#ifndef _WIN32
+    RaplSample current = read_rapl_sample(previous_rapl_sample().energy_path);
+    RaplSample& previous = previous_rapl_sample();
+    if (current.valid && previous.valid) {
+        const double seconds = std::chrono::duration<double>(current.time - previous.time).count();
+        if (seconds > 0.0) {
+            std::uint64_t delta = 0;
+            if (current.energy_uj >= previous.energy_uj) delta = current.energy_uj - previous.energy_uj;
+            else if (current.max_energy_uj > previous.energy_uj)
+                delta = (current.max_energy_uj - previous.energy_uj) + current.energy_uj;
+            if (delta > 0) {
+                telemetry.watts = (static_cast<double>(delta) / 1000000.0) / seconds;
+                telemetry.power_available = true;
+            }
+        }
+    }
+    if (current.valid) previous = current;
+#endif
+    return telemetry;
+}
+
 inline std::string format_power(const GpuTelemetry& telemetry)
+{
+    if (!telemetry.power_available) return "n/a";
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1) << telemetry.watts << " W";
+    return ss.str();
+}
+
+inline std::string format_power(const CpuTelemetry& telemetry)
 {
     if (!telemetry.power_available) return "n/a";
     std::ostringstream ss;
@@ -141,35 +290,40 @@ inline std::string format_temperature(const GpuTelemetry& telemetry)
     return ss.str();
 }
 
-inline std::string format_fan(const GpuTelemetry& telemetry)
+inline std::string format_temperature(const CpuTelemetry& telemetry)
 {
-    if (!telemetry.fan_available) return "n/a";
+    if (!telemetry.temperature_available) return "n/a";
     std::ostringstream ss;
-    ss << std::fixed << std::setprecision(0) << telemetry.fan_percent << '%';
+    ss << std::fixed << std::setprecision(0) << telemetry.temperature_c << " C";
     return ss.str();
 }
 
 inline double status_row_hashrate_hps(const std::string& line)
 {
-    const std::size_t gpu = line.find("GPU ");
-    if (gpu == std::string::npos) return 0.0;
-    const std::size_t after_id = line.find_first_of(" \t", gpu + 4);
-    if (after_id == std::string::npos) return 0.0;
-    const std::size_t value_begin = line.find_first_not_of(" \t", after_id);
-    if (value_begin == std::string::npos) return 0.0;
-    try {
-        std::size_t consumed = 0;
-        const double value = std::stod(line.substr(value_begin), &consumed);
-        const std::string suffix = line.substr(value_begin + consumed, 8);
-        if (suffix.find("MH/s") != std::string::npos) return value * 1000000.0;
-        if (suffix.find("kH/s") != std::string::npos) return value * 1000.0;
-        return value;
-    } catch (...) {
-        return 0.0;
+    std::istringstream ss(line);
+    std::string source;
+    double value = 0.0;
+    std::string unit;
+    if (!(ss >> source)) return 0.0;
+    if (source == "GPU") {
+        int id = 0;
+        if (!(ss >> id)) return 0.0;
     }
+    if (!(ss >> value >> unit)) return 0.0;
+    if (unit == "MH/s") return value * 1000000.0;
+    if (unit == "kH/s") return value * 1000.0;
+    return unit == "H/s" ? value : 0.0;
 }
 
 inline std::string format_efficiency(double hps, const GpuTelemetry& telemetry)
+{
+    if (!telemetry.power_available || telemetry.watts <= 0.0 || hps <= 0.0) return "n/a";
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2) << hps / telemetry.watts << " H/W";
+    return ss.str();
+}
+
+inline std::string format_efficiency(double hps, const CpuTelemetry& telemetry)
 {
     if (!telemetry.power_available || telemetry.watts <= 0.0 || hps <= 0.0) return "n/a";
     std::ostringstream ss;
@@ -218,6 +372,7 @@ private:
     static std::string& rotation_fingerprint() { static std::string value; return value; }
     static std::string& rotation_cn_variants() { static std::string value; return value; }
     static GpuTelemetrySnapshot& status_telemetry() { static GpuTelemetrySnapshot value; return value; }
+    static CpuTelemetry& status_cpu_telemetry() { static CpuTelemetry value; return value; }
     static bool& in_status_table() { static bool value = false; return value; }
 
     static void capture_rotation_metadata(const std::string& line)
@@ -270,6 +425,7 @@ private:
         const bool top = pending.find("PROOF OF GRASS | STATUS UPDATE") != std::string::npos;
         if (top) {
             status_telemetry() = query_gpu_telemetry();
+            status_cpu_telemetry() = query_cpu_telemetry();
             in_status_table() = true;
         }
 
@@ -277,7 +433,10 @@ private:
         if (in_status_table() && rendered.find("SOURCE") != std::string::npos && rendered.find("HASHRATE") != std::string::npos) {
             rendered += "POWER       TEMP     FAN      EFFICIENCY";
         } else if (in_status_table() && rendered.find("CPU") != std::string::npos && rendered.find("H/s") != std::string::npos) {
-            rendered += "        -           -        -        -";
+            const double hps = status_row_hashrate_hps(rendered);
+            rendered += "        " + format_power(status_cpu_telemetry())
+                      + "    " + format_temperature(status_cpu_telemetry())
+                      + "    -        " + format_efficiency(hps, status_cpu_telemetry());
         } else if (in_status_table() && rendered.find("GPU ") != std::string::npos && rendered.find("H/s") != std::string::npos) {
             const int id = gpu_id_from_status_row(rendered);
             const auto it = status_telemetry().devices.find(id);
@@ -317,6 +476,7 @@ inline void enable_colors()
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
+    detail::prime_cpu_power_sample();
     const bool enabled = detail::terminal_supports_color();
     static detail::LineColorBuf cout_buffer(std::cout.rdbuf(), enabled);
     static detail::LineColorBuf cerr_buffer(std::cerr.rdbuf(), enabled);
