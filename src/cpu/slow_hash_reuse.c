@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
 
 #include "slow-hash.h"
 #include "oaes_lib.h"
@@ -99,13 +101,32 @@ unsigned int yerbas_cn_reuse_compile_features(void)
     return features;
 }
 
+static double yerbas_now_ms(void)
+{
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static const char* yerbas_cn_variant_name(int variant)
+{
+    static const char* names[6] = {
+        "CN-Dark", "CN-DarkLite", "CN-Fast",
+        "CN-Lite", "CN-Turtle", "CN-TurtleLite"
+    };
+    return (variant >= 0 && variant < 6) ? names[variant] : "CN?";
+}
+
+static unsigned int g_yerbas_cn_profiled_mask = 0;
+static int g_yerbas_cn_backend_reported = 0;
+
 /*
  * Compile a second copy of the pristine Core CryptoNight implementation with
  * only production-specific resource/AES substitutions. The untouched pinned
  * Core implementation remains linked beside this candidate for parity checks.
  */
-#define cn_slow_hash yerbas_cn_slow_hash_reuse
-#define cn_fast_hash yerbas_cn_fast_hash_reuse
+#define cn_slow_hash yerbas_cn_slow_hash_reuse_impl
+#define cn_fast_hash yerbas_cn_fast_hash_reuse_impl
 #define do_groestl_hash yerbas_reuse_do_groestl_hash
 #define malloc yerbas_tls_cn_malloc
 #define free yerbas_tls_cn_free
@@ -117,3 +138,51 @@ unsigned int yerbas_cn_reuse_compile_features(void)
 #endif
 
 #include "slow-hash.c"
+
+#undef cn_slow_hash
+#undef cn_fast_hash
+#undef do_groestl_hash
+#undef malloc
+#undef free
+#undef oaes_alloc
+#undef oaes_free
+#if YERBAS_CN_AESNI
+#undef aesb_single_round
+#undef aesb_pseudo_round
+#endif
+
+void yerbas_cn_slow_hash_reuse(const char* input,
+                               char* output,
+                               uint32_t len,
+                               int variant,
+                               uint32_t page_size,
+                               uint32_t iterations,
+                               size_t aes_rounds)
+{
+    if (!g_yerbas_cn_backend_reported) {
+        const unsigned int features = yerbas_cn_reuse_compile_features();
+        printf("CPU CryptoNight backend: %s | compile AES=%s AVX=%s AVX2=%s BMI2=%s SSE4.2=%s\n",
+               yerbas_cn_reuse_backend(),
+               (features & (1u << 0)) ? "yes" : "no",
+               (features & (1u << 1)) ? "yes" : "no",
+               (features & (1u << 2)) ? "yes" : "no",
+               (features & (1u << 3)) ? "yes" : "no",
+               (features & (1u << 4)) ? "yes" : "no");
+        g_yerbas_cn_backend_reported = 1;
+    }
+
+    const unsigned int bit = (variant >= 0 && variant < 6) ? (1u << variant) : 0u;
+    const int profile = bit != 0u && (g_yerbas_cn_profiled_mask & bit) == 0u;
+    const double start_ms = profile ? yerbas_now_ms() : 0.0;
+
+    yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant,
+                                   page_size, iterations, aes_rounds);
+
+    if (profile) {
+        const double elapsed_ms = yerbas_now_ms() - start_ms;
+        g_yerbas_cn_profiled_mask |= bit;
+        printf("[CPU CN profile] %s | backend=%s | page=%u KiB | iterations=%u | elapsed=%.3f ms\n",
+               yerbas_cn_variant_name(variant), yerbas_cn_reuse_backend(),
+               page_size / 1024u, iterations, elapsed_ms);
+    }
+}
