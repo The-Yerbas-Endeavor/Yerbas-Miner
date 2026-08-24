@@ -32,7 +32,7 @@ void print_cpu_capabilities()
               << " AVX2=" << (__builtin_cpu_supports("avx2") ? "yes" : "no")
               << " BMI2=" << (__builtin_cpu_supports("bmi2") ? "yes" : "no")
               << " SSE4.2=" << (__builtin_cpu_supports("sse4.2") ? "yes" : "no")
-#ifdef YERBAS_NATIVE_CPU_TUNING
+#ifdef YERBAS_NATIVE_CPU_BUILD
               << " | build=native"
 #else
               << " | build=portable"
@@ -40,7 +40,7 @@ void print_cpu_capabilities()
               << '\n';
 #else
     std::cout << "CPU features: runtime x86 feature reporting unavailable"
-#ifdef YERBAS_NATIVE_CPU_TUNING
+#ifdef YERBAS_NATIVE_CPU_BUILD
               << " | build=native"
 #else
               << " | build=portable"
