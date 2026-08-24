@@ -1,4 +1,5 @@
 #include "cpu/cpu_worker_pool.h"
+#include "cpu/cn_width_tune.h"
 
 #include "ghostrider/ghostrider.h"
 
@@ -93,15 +94,34 @@ struct WorkerPool::Impl {
                 count = per_thread;
             }
 
+            const auto widths = active_cn_widths();
             std::vector<Candidate> found;
             found.reserve(2);
-            for (unsigned int i = 0; i < count; ++i) {
-                const std::uint32_t nonce = start + i;
-                write_nonce(header, nonce);
-                const ghostrider::Work work{header.data(), header.size()};
-                const auto hash = ghostrider::hash_optimized(work);
-                if (hash_meets_target(hash, target))
-                    found.push_back({nonce});
+
+            for (unsigned int i = 0; i < count;) {
+                const std::size_t lanes = std::min<std::size_t>(4U, count - i);
+                std::array<std::array<std::uint8_t, 80>, 4> lane_headers{};
+                std::array<ghostrider::Work, 4> works{};
+                std::array<ghostrider::Hash256, 4> hashes{};
+                std::array<std::uint32_t, 4> nonces{};
+
+                for (std::size_t lane = 0; lane < lanes; ++lane) {
+                    lane_headers[lane] = header;
+                    nonces[lane] = start + i + static_cast<unsigned int>(lane);
+                    write_nonce(lane_headers[lane], nonces[lane]);
+                    works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
+                }
+
+                if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), lanes, widths)) {
+                    for (std::size_t lane = 0; lane < lanes; ++lane)
+                        hashes[lane] = ghostrider::hash_optimized(works[lane]);
+                }
+
+                for (std::size_t lane = 0; lane < lanes; ++lane) {
+                    if (hash_meets_target(hashes[lane], target))
+                        found.push_back({nonces[lane]});
+                }
+                i += static_cast<unsigned int>(lanes);
             }
 
             {
@@ -123,15 +143,6 @@ struct WorkerPool::Impl {
             std::lock_guard<std::mutex> lock(mutex);
             base_header = header;
 
-            // Stratum mining.set_difficulty applies to the next mining.notify job.
-            // CUDA already keeps the target that was uploaded with the active job,
-            // but the CPU path previously replaced its target immediately on every
-            // vardiff message. At high vardiff this made CPU shares appear to stop
-            // while GPU shares for the same active job continued to be accepted.
-            //
-            // Treat bytes 0..75 of the header (everything except nonce) as the
-            // active-work identity. Preserve that job's target until the header
-            // changes, then latch the newest pool target for the new job.
             std::array<std::uint8_t, 76> header_key{};
             std::copy_n(header.begin(), header_key.size(), header_key.begin());
             if (!active_target_valid || header_key != active_header_key) {
