@@ -2,6 +2,7 @@
 #include "console.h"
 #include "console_quiet.h"
 #include "miner.h"
+#include "cpu/cn_width_tune.h"
 
 #include <exception>
 #include <fstream>
@@ -13,6 +14,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+/* Keep the width tuner build-system neutral while the CPU multilaning layer is
+ * still experimental. Once production dispatch is wired into WorkerPool this
+ * can move into the normal CMake source list. */
+#include "cpu/cn_width_tune.cpp"
 
 namespace {
 
@@ -67,6 +73,8 @@ int main(int argc, char** argv)
 
     try {
         const auto config = yerbas::load_config(argc, argv);
+        if (config.miner.cpu_enabled)
+            (void)yerbas::cpu::qualify_cn_widths(config.miner.cpu_tune);
         yerbas::Miner miner(config);
         const int result = miner.run();
         write_startup_log("Yerbas Miner exited with code " + std::to_string(result));
