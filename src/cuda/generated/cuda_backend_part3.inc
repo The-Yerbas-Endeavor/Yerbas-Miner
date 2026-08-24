@@ -29,25 +29,11 @@ struct BatchEngine::Impl {
     {
         if (batch_size == 0 || batch_capacity == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
         if (batch_capacity < batch_size) batch_capacity = batch_size;
-        check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
-        check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_capacity * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_capacity * kStateBytes), "cudaMalloc 512-bit state batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), batch_capacity * kCnScratchpadStride), "cudaMalloc CryptoNight scratchpads failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_capacity * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
-        try {
-            cn_geometries = autotune_cn_geometries(device_id, stream, d_states, batch_size,
-                                                   d_cn_scratchpads, d_cn_contexts);
-        } catch (const std::exception& e) {
-            cn_geometries.fill(CnGeometry{});
-            cudaGetLastError();
-            std::cerr << "[GPU " << device_id << "] CryptoNight geometry autotune failed; using 64/64/64: "
-                      << e.what() << '\n';
-        }
 
+        // Resolve the requested active mining batch before autotune so every
+        // production-batch cache and backend benchmark measures the batch that
+        // will actually be used for mining. Previously 3712 could mine with
+        // tuning/cache data collected at the pre-override 3584 size.
         const char* active_batch_env = std::getenv("YERBAS_CUDA_ACTIVE_BATCH");
         if (active_batch_env && *active_batch_env) {
             try {
@@ -69,6 +55,25 @@ struct BatchEngine::Impl {
             std::cout << "[GPU " << device_id << "] CUDA batch tuning headroom"
                       << " | active=" << batch_size
                       << " | capacity=" << batch_capacity << '\n';
+        }
+
+        check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
+        check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_capacity * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_capacity * kStateBytes), "cudaMalloc 512-bit state batch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), batch_capacity * kCnScratchpadStride), "cudaMalloc CryptoNight scratchpads failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_capacity * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
+        try {
+            cn_geometries = autotune_cn_geometries(device_id, stream, d_states, batch_size,
+                                                   d_cn_scratchpads, d_cn_contexts);
+        } catch (const std::exception& e) {
+            cn_geometries.fill(CnGeometry{});
+            cudaGetLastError();
+            std::cerr << "[GPU " << device_id << "] CryptoNight geometry autotune failed; using 64/64/64: "
+                      << e.what() << '\n';
         }
     }
 
@@ -118,7 +123,9 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
     ++impl_->scan_count;
-    const bool profile_this_scan = (impl_->scan_count % 4U) == 0U;
+    const char* diagnostics_env = std::getenv("YERBAS_DIAGNOSTICS");
+    const bool diagnostics_enabled = diagnostics_env && *diagnostics_env && std::string(diagnostics_env) != "0";
+    const bool profile_this_scan = diagnostics_enabled && (impl_->scan_count % 4U) == 0U;
     std::array<cudaEvent_t, 19> stage_boundaries{};
     if (profile_this_scan) {
         for (auto& event : stage_boundaries)
@@ -244,4 +251,3 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     }
     return out;
 }
-
