@@ -117,12 +117,6 @@ static const char* yerbas_cn_variant_name(int variant)
     return (variant >= 0 && variant < 6) ? names[variant] : "CN?";
 }
 
-/*
- * GhostRider always calls the underlying CryptoNight protocol as variant 1.
- * The six GhostRider CN flavors are distinguished by their page/iteration/
- * AES-round parameter sets, so profiling must identify them from those
- * parameters rather than from slow-hash.c's protocol-variant argument.
- */
 static int yerbas_cn_profile_variant(uint32_t page_size,
                                      uint32_t iterations,
                                      size_t aes_rounds)
@@ -138,12 +132,8 @@ static int yerbas_cn_profile_variant(uint32_t page_size,
 
 static unsigned int g_yerbas_cn_profiled_mask = 0;
 static int g_yerbas_cn_backend_reported = 0;
+static int g_yerbas_cn_fast_phase_reported = 0;
 
-/*
- * Compile a second copy of the pristine Core CryptoNight implementation with
- * only production-specific resource/AES substitutions. The untouched pinned
- * Core implementation remains linked beside this candidate for parity checks.
- */
 #define cn_slow_hash yerbas_cn_slow_hash_reuse_impl
 #define cn_fast_hash yerbas_cn_fast_hash_reuse_impl
 #define do_groestl_hash yerbas_reuse_do_groestl_hash
@@ -169,6 +159,101 @@ static int g_yerbas_cn_backend_reported = 0;
 #undef aesb_single_round
 #undef aesb_pseudo_round
 #endif
+
+/* Profiling-only clone of cn_slow_hash(). It uses the exact same helpers,
+ * AES backend, scratchpad and algorithm as the production copy above, but
+ * records phase boundaries for CN-Fast. Mining never uses this result. */
+static void yerbas_cn_fast_phase_probe(const char* input,
+                                       int len,
+                                       int variant,
+                                       uint32_t page_size,
+                                       uint32_t iterations,
+                                       size_t aes_rounds)
+{
+    union cn_slow_hash_state state;
+    uint8_t text[INIT_SIZE_BYTE];
+    uint8_t a[AES_BLOCK_SIZE];
+    uint8_t b[AES_BLOCK_SIZE * 2];
+    uint8_t c[AES_BLOCK_SIZE];
+    uint8_t aes_key[AES_KEY_SIZE];
+    uint8_t output[HASH_SIZE];
+    oaes_ctx* aes_ctx;
+    size_t init_rounds = page_size / INIT_SIZE_BYTE;
+    uint8_t* long_state = (uint8_t*)yerbas_tls_cn_malloc(page_size);
+    size_t i, j;
+
+    const double total_start = yerbas_now_ms();
+    hash_process(&state.hs, (const uint8_t*)input, len);
+    memcpy(text, state.init, INIT_SIZE_BYTE);
+    memcpy(aes_key, state.hs.b, AES_KEY_SIZE);
+    aes_ctx = (oaes_ctx*)yerbas_tls_oaes_alloc();
+    VARIANT1_INIT();
+    VARIANT2_INIT(b, state);
+    oaes_key_import_data(aes_ctx, aes_key, AES_KEY_SIZE);
+    for (i = 0; i < init_rounds; ++i) {
+        for (j = 0; j < INIT_SIZE_BLK; ++j) {
+            yerbas_aesni_pseudo_round(&text[AES_BLOCK_SIZE * j],
+                                      &text[AES_BLOCK_SIZE * j],
+                                      aes_ctx->key->exp_data);
+        }
+        memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE);
+    }
+    for (i = 0; i < 16; ++i) {
+        a[i] = state.k[i] ^ state.k[32 + i];
+        b[i] = state.k[16 + i] ^ state.k[48 + i];
+    }
+    const double setup_end = yerbas_now_ms();
+
+    for (i = 0; i < iterations; ++i) {
+        j = e2i(a, aes_rounds);
+        yerbas_aesni_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
+        VARIANT2_SHUFFLE_ADD(long_state, j * AES_BLOCK_SIZE, a, b);
+        xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);
+        VARIANT1_1((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);
+        j = e2i(c, aes_rounds);
+        uint64_t* dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
+        uint64_t t[2] = {dst[0], dst[1]};
+        VARIANT2_INTEGER_MATH(t, c);
+        uint64_t hi;
+        uint64_t lo = mul128(((uint64_t*)c)[0], t[0], &hi);
+        VARIANT2_2();
+        VARIANT2_SHUFFLE_ADD(long_state, j * AES_BLOCK_SIZE, a, b);
+        ((uint64_t*)a)[0] += hi;
+        ((uint64_t*)a)[1] += lo;
+        dst[0] = ((uint64_t*)a)[0];
+        dst[1] = ((uint64_t*)a)[1];
+        ((uint64_t*)a)[0] ^= t[0];
+        ((uint64_t*)a)[1] ^= t[1];
+        VARIANT1_2((uint8_t*)&long_state[j * AES_BLOCK_SIZE]);
+        copy_block(b + AES_BLOCK_SIZE, b);
+        copy_block(b, c);
+    }
+    const double loop_end = yerbas_now_ms();
+
+    memcpy(text, state.init, INIT_SIZE_BYTE);
+    oaes_key_import_data(aes_ctx, &state.hs.b[32], AES_KEY_SIZE);
+    for (i = 0; i < init_rounds; ++i) {
+        for (j = 0; j < INIT_SIZE_BLK; ++j) {
+            xor_blocks(&text[j * AES_BLOCK_SIZE],
+                       &long_state[i * INIT_SIZE_BYTE + j * AES_BLOCK_SIZE]);
+            yerbas_aesni_pseudo_round(&text[j * AES_BLOCK_SIZE],
+                                      &text[j * AES_BLOCK_SIZE],
+                                      aes_ctx->key->exp_data);
+        }
+    }
+    memcpy(state.init, text, INIT_SIZE_BYTE);
+    hash_permutation(&state.hs);
+    extra_hashes[state.hs.b[0] & 3](&state, 200, (char*)output);
+    const double final_end = yerbas_now_ms();
+
+    const double setup_ms = setup_end - total_start;
+    const double loop_ms = loop_end - setup_end;
+    const double final_ms = final_end - loop_end;
+    const double total_ms = final_end - total_start;
+    printf("[CPU CN phase] CN-Fast | backend=%s | setup=%.3f ms | loop=%.3f ms | final=%.3f ms | total=%.3f ms | loop=%.1f%%\n",
+           yerbas_cn_reuse_backend(), setup_ms, loop_ms, final_ms, total_ms,
+           total_ms > 0.0 ? (loop_ms * 100.0 / total_ms) : 0.0);
+}
 
 void yerbas_cn_slow_hash_reuse(const char* input,
                                char* output,
@@ -205,5 +290,13 @@ void yerbas_cn_slow_hash_reuse(const char* input,
         printf("[CPU CN profile] %s | backend=%s | page=%u KiB | iterations=%u | elapsed=%.3f ms\n",
                yerbas_cn_variant_name(profile_variant), yerbas_cn_reuse_backend(),
                page_size / 1024u, iterations, elapsed_ms);
+
+#if YERBAS_CN_AESNI
+        if (profile_variant == 2 && !g_yerbas_cn_fast_phase_reported) {
+            g_yerbas_cn_fast_phase_reported = 1;
+            yerbas_cn_fast_phase_probe(input, (int)len, variant,
+                                       page_size, iterations, aes_rounds);
+        }
+#endif
     }
 }
