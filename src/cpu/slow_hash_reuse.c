@@ -139,6 +139,13 @@ static int g_yerbas_cn_fast_phase_reported = 0;
 #define do_groestl_hash yerbas_reuse_do_groestl_hash
 #define malloc yerbas_tls_cn_malloc
 #define free yerbas_tls_cn_free
+#if defined(_MSC_VER)
+/* Core uses _malloca/_freea directly on MSVC, so hook those names too.
+ * This keeps the reusable production path consistent with Linux while the
+ * pristine reference copy retains Core's original Windows allocation behavior. */
+#define _malloca yerbas_tls_cn_malloc
+#define _freea yerbas_tls_cn_free
+#endif
 #define oaes_alloc yerbas_tls_oaes_alloc
 #define oaes_free yerbas_tls_oaes_free
 #if YERBAS_CN_AESNI
@@ -153,6 +160,10 @@ static int g_yerbas_cn_fast_phase_reported = 0;
 #undef do_groestl_hash
 #undef malloc
 #undef free
+#if defined(_MSC_VER)
+#undef _malloca
+#undef _freea
+#endif
 #undef oaes_alloc
 #undef oaes_free
 #if YERBAS_CN_AESNI
