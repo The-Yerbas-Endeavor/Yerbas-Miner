@@ -298,6 +298,14 @@ inline std::string format_temperature(const CpuTelemetry& telemetry)
     return ss.str();
 }
 
+inline std::string format_fan(const GpuTelemetry& telemetry)
+{
+    if (!telemetry.fan_available) return "n/a";
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(0) << telemetry.fan_percent << '%';
+    return ss.str();
+}
+
 inline double status_row_hashrate_hps(const std::string& line)
 {
     std::istringstream ss(line);
