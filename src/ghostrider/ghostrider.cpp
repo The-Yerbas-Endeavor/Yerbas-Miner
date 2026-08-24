@@ -1,4 +1,5 @@
 #include "ghostrider/ghostrider.h"
+#include "cpu/cn_2way.h"
 
 #include <array>
 #include <atomic>
@@ -309,7 +310,6 @@ Hash256 hash_reference(const Work& work)
 
 bool optimized_cpu_ready() noexcept
 {
-    // 0 = uninitialized, 1 = initializing, 2 = ready, 3 = failed.
     static std::atomic<int> state{0};
     int current = state.load(std::memory_order_acquire);
     if (current == 2) return true;
@@ -358,6 +358,84 @@ Hash256 hash_optimized(const Work& work)
     Hash256 out{};
     std::memcpy(out.data(), result.begin(), out.size());
     return out;
+}
+
+bool hash_optimized_batch(const Work* works,
+                          Hash256* outputs,
+                          std::size_t count,
+                          const std::array<unsigned int, 6>& cn_widths)
+{
+    if (works == nullptr || outputs == nullptr || count == 0 || count > 4) return false;
+    if (!optimized_cpu_ready()) return false;
+    for (std::size_t lane = 0; lane < count; ++lane) {
+        if (works[lane].data == nullptr || works[lane].size == 0 ||
+            works[lane].size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            return false;
+    }
+
+    const auto& schedule = cached_schedule(works[0]);
+    uint512 hash[4][18]{};
+
+    for (std::size_t i = 0; i < schedule.size(); ++i) {
+        const std::uint8_t stage = schedule[i];
+        const bool is_cn = (stage & kCryptoNightStageFlag) != 0;
+        const int algorithm = static_cast<int>(stage & 0x7fU);
+
+        if (!is_cn) {
+            for (std::size_t lane = 0; lane < count; ++lane) {
+                const void* input = (i == 0)
+                    ? static_cast<const void*>(works[lane].data)
+                    : static_cast<const void*>(&hash[lane][i - 1]);
+                const int length = (i == 0) ? static_cast<int>(works[lane].size) : 64;
+                coreHash(input, &hash[lane][i], length, algorithm);
+            }
+            continue;
+        }
+
+        if (algorithm < 0 || algorithm >= static_cast<int>(kCnParams.size())) return false;
+        const auto& params = kCnParams[static_cast<std::size_t>(algorithm)];
+        const unsigned int width = cn_widths[static_cast<std::size_t>(algorithm)];
+        std::size_t lane = 0;
+
+        if (width >= 4U && count == 4U) {
+            for (std::size_t l = 0; l < 4; ++l) hash[l][i] = uint512{};
+            if (!yerbas_cn_hash_quad_4way(
+                    reinterpret_cast<const char*>(&hash[0][i - 1]),
+                    reinterpret_cast<const char*>(&hash[1][i - 1]),
+                    reinterpret_cast<const char*>(&hash[2][i - 1]),
+                    reinterpret_cast<const char*>(&hash[3][i - 1]),
+                    reinterpret_cast<char*>(&hash[0][i]),
+                    reinterpret_cast<char*>(&hash[1][i]),
+                    reinterpret_cast<char*>(&hash[2][i]),
+                    reinterpret_cast<char*>(&hash[3][i]),
+                    64U, 1, params.page_size, params.iterations, params.aes_rounds))
+                return false;
+            continue;
+        }
+
+        if (width >= 2U) {
+            for (; lane + 1 < count; lane += 2) {
+                hash[lane][i] = uint512{};
+                hash[lane + 1][i] = uint512{};
+                if (!yerbas_cn_hash_pair_2way(
+                        reinterpret_cast<const char*>(&hash[lane][i - 1]),
+                        reinterpret_cast<const char*>(&hash[lane + 1][i - 1]),
+                        reinterpret_cast<char*>(&hash[lane][i]),
+                        reinterpret_cast<char*>(&hash[lane + 1][i]),
+                        64U, 1, params.page_size, params.iterations, params.aes_rounds))
+                    return false;
+            }
+        }
+        for (; lane < count; ++lane) {
+            if (!reusable_cn_hash(hash[lane][i - 1], hash[lane][i], algorithm)) return false;
+        }
+    }
+
+    for (std::size_t lane = 0; lane < count; ++lane) {
+        const uint256 result = hash[lane][17].trim256();
+        std::memcpy(outputs[lane].data(), result.begin(), outputs[lane].size());
+    }
+    return true;
 }
 
 bool reference_ready() noexcept
