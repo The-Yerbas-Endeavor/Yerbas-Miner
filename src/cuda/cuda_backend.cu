@@ -31,10 +31,16 @@
 #include "cuda/generated/cuda_backend_coop_probe.inc"
 #undef autotune_cn_geometries
 
-// Final-stage production selector: validates complete CryptoNight output, sweeps
-// architecture-neutral cooperative geometries, applies a 2% speedup gate, and
-// persists the decision per GPU/driver/runtime/batch.
+// Cooperative production selector remains the broad all-variant tuner, but its
+// wrapper is preserved so CN-Fast can get one final backend-family comparison.
+#define autotune_cn_geometries autotune_cn_geometries_coop
 #include "cuda/generated/cuda_backend_coop_tune.inc"
+#undef autotune_cn_geometries
+
+// Final CN-Fast selector compares the existing single, dual-state, and coop4
+// families at the real production batch size, validates parity, and caches the
+// winner only when it clears a 3% improvement gate.
+#include "cuda/generated/cuda_backend_cn_fast_tune.inc"
 
 // Public CryptoNight dispatch: selected variants use cooperative mode; all other
 // cases transparently call the established production implementation.
