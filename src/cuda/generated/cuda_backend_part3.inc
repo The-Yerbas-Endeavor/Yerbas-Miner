@@ -30,33 +30,6 @@ struct BatchEngine::Impl {
         if (batch_size == 0 || batch_capacity == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
         if (batch_capacity < batch_size) batch_capacity = batch_size;
 
-        // Resolve the requested active mining batch before autotune so every
-        // production-batch cache and backend benchmark measures the batch that
-        // will actually be used for mining. Previously 3712 could mine with
-        // tuning/cache data collected at the pre-override 3584 size.
-        const char* active_batch_env = std::getenv("YERBAS_CUDA_ACTIVE_BATCH");
-        if (active_batch_env && *active_batch_env) {
-            try {
-                const std::size_t requested_active = static_cast<std::size_t>(std::stoull(active_batch_env));
-                if (requested_active > 0 && requested_active <= batch_capacity) {
-                    batch_size = requested_active;
-                    std::cout << "[GPU " << device_id << "] CUDA active batch override"
-                              << " | active=" << batch_size
-                              << " | capacity=" << batch_capacity << '\n';
-                } else {
-                    std::cerr << "[GPU " << device_id << "] ignoring YERBAS_CUDA_ACTIVE_BATCH="
-                              << active_batch_env << " | valid range=1.." << batch_capacity << '\n';
-                }
-            } catch (...) {
-                std::cerr << "[GPU " << device_id << "] ignoring invalid YERBAS_CUDA_ACTIVE_BATCH="
-                          << active_batch_env << '\n';
-            }
-        } else if (batch_capacity > batch_size) {
-            std::cout << "[GPU " << device_id << "] CUDA batch tuning headroom"
-                      << " | active=" << batch_size
-                      << " | capacity=" << batch_capacity << '\n';
-        }
-
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
@@ -66,6 +39,14 @@ struct BatchEngine::Impl {
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_capacity * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
+
+        // Batch size is itself a production tuning dimension. Allocate buffers
+        // to the adaptive safe capacity first, benchmark aligned candidate batch
+        // sizes, then tune all geometry/backend choices against the selected
+        // production batch. YERBAS_CUDA_ACTIVE_BATCH remains an explicit override.
+        batch_size = autotune_cuda_active_batch(device_id, batch_size, batch_capacity, stream,
+                                                d_states, d_cn_scratchpads, d_cn_contexts);
+
         try {
             cn_geometries = autotune_cn_geometries(device_id, stream, d_states, batch_size,
                                                    d_cn_scratchpads, d_cn_contexts);
