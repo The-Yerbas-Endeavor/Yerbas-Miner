@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -32,6 +33,17 @@ std::vector<int> parse_devices(const std::string& value)
     return devices;
 }
 
+std::string normalize_tune_mode(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "none" || value == "no" || value == "false" || value == "0") value = "off";
+    if (value != "off" && value != "simple" && value != "default" && value != "full")
+        throw std::runtime_error("CPU tune mode must be off, simple, default, or full");
+    return value;
+}
+
 void apply_json(AppConfig& cfg, const json& root)
 {
     if (root.contains("pool")) {
@@ -47,6 +59,7 @@ void apply_json(AppConfig& cfg, const json& root)
         if (m.contains("threads")) cfg.miner.threads = m.at("threads").get<unsigned int>();
         if (m.contains("hybrid")) cfg.miner.hybrid = m.at("hybrid").get<bool>();
         if (m.contains("cpu_batch")) cfg.miner.cpu_batch = m.at("cpu_batch").get<unsigned int>();
+        if (m.contains("cpu_tune")) cfg.miner.cpu_tune = normalize_tune_mode(m.at("cpu_tune").get<std::string>());
     }
     if (root.contains("gpu")) {
         const auto& g = root.at("gpu");
@@ -88,6 +101,8 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--worker") cfg.miner.worker = require_value(argc, argv, i, "--worker");
         else if (arg == "--threads") cfg.miner.threads = static_cast<unsigned int>(std::stoul(require_value(argc, argv, i, "--threads")));
         else if (arg == "--cpu-batch") cfg.miner.cpu_batch = static_cast<unsigned int>(std::stoul(require_value(argc, argv, i, "--cpu-batch")));
+        else if (arg == "--tune") cfg.miner.cpu_tune = normalize_tune_mode(require_value(argc, argv, i, "--tune"));
+        else if (arg == "--no-tune") cfg.miner.cpu_tune = "off";
         else if (arg == "--no-cpu") cfg.miner.cpu_enabled = false;
         else if (arg == "--no-hybrid") cfg.miner.hybrid = false;
         else if (arg == "--devices") cfg.gpu.devices = parse_devices(require_value(argc, argv, i, "--devices"));
@@ -99,6 +114,7 @@ AppConfig load_config(int argc, char** argv)
         else throw std::runtime_error("Unknown option: " + arg);
     }
 
+    cfg.miner.cpu_tune = normalize_tune_mode(cfg.miner.cpu_tune);
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
     return cfg;
 }
@@ -111,8 +127,10 @@ void print_config_help(const char* program)
         << "  --user USER         Wallet/address or pool username\n"
         << "  --password PASS     Pool password (default: x)\n"
         << "  --worker NAME       Worker name\n"
-        << "  --threads N         CPU thread ceiling (0 = all logical CPUs, autotuned)\n"
-        << "  --cpu-batch N       CPU autotune starting batch (0 = default 16)\n"
+        << "  --threads N         CPU thread ceiling (0 = all logical CPUs)\n"
+        << "  --cpu-batch N       CPU batch when tuning is off / initial reference value\n"
+        << "  --tune MODE         CPU tuning: off, simple, default, full\n"
+        << "  --no-tune           Start immediately with configured/default CPU settings\n"
         << "  --no-cpu            Disable CPU mining\n"
         << "  --no-hybrid         Do not combine CPU and GPU\n"
         << "  --devices 0,1       GPU device ids\n"
@@ -121,9 +139,14 @@ void print_config_help(const char* program)
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
         << "  -h, --help          Show this help\n\n"
+        << "CPU tuning modes:\n"
+        << "  off      no CPU benchmark; mine immediately with configured/default settings\n"
+        << "  simple   quick production tuning\n"
+        << "  default  balanced production tuning\n"
+        << "  full     exhaustive production/rotation tuning where supported\n\n"
         << "CPU autotune environment:\n"
         << "  YERBAS_CPU_RETUNE=1            Ignore cached CPU tuning and benchmark again\n"
-        << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Use configured/default CPU threads and batch\n"
+        << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Force direct/no-tune CPU startup\n"
         << "  YERBAS_DIAGNOSTICS=1          Show individual CPU autotune benchmark results\n";
 }
 
