@@ -5,6 +5,7 @@
 #include "cpu/cn_width_tune.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -22,6 +23,15 @@ void write_startup_log(const std::string& message)
 {
     std::ofstream log("yerbas-miner-startup.log", std::ios::app);
     if (log) log << message << '\n';
+}
+
+void enable_cn_fast_benchmark_env()
+{
+#ifdef _WIN32
+    _putenv_s("YERBAS_CUDA_CN_FAST_BENCHMARK", "1");
+#else
+    setenv("YERBAS_CUDA_CN_FAST_BENCHMARK", "1", 1);
+#endif
 }
 
 #ifdef _WIN32
@@ -100,6 +110,10 @@ int main(int argc, char** argv)
         if (!config.logging.perf_csv.empty()) {
             yerbas::console::set_perf_csv_path(config.logging.perf_csv);
             std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
+        }
+        if (config.gpu.benchmark_cn_fast) {
+            enable_cn_fast_benchmark_env();
+            std::cout << "CUDA CN-Fast benchmark: forced production-batch family comparison\n";
         }
         if (config.miner.cpu_enabled)
             (void)yerbas::cpu::qualify_cn_widths(config.miner.cpu_tune);
