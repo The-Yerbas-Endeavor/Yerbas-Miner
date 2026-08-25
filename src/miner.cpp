@@ -1,6 +1,7 @@
 #include "miner.h"
 #include "cpu/cpu_autotune.h"
 #include "cpu/cpu_lane_scheduler_tune.h"
+#include "cpu/cpu_worker_pool.h"
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
 
@@ -131,6 +132,8 @@ int Miner::run()
             }
         }
     }
+
+    cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
 
     std::cout << "Yerbas Miner 0.5.2\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
