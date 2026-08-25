@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -17,7 +18,7 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kLaneTuneRevision = 1;
+constexpr int kLaneTuneRevision = 2;
 constexpr double kMinimumWin = 1.02;
 
 bool env_enabled(const char* name)
@@ -38,11 +39,15 @@ std::filesystem::path cache_dir()
     return std::filesystem::path(".") / ".yerbas-miner-cache";
 }
 
-std::filesystem::path cache_path(unsigned int hardware_threads, unsigned int ceiling)
+std::filesystem::path cache_path(unsigned int hardware_threads,
+                                 unsigned int ceiling,
+                                 unsigned int batch)
 {
     std::ostringstream n;
     n << "cpu-lane-scheduler-rev" << kLaneTuneRevision
-      << "-hw" << hardware_threads << "-max" << ceiling << ".txt";
+      << "-hw" << hardware_threads
+      << "-max" << ceiling
+      << "-batch" << batch << ".txt";
     return cache_dir() / n.str();
 }
 
@@ -96,41 +101,72 @@ std::vector<Plan> candidate_plans(unsigned int ceiling)
     return out;
 }
 
-double benchmark_plan(const Plan& plan)
+bool validate_plan(const Plan& plan)
 {
+    if (plan.lanes == 1) return true;
+    auto header = representative_headers().front();
+    std::array<std::array<std::uint8_t,80>,4> lane_headers{};
+    std::array<ghostrider::Work,4> works{};
+    std::array<ghostrider::Hash256,4> hashes{};
+    std::array<unsigned int,6> widths{{plan.lanes, plan.lanes, plan.lanes,
+                                      plan.lanes, plan.lanes, plan.lanes}};
+    for (unsigned int lane = 0; lane < plan.lanes; ++lane) {
+        lane_headers[lane] = header;
+        write_nonce(lane_headers[lane], 0x42000000U + lane);
+        works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
+    }
+    if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), plan.lanes, widths)) return false;
+    for (unsigned int lane = 0; lane < plan.lanes; ++lane) {
+        if (hashes[lane] != ghostrider::hash_optimized(works[lane])) return false;
+    }
+    return true;
+}
+
+double benchmark_plan(const Plan& plan, unsigned int batch)
+{
+    if (!validate_plan(plan)) return 0.0;
     const auto headers = representative_headers();
     std::vector<double> samples;
     samples.reserve(headers.size());
+    batch = std::max(1U, batch);
 
     for (std::size_t sample = 0; sample < headers.size(); ++sample) {
         const auto start = std::chrono::steady_clock::now();
         std::vector<std::thread> workers;
         workers.reserve(plan.workers);
+        std::atomic_bool failed{false};
+
         for (unsigned int w = 0; w < plan.workers; ++w) {
             workers.emplace_back([&, w] {
-                std::array<std::array<std::uint8_t,80>,4> lane_headers{};
-                std::array<ghostrider::Work,4> works{};
-                std::array<ghostrider::Hash256,4> hashes{};
                 std::array<unsigned int,6> widths{{plan.lanes, plan.lanes, plan.lanes,
                                                   plan.lanes, plan.lanes, plan.lanes}};
-                for (unsigned int lane = 0; lane < plan.lanes; ++lane) {
-                    lane_headers[lane] = headers[sample];
-                    write_nonce(lane_headers[lane], 0x43000000U +
-                                static_cast<std::uint32_t>(sample * 0x1000U + w * 16U + lane));
-                    works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
-                }
-                if (plan.lanes == 1) {
-                    hashes[0] = ghostrider::hash_optimized(works[0]);
-                } else if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), plan.lanes, widths)) {
-                    for (unsigned int lane = 0; lane < plan.lanes; ++lane)
-                        hashes[lane] = ghostrider::hash_optimized(works[lane]);
+                for (unsigned int done = 0; done < batch && !failed.load(std::memory_order_relaxed);) {
+                    const unsigned int group = std::min(plan.lanes, batch - done);
+                    std::array<std::array<std::uint8_t,80>,4> lane_headers{};
+                    std::array<ghostrider::Work,4> works{};
+                    std::array<ghostrider::Hash256,4> hashes{};
+                    for (unsigned int lane = 0; lane < group; ++lane) {
+                        lane_headers[lane] = headers[sample];
+                        write_nonce(lane_headers[lane], 0x43000000U +
+                                    static_cast<std::uint32_t>(sample * 0x100000U + w * batch + done + lane));
+                        works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
+                    }
+                    if (group == 1) {
+                        hashes[0] = ghostrider::hash_optimized(works[0]);
+                    } else if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), group, widths)) {
+                        failed.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                    done += group;
                 }
             });
         }
         for (auto& t : workers) t.join();
+        if (failed.load(std::memory_order_relaxed)) return 0.0;
+
         const auto end = std::chrono::steady_clock::now();
         const double seconds = std::chrono::duration<double>(end - start).count();
-        const double hashes = static_cast<double>(plan.workers * plan.lanes);
+        const double hashes = static_cast<double>(plan.workers) * static_cast<double>(batch);
         if (seconds > 0.0) samples.push_back(hashes / seconds);
     }
 
@@ -144,9 +180,9 @@ bool load_cache(const std::filesystem::path& path, LaneSchedulerTuneResult& out)
     std::ifstream in(path);
     std::string magic;
     int rev = 0;
-    if (!(in >> magic >> rev >> out.workers >> out.lanes >> out.throughput_hps)) return false;
+    if (!(in >> magic >> rev >> out.workers >> out.lanes >> out.batch >> out.throughput_hps)) return false;
     if (magic != "YERBAS_CPU_LANE" || rev != kLaneTuneRevision) return false;
-    if (out.workers == 0 || (out.lanes != 1 && out.lanes != 2 && out.lanes != 4)) return false;
+    if (out.workers == 0 || out.batch == 0 || (out.lanes != 1 && out.lanes != 2 && out.lanes != 4)) return false;
     out.from_cache = true;
     return true;
 }
@@ -158,8 +194,8 @@ void save_cache(const std::filesystem::path& path, const LaneSchedulerTuneResult
         std::ofstream out(path, std::ios::trunc);
         if (!out) return;
         out << "YERBAS_CPU_LANE " << kLaneTuneRevision << ' '
-            << r.workers << ' ' << r.lanes << ' ' << std::setprecision(12)
-            << r.throughput_hps << '\n';
+            << r.workers << ' ' << r.lanes << ' ' << r.batch << ' '
+            << std::setprecision(12) << r.throughput_hps << '\n';
     } catch (...) {}
 }
 
@@ -167,39 +203,44 @@ void save_cache(const std::filesystem::path& path, const LaneSchedulerTuneResult
 
 LaneSchedulerTuneResult tune_lane_scheduler(unsigned int hardware_threads,
                                             unsigned int configured_threads,
+                                            unsigned int production_batch,
                                             const std::string& mode)
 {
     hardware_threads = std::max(1U, hardware_threads);
     const unsigned int ceiling = configured_threads == 0U
         ? hardware_threads
         : std::max(1U, std::min(configured_threads, hardware_threads));
+    const unsigned int batch = std::max(1U, production_batch);
 
-    LaneSchedulerTuneResult result{ceiling, 1U, 0.0, false};
+    LaneSchedulerTuneResult result{ceiling, 1U, batch, 0.0, false};
     if (mode == "off" || mode == "simple") return result;
 
-    const auto path = cache_path(hardware_threads, ceiling);
+    const auto path = cache_path(hardware_threads, ceiling, batch);
     if (load_cache(path, result)) {
         std::cout << "CPU lane scheduler: workers=" << result.workers
                   << " x lanes=" << result.lanes
+                  << " | batch=" << result.batch
                   << " | throughput=" << std::fixed << std::setprecision(2)
-                  << result.throughput_hps << " H/s | source=cache | production=1way\n"
+                  << result.throughput_hps << " H/s | source=cache\n"
                   << std::defaultfloat;
         return result;
     }
 
     const auto plans = candidate_plans(ceiling);
-    std::cout << "[CPU lane tune] complete GhostRider scheduler search"
+    std::cout << "[CPU lane tune] sustained GhostRider scheduler search"
               << " | ceiling=" << ceiling
+              << " | batch=" << batch
               << " | plans=" << plans.size()
-              << " | production remains 1-way until qualified\n";
+              << " | parity=required\n";
 
-    LaneSchedulerTuneResult best{ceiling, 1U, 0.0, false};
+    LaneSchedulerTuneResult best{ceiling, 1U, batch, 0.0, false};
     double baseline = 0.0;
     for (const auto& plan : plans) {
-        const double hps = benchmark_plan(plan);
+        const double hps = benchmark_plan(plan, batch);
         std::cout << "[CPU lane plan] workers=" << plan.workers
                   << " x lanes=" << plan.lanes
                   << " | concurrency=" << (plan.workers * plan.lanes)
+                  << " | batch=" << batch
                   << " | " << std::fixed << std::setprecision(2) << hps << " H/s\n"
                   << std::defaultfloat;
         if (plan.lanes == 1 && plan.workers == ceiling) baseline = hps;
@@ -210,16 +251,16 @@ LaneSchedulerTuneResult tune_lane_scheduler(unsigned int hardware_threads,
         }
     }
 
-    if (best.lanes != 1 && baseline > 0.0 && best.throughput_hps < baseline * kMinimumWin) {
-        best = {ceiling, 1U, baseline, false};
-    }
-    save_cache(path, best);
+    if (best.lanes != 1 && baseline > 0.0 && best.throughput_hps < baseline * kMinimumWin)
+        best = {ceiling, 1U, batch, baseline, false};
 
+    save_cache(path, best);
     std::cout << "[CPU lane tune] recommended | workers=" << best.workers
               << " x lanes=" << best.lanes
+              << " | batch=" << best.batch
               << " | throughput=" << std::fixed << std::setprecision(2)
               << best.throughput_hps << " H/s"
-              << " | production=1way | min-win=2%\n"
+              << " | min-win=2%\n"
               << std::defaultfloat;
     return best;
 }
