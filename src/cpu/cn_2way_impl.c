@@ -3,8 +3,10 @@
  * This file is included at the end of slow_hash_reuse.c so it can reuse the
  * pinned Core CryptoNight helpers and the runtime-selected AES implementation.
  * Each lane owns a separate scratchpad and state. The dependency-heavy memory
- * loop is interleaved lane 0 / lane 1 every iteration to expose independent
- * work to the CPU while preserving the exact variant-1 algorithm per lane.
+ * loop is interleaved at sub-step granularity: both lanes issue the first
+ * random-memory/AES phase before either lane performs the dependent multiply
+ * and state update. This exposes independent memory/AES work while preserving
+ * the exact variant-1 dependency chain within each lane.
  */
 
 static YERBAS_TLS uint8_t* g_yerbas_cn_2way_scratchpad0 = NULL;
@@ -63,17 +65,13 @@ static void yerbas_cn_lane_setup(const char* input,
     memset(b + AES_BLOCK_SIZE, 0, AES_BLOCK_SIZE);
 }
 
-static void yerbas_cn_lane_loop_step(uint8_t a[AES_BLOCK_SIZE],
-                                     uint8_t b[AES_BLOCK_SIZE * 2],
-                                     uint8_t c[AES_BLOCK_SIZE],
-                                     uint8_t* long_state,
-                                     size_t aes_rounds,
-                                     uint64_t tweak1_2)
+static inline void yerbas_cn_lane_loop_phase1(uint8_t a[AES_BLOCK_SIZE],
+                                               uint8_t b[AES_BLOCK_SIZE * 2],
+                                               uint8_t c[AES_BLOCK_SIZE],
+                                               uint8_t* long_state,
+                                               size_t aes_rounds)
 {
-    size_t j = e2i(a, aes_rounds);
-    uint64_t* dst;
-    uint64_t t[2];
-    uint64_t hi, lo;
+    const size_t j = e2i(a, aes_rounds);
 
     yerbas_selected_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
     xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);
@@ -83,20 +81,29 @@ static void yerbas_cn_lane_loop_step(uint8_t a[AES_BLOCK_SIZE],
         const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1;
         long_state[j * AES_BLOCK_SIZE + 11] = tmp ^ ((table >> index) & 0x30);
     }
+}
 
-    j = e2i(c, aes_rounds);
-    dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
-    t[0] = dst[0];
-    t[1] = dst[1];
-    lo = mul128(((uint64_t*)c)[0], t[0], &hi);
+static inline void yerbas_cn_lane_loop_phase2(uint8_t a[AES_BLOCK_SIZE],
+                                               uint8_t b[AES_BLOCK_SIZE * 2],
+                                               const uint8_t c[AES_BLOCK_SIZE],
+                                               uint8_t* long_state,
+                                               size_t aes_rounds,
+                                               uint64_t tweak1_2)
+{
+    const size_t j = e2i(c, aes_rounds);
+    uint64_t* dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
+    const uint64_t t0 = dst[0];
+    const uint64_t t1 = dst[1];
+    uint64_t hi;
+    const uint64_t lo = mul128(((const uint64_t*)c)[0], t0, &hi);
 
     ((uint64_t*)a)[0] += hi;
     ((uint64_t*)a)[1] += lo;
     dst[0] = ((uint64_t*)a)[0];
     dst[1] = ((uint64_t*)a)[1];
-    ((uint64_t*)a)[0] ^= t[0];
-    ((uint64_t*)a)[1] ^= t[1];
-    ((uint64_t*)&long_state[j * AES_BLOCK_SIZE])[1] ^= tweak1_2;
+    ((uint64_t*)a)[0] ^= t0;
+    ((uint64_t*)a)[1] ^= t1;
+    dst[1] ^= tweak1_2;
 
     copy_block(b + AES_BLOCK_SIZE, b);
     copy_block(b, c);
@@ -163,10 +170,10 @@ int yerbas_cn_hash_pair_2way(const char* input0,
     tweak1 = *(const uint64_t*)((const uint8_t*)input1 + 35) ^ state1.hs.w[24];
 
     for (i = 0; i < iterations; ++i) {
-        yerbas_cn_lane_loop_step(a0, b0, c0, g_yerbas_cn_2way_scratchpad0,
-                                 aes_rounds, tweak0);
-        yerbas_cn_lane_loop_step(a1, b1, c1, g_yerbas_cn_2way_scratchpad1,
-                                 aes_rounds, tweak1);
+        yerbas_cn_lane_loop_phase1(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds);
+        yerbas_cn_lane_loop_phase1(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds);
+        yerbas_cn_lane_loop_phase2(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds, tweak0);
+        yerbas_cn_lane_loop_phase2(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds, tweak1);
     }
 
     yerbas_cn_lane_finish(&state0, text0, g_yerbas_cn_2way_scratchpad0,
