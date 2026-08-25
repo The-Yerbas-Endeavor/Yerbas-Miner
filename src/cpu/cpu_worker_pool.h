@@ -11,9 +11,14 @@ struct Candidate {
     std::uint32_t nonce{0};
 };
 
+void set_runtime_lane_width(unsigned int lane_width) noexcept;
+unsigned int runtime_lane_width() noexcept;
+
 class WorkerPool {
 public:
-    explicit WorkerPool(unsigned int thread_count, unsigned int lane_width = 1);
+    // lane_width=0 inherits the process-level runtime policy selected by the
+    // production tuner. Explicit 1/2/4 values are used by benchmarks/tests.
+    explicit WorkerPool(unsigned int thread_count, unsigned int lane_width = 0);
     ~WorkerPool();
 
     WorkerPool(const WorkerPool&) = delete;
