@@ -351,6 +351,53 @@ bool optimized_cpu_ready() noexcept
     return current == 2;
 }
 
+bool optimized_core_stage(const Work& input,
+                          std::uint8_t algorithm,
+                          Hash512& output) noexcept
+{
+    if (input.data == nullptr || input.size == 0 || algorithm >= 15U) return false;
+    if (input.size > static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+    uint512 result{};
+    coreHash(input.data, &result, static_cast<int>(input.size), static_cast<int>(algorithm));
+    std::memcpy(output.data(), result.begin(), output.size());
+    return true;
+}
+
+bool optimized_cn_stage(const Hash512& input,
+                        std::uint8_t variant,
+                        Hash512& output) noexcept
+{
+    if (variant >= kCnParams.size()) return false;
+    uint512 in{};
+    uint512 out{};
+    std::memcpy(in.begin(), input.data(), input.size());
+    if (!reusable_cn_hash(in, out, static_cast<int>(variant))) return false;
+    std::memcpy(output.data(), out.begin(), output.size());
+    return true;
+}
+
+bool optimized_cn_pair_stage(const Hash512& input0,
+                             const Hash512& input1,
+                             std::uint8_t variant,
+                             Hash512& output0,
+                             Hash512& output1) noexcept
+{
+    if (variant >= kCnParams.size()) return false;
+    const auto& params = kCnParams[static_cast<std::size_t>(variant)];
+    output0.fill(0);
+    output1.fill(0);
+    return yerbas_cn_hash_pair_2way(
+               reinterpret_cast<const char*>(input0.data()),
+               reinterpret_cast<const char*>(input1.data()),
+               reinterpret_cast<char*>(output0.data()),
+               reinterpret_cast<char*>(output1.data()),
+               64U,
+               1,
+               params.page_size,
+               params.iterations,
+               params.aes_rounds) != 0;
+}
+
 Hash256 hash_optimized(const Work& work)
 {
     if (!optimized_cpu_ready()) return hash_reference(work);
