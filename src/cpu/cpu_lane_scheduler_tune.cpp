@@ -5,11 +5,15 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -18,7 +22,7 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kLaneTuneRevision = 3;
+constexpr int kLaneTuneRevision = 4;
 constexpr double kMinimumWin = 1.02;
 
 bool env_enabled(const char* name)
@@ -174,6 +178,149 @@ double benchmark_plan(const Plan& plan, unsigned int batch)
     return samples.empty() ? 0.0 : samples[samples.size()/2U];
 }
 
+struct PairGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::array<ghostrider::Hash512,2> input{};
+    std::array<ghostrider::Hash512,2> output{};
+    std::uint8_t variant{0};
+    unsigned int arrived{0};
+    std::uint64_t epoch{0};
+    bool ok{true};
+};
+
+bool cooperative_pair_stage(PairGate& gate,
+                            unsigned int side,
+                            const ghostrider::Hash512& input,
+                            std::uint8_t variant,
+                            ghostrider::Hash512& output,
+                            const std::atomic_bool& failed)
+{
+    std::unique_lock<std::mutex> lock(gate.mutex);
+    const std::uint64_t my_epoch = gate.epoch;
+    gate.input[side] = input;
+    if (gate.arrived == 0) gate.variant = variant;
+    else if (gate.variant != variant) gate.ok = false;
+    ++gate.arrived;
+
+    if (gate.arrived == 2) {
+        if (gate.ok && !failed.load(std::memory_order_relaxed)) {
+            gate.ok = ghostrider::optimized_cn_pair_stage(gate.input[0], gate.input[1],
+                                                          gate.variant,
+                                                          gate.output[0], gate.output[1]);
+        }
+        gate.arrived = 0;
+        ++gate.epoch;
+        output = gate.output[side];
+        const bool ok = gate.ok;
+        gate.ok = true;
+        lock.unlock();
+        gate.cv.notify_all();
+        return ok;
+    }
+
+    gate.cv.wait(lock, [&] {
+        return gate.epoch != my_epoch || failed.load(std::memory_order_relaxed);
+    });
+    if (failed.load(std::memory_order_relaxed)) return false;
+    output = gate.output[side];
+    return true;
+}
+
+double benchmark_cooperative_pairs(unsigned int workers_count,
+                                   unsigned int batch,
+                                   bool& parity_ok)
+{
+    parity_ok = false;
+    if (workers_count < 2) return 0.0;
+    const auto headers = representative_headers();
+    std::vector<double> samples;
+    samples.reserve(headers.size());
+    batch = std::max(1U, batch);
+
+    for (std::size_t sample = 0; sample < headers.size(); ++sample) {
+        const auto schedule = ghostrider::stage_schedule_quiet(
+            ghostrider::Work{headers[sample].data(), headers[sample].size()});
+
+        const unsigned int pair_count = workers_count / 2U;
+        std::vector<std::unique_ptr<PairGate>> gates;
+        gates.reserve(pair_count);
+        for (unsigned int i = 0; i < pair_count; ++i)
+            gates.emplace_back(std::make_unique<PairGate>());
+
+        std::vector<ghostrider::Hash256> first_outputs(workers_count);
+        std::vector<std::array<std::uint8_t,80>> first_headers(workers_count);
+        std::atomic_bool failed{false};
+        std::vector<std::thread> workers;
+        workers.reserve(workers_count);
+
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned int w = 0; w < workers_count; ++w) {
+            workers.emplace_back([&, w] {
+                for (unsigned int done = 0; done < batch && !failed.load(std::memory_order_relaxed); ++done) {
+                    auto header = headers[sample];
+                    const std::uint32_t nonce = 0x45000000U +
+                        static_cast<std::uint32_t>(sample * 0x100000U + w * batch + done);
+                    write_nonce(header, nonce);
+                    if (done == 0) first_headers[w] = header;
+
+                    ghostrider::Hash512 state{};
+                    for (std::size_t stage_index = 0;
+                         stage_index < schedule.size() && !failed.load(std::memory_order_relaxed);
+                         ++stage_index) {
+                        const std::uint8_t stage = schedule[stage_index];
+                        if ((stage & ghostrider::kCryptoNightStageFlag) == 0) {
+                            ghostrider::Hash512 next{};
+                            const ghostrider::Work input = stage_index == 0
+                                ? ghostrider::Work{header.data(), header.size()}
+                                : ghostrider::Work{state.data(), state.size()};
+                            if (!ghostrider::optimized_core_stage(input, stage, next)) {
+                                failed.store(true, std::memory_order_relaxed);
+                                break;
+                            }
+                            state = next;
+                            continue;
+                        }
+
+                        const std::uint8_t variant = static_cast<std::uint8_t>(stage & 0x7fU);
+                        ghostrider::Hash512 next{};
+                        if (w < pair_count * 2U) {
+                            if (!cooperative_pair_stage(*gates[w / 2U], w & 1U,
+                                                        state, variant, next, failed)) {
+                                failed.store(true, std::memory_order_relaxed);
+                                break;
+                            }
+                        } else if (!ghostrider::optimized_cn_stage(state, variant, next)) {
+                            failed.store(true, std::memory_order_relaxed);
+                            break;
+                        }
+                        state = next;
+                    }
+
+                    if (done == 0 && !failed.load(std::memory_order_relaxed))
+                        std::memcpy(first_outputs[w].data(), state.data(), first_outputs[w].size());
+                }
+            });
+        }
+        for (auto& t : workers) t.join();
+        if (failed.load(std::memory_order_relaxed)) return 0.0;
+        const auto end = std::chrono::steady_clock::now();
+
+        for (unsigned int w = 0; w < workers_count; ++w) {
+            const ghostrider::Work ref_work{first_headers[w].data(), first_headers[w].size()};
+            if (first_outputs[w] != ghostrider::hash_optimized(ref_work)) return 0.0;
+        }
+
+        const double seconds = std::chrono::duration<double>(end - start).count();
+        const double hashes = static_cast<double>(workers_count) * static_cast<double>(batch);
+        if (seconds > 0.0) samples.push_back(hashes / seconds);
+    }
+
+    std::sort(samples.begin(), samples.end());
+    parity_ok = !samples.empty();
+    return samples.empty() ? 0.0 : samples[samples.size()/2U];
+}
+
 bool load_cache(const std::filesystem::path& path, LaneSchedulerTuneResult& out)
 {
     if (env_enabled("YERBAS_CPU_RETUNE") || env_enabled("YERBAS_CPU_LANE_RETUNE")) return false;
@@ -249,6 +396,26 @@ LaneSchedulerTuneResult tune_lane_scheduler(unsigned int hardware_threads,
             best.lanes = plan.lanes;
             best.throughput_hps = hps;
         }
+    }
+
+    bool cooperative_parity = false;
+    const double cooperative_hps = benchmark_cooperative_pairs(ceiling, batch, cooperative_parity);
+    std::cout << "[CPU cooperative plan] workers=" << ceiling
+              << " | core=" << ceiling << "way"
+              << " | CN=" << (ceiling / 2U) << "x2way"
+              << " | batch=" << batch
+              << " | " << std::fixed << std::setprecision(2) << cooperative_hps << " H/s"
+              << " | parity=" << (cooperative_parity ? "PASS" : "FAIL");
+    if (cooperative_parity && baseline > 0.0)
+        std::cout << " | gain=" << std::setprecision(2)
+                  << ((cooperative_hps / baseline - 1.0) * 100.0) << '%';
+    std::cout << '\n' << std::defaultfloat;
+
+    if (cooperative_parity && baseline > 0.0 && cooperative_hps >= baseline * kMinimumWin) {
+        std::cout << "[CPU cooperative plan] QUALIFIED | exceeds 1-way baseline by >=2%"
+                  << " | production remains gated until worker-pool integration\n";
+    } else {
+        std::cout << "[CPU cooperative plan] not qualified | production remains 1-way\n";
     }
 
     if (best.lanes != 1 && baseline > 0.0 && best.throughput_hps < baseline * kMinimumWin)
