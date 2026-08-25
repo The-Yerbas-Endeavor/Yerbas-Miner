@@ -38,16 +38,20 @@
 #undef autotune_cn_geometries
 
 // Cooperative production selector remains the broad all-variant tuner, but its
-// wrapper is preserved so CN-Fast can get one final backend-family comparison.
+// wrapper is preserved so later layers can refine the implementation generically.
 #define autotune_cn_geometries autotune_cn_geometries_coop
 #include "cuda/generated/cuda_backend_coop_tune.inc"
 #undef autotune_cn_geometries
 
+// Hardware-agnostic coop4 implementation selector. It compares the established
+// coop4-v1 kernel against the register-distributed coop4-v2 kernel for every
+// cooperative CryptoNight variant, parity-gates the result, and caches the
+// winner by GPU/driver/runtime/batch without model-specific assumptions.
+#include "cuda/generated/cuda_backend_coop_impl_tune.inc"
+
 // Final CN-Fast selector compares the existing single, dual-state, and coop4
 // families at the real production batch size, validates parity, and caches the
-// winner only when it clears a 3% improvement gate. Preserve its default wrapper
-// under an internal name; the guarded public wrapper below protects an existing
-// production unroll-4 winner from the intentionally narrower challenger set.
+// winner only when it clears a 3% improvement gate.
 #define autotune_cn_geometries autotune_cn_geometries_cnfast_internal
 #include "cuda/generated/cuda_backend_cn_fast_tune.inc"
 #undef autotune_cn_geometries
@@ -67,8 +71,8 @@
 
 #include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
 
-// Public CryptoNight dispatch: selected variants use cooperative mode; all other
-// cases transparently call the established production implementation.
+// Public CryptoNight dispatch: selected variants use the parity/performance
+// qualified cooperative implementation; all others use the established fallback.
 #include "cuda/generated/cuda_backend_coop_dispatch.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
