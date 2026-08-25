@@ -20,7 +20,7 @@ extern "C" const char* yerbas_cn_reuse_backend(void);
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kWidthTuneRevision = 1;
+constexpr int kWidthTuneRevision = 2;
 constexpr double kMinimumGain = 1.02;
 std::array<unsigned int, 6> g_active_widths{{1,1,1,1,1,1}};
 
