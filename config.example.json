@@ -19,6 +19,7 @@
     "skip_validation": false
   },
   "logging": {
-    "level": "info"
+    "level": "info",
+    "perf_csv": ""
   }
 }
