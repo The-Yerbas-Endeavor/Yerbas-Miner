@@ -35,23 +35,65 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                g_cn_coop_enabled[device_id][2];
     if (!coop_selected) return result;
 
-    // Normal startup first tries the per-device phase geometry learned by the
-    // explicit benchmark. Forced benchmark/retune bypasses the cache, reruns the
-    // A/B sweep, then stores whichever geometry remained selected after the 3%
-    // whole-stage gate and parity check.
+    // Normal startup first tries the per-device phase geometry learned by an
+    // explicit benchmark. Forced benchmark/retune bypasses the cache.
     if (load_cn_fast_micro_cache(device_id, props, batch_size, result[2]))
         return result;
+
+    const int baseline_setup = result[2].setup_threads;
+    const int baseline_final = result[2].final_threads;
+    int baseline_coop = g_cn_coop_threads[device_id][2];
+    if (baseline_coop <= 0) baseline_coop = 32;
 
     tune_cn_fast_microkernel(device_id, props, stream, states, batch_size,
                              scratchpads, contexts, result[2]);
 
     const char* benchmark = std::getenv("YERBAS_CUDA_CN_FAST_BENCHMARK");
     if (benchmark && *benchmark && std::string(benchmark) != "0") {
-        int coop_threads = g_cn_coop_threads[device_id][2];
-        if (coop_threads <= 0) coop_threads = 32;
+        int candidate_coop = g_cn_coop_threads[device_id][2];
+        if (candidate_coop <= 0) candidate_coop = 32;
+        const int candidate_setup = result[2].setup_threads;
+        const int candidate_final = result[2].final_threads;
+        const bool changed = candidate_setup != baseline_setup ||
+                             candidate_coop != baseline_coop ||
+                             candidate_final != baseline_final;
+
+        bool direct_qualified = false;
+        float baseline_ms = 0.0F;
+        float candidate_ms = 0.0F;
+        float gain = 0.0F;
+        if (changed) {
+            baseline_ms = benchmark_cn_fast_whole_median(
+                stream, states, batch_size, scratchpads, contexts, result[2],
+                baseline_setup, baseline_coop, baseline_final);
+            candidate_ms = benchmark_cn_fast_whole_median(
+                stream, states, batch_size, scratchpads, contexts, result[2],
+                candidate_setup, candidate_coop, candidate_final);
+            gain = candidate_ms > 0.0F ? (baseline_ms / candidate_ms - 1.0F) * 100.0F : 0.0F;
+            direct_qualified = candidate_ms > 0.0F && candidate_ms < baseline_ms * 0.97F;
+
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[CUDA CN-Fast whole A/B] GPU " << device_id
+                      << " | baseline=" << baseline_setup << '/' << baseline_coop << '/' << baseline_final
+                      << ':' << baseline_ms << " ms"
+                      << " | candidate=" << candidate_setup << '/' << candidate_coop << '/' << candidate_final
+                      << ':' << candidate_ms << " ms"
+                      << " | gain=" << gain << "%"
+                      << " | selected=" << (direct_qualified ? "candidate" : "baseline")
+                      << std::defaultfloat << '\n';
+        }
+
+        if (changed && !direct_qualified) {
+            result[2].setup_threads = baseline_setup;
+            result[2].final_threads = baseline_final;
+            g_cn_coop_threads[device_id][2] = baseline_coop;
+        }
+
+        int selected_coop = g_cn_coop_threads[device_id][2];
+        if (selected_coop <= 0) selected_coop = 32;
         save_cn_fast_micro_cache(device_id, props, batch_size,
                                  result[2].setup_threads,
-                                 coop_threads,
+                                 selected_coop,
                                  result[2].final_threads);
     }
     return result;
