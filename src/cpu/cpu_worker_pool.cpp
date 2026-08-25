@@ -211,8 +211,10 @@ struct WorkerPool::Impl {
         const double elapsed_ms = std::chrono::duration<double, std::milli>(perf_end - perf_start).count();
         const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
+        const std::string policy = lanes == 1U ? "standard" : (lanes == 2U ? "lane2" : "lane4");
         const auto fp = record_fingerprint_runtime(active_fingerprint,
                                                    active_cn_summary,
+                                                   policy,
                                                    threads,
                                                    lanes,
                                                    count,
@@ -221,15 +223,19 @@ struct WorkerPool::Impl {
         const bool new_rotation = active_fingerprint != last_logged_fingerprint;
         const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
         if (new_rotation || periodic_diagnostic) {
+            const auto recommendation = recommended_fingerprint_policy(active_fingerprint);
             std::cout << std::fixed << std::setprecision(2)
                       << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                       << active_fingerprint << std::dec << std::setfill(' ')
                       << " | CN=" << active_cn_summary
-                      << " | policy=" << threads << 'x' << lanes << " batch=" << count
+                      << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
                       << " | live=" << hps << " H/s"
                       << " | learned=" << fp.ewma_hps << " H/s"
-                      << " | samples=" << fp.samples
-                      << std::defaultfloat << '\n';
+                      << " | samples=" << fp.samples;
+            if (recommendation)
+                std::cout << " | learned-best=" << recommendation->policy
+                          << "@" << recommendation->ewma_hps << " H/s";
+            std::cout << std::defaultfloat << '\n';
             last_logged_fingerprint = active_fingerprint;
         }
 
