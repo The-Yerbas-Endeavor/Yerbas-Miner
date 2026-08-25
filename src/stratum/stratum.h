@@ -19,7 +19,6 @@
 namespace yerbas::stratum {
 
 struct Endpoint {
-    std::string scheme;
     std::string host;
     unsigned short port{0};
 };
@@ -80,12 +79,6 @@ private:
 };
 
 #ifdef YERBAS_HAS_CUDA
-// mining.set_difficulty / mining.set_target can arrive while the current job is
-// still active. Re-uploading that same job used to reset every GPU nonce cursor
-// (and the CPU cursor through upload_gpu_job), causing duplicate submissions.
-// A real mining.notify assignment advances MiningJob::generation(), so a false
-// assignment is honored for a new job but ignored for target-only updates to the
-// same job. This preserves nonce progress without changing Stratum wire behavior.
 class JobLoadedFlag {
 public:
     JobLoadedFlag() noexcept : generation_(MiningJob::generation()) {}
@@ -147,6 +140,7 @@ private:
     void set_target_hex(const std::string& target_hex);
     void set_difficulty(double difficulty);
     void activate_pending_target();
+    void update_rotation_epoch();
     void report_stats(bool force = false);
 
     AppConfig config_;
@@ -166,8 +160,6 @@ private:
     std::uint32_t nonce_{0x80000000U};
     MiningJob job_;
 
-    // target_le_/difficulty_ describe the active mining job only. Pool vardiff
-    // messages are staged in pending_* and promoted atomically by mining.notify.
     std::array<std::uint8_t, 32> target_le_{};
     bool target_ready_{false};
     double difficulty_{0.0};
@@ -183,6 +175,11 @@ private:
     std::uint64_t hashes_at_last_report_{0};
     std::uint64_t cpu_hashes_at_last_report_{0};
 
+    std::uint64_t active_rotation_fingerprint_{0};
+    std::chrono::steady_clock::time_point rotation_started_{};
+    std::uint64_t rotation_hashes_done_{0};
+    std::uint64_t rotation_cpu_hashes_done_{0};
+
 #ifdef YERBAS_HAS_CUDA
     struct GpuWorker {
         int device_id{-1};
@@ -192,6 +189,7 @@ private:
         std::uint32_t next_nonce{0};
         std::uint64_t hashes_done{0};
         std::uint64_t hashes_at_last_report{0};
+        std::uint64_t rotation_hashes_done{0};
     };
     std::vector<GpuWorker> gpu_workers_;
     JobLoadedFlag gpu_job_loaded_{};
