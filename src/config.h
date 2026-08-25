@@ -26,6 +26,10 @@ struct GpuConfig {
     std::vector<int> devices{};
     int intensity{0};
     bool skip_validation{false};
+    // Force a visible production-batch CN-Fast backend-family benchmark at
+    // startup. The CN-Fast family cache is bypassed for this run and normal
+    // mining continues with the parity-qualified winner.
+    bool benchmark_cn_fast{false};
 };
 
 struct LoggingConfig {
