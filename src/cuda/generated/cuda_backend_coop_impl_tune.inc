@@ -2,16 +2,16 @@
 //
 // This layer is intentionally hardware-agnostic: for every CryptoNight variant
 // that already qualified for cooperative execution, compare the established
-// coop4-v1 kernel against the register-distributed coop4-v2 kernel at the
-// already-selected production thread count.  v2 is eligible only after exact
+// coop4-v1 kernel against corrected register-distributed coop4-v3 at the
+// already-selected production thread count. v3 is eligible only after exact
 // final-state parity and a >=2% loop-time win. Decisions are cached by the
 // existing GPU/driver/runtime/batch key; no GPU model is hard-coded.
 
 namespace {
 
-constexpr int kCnCoopImplCacheRevision = 1;
+constexpr int kCnCoopImplCacheRevision = 2;
 constexpr float kCnCoopImplRequiredSpeedup = 0.98F;
-static std::array<std::array<int, 6>, kMaxLoopTuneDevices> g_cn_coop_impl{}; // 1=v1, 2=v2
+static std::array<std::array<int, 6>, kMaxLoopTuneDevices> g_cn_coop_impl{}; // 1=v1, 3=v3
 static std::array<bool, kMaxLoopTuneDevices> g_cn_coop_impl_ready{};
 
 std::filesystem::path cn_coop_impl_cache_path(int device_id,
@@ -50,7 +50,7 @@ bool load_cn_coop_impl_cache(int device_id,
     for (std::size_t i = 0; i < impl.size(); ++i) {
         std::size_t variant = 0;
         int value = 1;
-        if (!(in >> variant >> value) || variant != i || (value != 1 && value != 2)) return false;
+        if (!(in >> variant >> value) || variant != i || (value != 1 && value != 3)) return false;
         impl[i] = value;
     }
     g_cn_coop_impl[device_id] = impl;
@@ -99,14 +99,14 @@ void launch_cn_coop_impl(cudaStream_t stream,
 {
     const int blocks = static_cast<int>((count * 4U + static_cast<std::size_t>(threads) - 1U) /
                                         static_cast<std::size_t>(threads));
-    if (impl == 2)
-        cryptonight_loop_stage_coop4_v2<V><<<blocks, threads, 0, stream>>>(count, scratch, ctx);
+    if (impl == 3)
+        cryptonight_loop_stage_coop4_v3<V><<<blocks, threads, 0, stream>>>(count, scratch, ctx);
     else
         cryptonight_loop_stage_coop4<V><<<blocks, threads, 0, stream>>>(count, scratch, ctx);
 }
 
 template <std::uint8_t V>
-bool validate_cn_coop_impl_v2(cudaStream_t stream,
+bool validate_cn_coop_impl_v3(cudaStream_t stream,
                               std::uint8_t* states,
                               std::uint8_t* scratch,
                               cryptonight::SplitContext* ctx,
@@ -115,7 +115,7 @@ bool validate_cn_coop_impl_v2(cudaStream_t stream,
 {
     constexpr std::size_t count = 2U;
     std::array<std::uint8_t, count * kStateBytes> v1{};
-    std::array<std::uint8_t, count * kStateBytes> v2{};
+    std::array<std::uint8_t, count * kStateBytes> v3{};
 
     auto run = [&](int impl, std::array<std::uint8_t, count * kStateBytes>& output) {
         check_cuda(cudaMemsetAsync(states, static_cast<int>(0x71U + V * 7U), count * kStateBytes, stream),
@@ -144,8 +144,8 @@ bool validate_cn_coop_impl_v2(cudaStream_t stream,
     };
 
     run(1, v1);
-    run(2, v2);
-    return v1 == v2;
+    run(3, v3);
+    return v1 == v3;
 }
 
 template <std::uint8_t V>
@@ -162,10 +162,10 @@ void tune_cn_coop_impl_variant(int device_id,
 
     int threads = g_cn_coop_threads[device_id][V];
     if (threads <= 0) threads = 32;
-    const bool parity = validate_cn_coop_impl_v2<V>(stream, states, scratch, ctx, g, threads);
+    const bool parity = validate_cn_coop_impl_v3<V>(stream, states, scratch, ctx, g, threads);
     if (!parity) {
         std::cout << "[CUDA CN coop impl] " << cryptonight::config_value(V).name
-                  << " | v2 parity=FAIL | selected=coop4-v1\n";
+                  << " | v3 parity=FAIL | selected=coop4-v1\n";
         return;
     }
 
@@ -187,22 +187,22 @@ void tune_cn_coop_impl_variant(int device_id,
         check_cuda(cudaGetLastError(), "coop impl v1 benchmark failed");
     });
     prepare();
-    const float v2_ms = time_cuda_phase(stream, [&]() {
-        launch_cn_coop_impl<V>(stream, 2, threads, count, scratch, ctx);
-        check_cuda(cudaGetLastError(), "coop impl v2 benchmark failed");
+    const float v3_ms = time_cuda_phase(stream, [&]() {
+        launch_cn_coop_impl<V>(stream, 3, threads, count, scratch, ctx);
+        check_cuda(cudaGetLastError(), "coop impl v3 benchmark failed");
     });
 
-    const bool use_v2 = v2_ms < v1_ms * kCnCoopImplRequiredSpeedup;
-    g_cn_coop_impl[device_id][V] = use_v2 ? 2 : 1;
-    const float gain = (v1_ms / v2_ms - 1.0F) * 100.0F;
+    const bool use_v3 = v3_ms < v1_ms * kCnCoopImplRequiredSpeedup;
+    g_cn_coop_impl[device_id][V] = use_v3 ? 3 : 1;
+    const float gain = (v1_ms / v3_ms - 1.0F) * 100.0F;
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN coop impl] " << cryptonight::config_value(V).name
               << " | threads=" << threads
               << " | v1=" << v1_ms << " ms"
-              << " | v2=" << v2_ms << " ms"
+              << " | v3=" << v3_ms << " ms"
               << " | parity=PASS"
               << " | gain=" << gain << "%"
-              << " | selected=" << (use_v2 ? "coop4-v2" : "coop4-v1")
+              << " | selected=" << (use_v3 ? "coop4-v3" : "coop4-v1")
               << std::defaultfloat << '\n';
 }
 
