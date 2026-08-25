@@ -110,9 +110,6 @@ if(WIN32)
     endforeach()
 endif()
 
-# Generate an experimental CN-Fast candidate from the pristine pinned Core
-# implementation. It remains a separate translation unit so the established
-# production path is untouched. Runtime A/B selection decides whether it is used.
 set(YERBAS_CPU_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cpu")
 file(MAKE_DIRECTORY "${YERBAS_CPU_GENERATED_DIR}")
 set(YERBAS_CN_FAST_CANDIDATE_IMPL "${YERBAS_CPU_GENERATED_DIR}/cn_fast_candidate_impl.c")
@@ -235,6 +232,8 @@ add_executable(yerbas-miner
     src/config.cpp
     src/cpu/cpu_autotune.cpp
     src/cpu/cpu_worker_pool.cpp
+    src/cpu/cn_width_tune.cpp
+    src/cpu/cpu_lane_scheduler_tune.cpp
     src/crypto/sha256.cpp
     src/stratum/stratum.cpp
 )
@@ -308,153 +307,57 @@ if(YERBAS_ENABLE_CUDA)
                 --out-header "${YERBAS_CUDA_GENERATED_DIR}/${STEM}_device_types.cuh"
                 ${ARGN}
             RESULT_VARIABLE YERBAS_CUDA_SPH_RESULT
+            OUTPUT_VARIABLE YERBAS_CUDA_SPH_OUTPUT
+            ERROR_VARIABLE YERBAS_CUDA_SPH_ERROR
         )
         if(NOT YERBAS_CUDA_SPH_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to generate CUDA ${STEM} device source")
+            message(FATAL_ERROR
+                "Failed generating CUDA ${STEM} implementation: ${YERBAS_CUDA_SPH_ERROR}${YERBAS_CUDA_SPH_OUTPUT}")
         endif()
     endfunction()
 
-    yerbas_generate_cuda_sph(bmw bmw.c sph_bmw.h)
-    yerbas_generate_cuda_sph(groestl groestl.c sph_groestl.h)
-    yerbas_generate_cuda_sph(jh jh.c sph_jh.h)
-    yerbas_generate_cuda_sph(skein skein.c sph_skein.h)
-    yerbas_generate_cuda_sph(luffa luffa.c sph_luffa.h)
-    yerbas_generate_cuda_sph(shavite shavite.c sph_shavite.h
-        --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
-    yerbas_generate_cuda_sph(simd simd.c sph_simd.h)
-    yerbas_generate_cuda_sph(echo echo.c sph_echo.h
-        --inline-include "aes_helper.c=${YERBAS_CORE_SRC}/crypto/aes_helper.c")
-    yerbas_generate_cuda_sph(hamsi sph_hamsi.c sph_hamsi.h
-        --inline-include "sph_hamsi_helper.c=${YERBAS_CORE_SRC}/crypto/sph_hamsi_helper.c")
+    yerbas_generate_cuda_sph(blake   sph_blake.c   sph_blake.h)
+    yerbas_generate_cuda_sph(bmw     sph_bmw.c     sph_bmw.h)
+    yerbas_generate_cuda_sph(groestl sph_groestl.c sph_groestl.h)
+    yerbas_generate_cuda_sph(jh      sph_jh.c      sph_jh.h)
+    yerbas_generate_cuda_sph(keccak  sph_keccak.c  sph_keccak.h)
+    yerbas_generate_cuda_sph(skein   sph_skein.c   sph_skein.h)
+    yerbas_generate_cuda_sph(luffa   sph_luffa.c   sph_luffa.h)
+    yerbas_generate_cuda_sph(cubehash sph_cubehash.c sph_cubehash.h)
+    yerbas_generate_cuda_sph(shavite sph_shavite.c sph_shavite.h)
+    yerbas_generate_cuda_sph(simd sph_simd.c sph_simd.h)
+    yerbas_generate_cuda_sph(echo sph_echo.c sph_echo.h)
+    yerbas_generate_cuda_sph(hamsi sph_hamsi.c sph_hamsi.h)
     yerbas_generate_cuda_sph(fugue sph_fugue.c sph_fugue.h)
     yerbas_generate_cuda_sph(shabal sph_shabal.c sph_shabal.h)
-    yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h
-        --inline-include-all "md_helper.c=${YERBAS_CORE_SRC}/crypto/md_helper.c")
+    yerbas_generate_cuda_sph(whirlpool sph_whirlpool.c sph_whirlpool.h)
 
-    function(yerbas_generate_cuda_cn_hash NAMESPACE SOURCE_FILE HEADER_FILE OUTPUT_FILE)
-        execute_process(
-            COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_cuda_cn_hash.py"
-                --namespace "${NAMESPACE}"
-                --source "${YERBAS_CORE_SRC}/cryptonote/${SOURCE_FILE}"
-                --header "${YERBAS_CORE_SRC}/cryptonote/${HEADER_FILE}"
-                --out "${YERBAS_CUDA_GENERATED_DIR}/${OUTPUT_FILE}"
-            RESULT_VARIABLE YERBAS_CUDA_CN_RESULT
-        )
-        if(NOT YERBAS_CUDA_CN_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to generate CUDA CryptoNight primitive ${NAMESPACE}")
-        endif()
-    endfunction()
-
-    yerbas_generate_cuda_cn_hash(cn_blake256 c_blake256.c c_blake256.h cn_blake256_device.cuh)
-    yerbas_generate_cuda_cn_hash(cn_groestl c_groestl.c c_groestl.h cn_groestl_device.cuh)
-    yerbas_generate_cuda_cn_hash(cn_jh c_jh.c c_jh.h cn_jh_device.cuh)
-    yerbas_generate_cuda_cn_hash(cn_skein c_skein.c c_skein.h cn_skein_device.cuh)
-
-    target_sources(yerbas-miner PRIVATE
+    add_library(yerbas-cuda-backend STATIC
         src/cuda/cuda_backend.cu
-        src/cuda/blake_validation.cu
-        src/cuda/skein_validation.cu
-        src/cuda/sph_batch_validation.cu
     )
-    target_include_directories(yerbas-miner PRIVATE
+    target_include_directories(yerbas-cuda-backend PRIVATE
+        src
         "${YERBAS_CUDA_GENERATED_DIR}"
         "${YERBAS_CORE_SRC}/crypto"
         "${YERBAS_CORE_SRC}/cryptonote"
     )
-    target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
-    target_compile_options(yerbas-miner PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
-    )
-    set_target_properties(yerbas-miner PROPERTIES
+    set_target_properties(yerbas-cuda-backend PROPERTIES
+        CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES}"
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES}"
     )
+    target_compile_options(yerbas-cuda-backend PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
+        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
+    )
+    target_compile_definitions(yerbas-miner PRIVATE YERBAS_HAS_CUDA=1)
+    target_link_libraries(yerbas-miner PRIVATE yerbas-cuda-backend)
+endif()
+
+if(YERBAS_IPO_SUPPORTED AND NOT YERBAS_NATIVE_CPU)
+    set_property(TARGET yerbas-miner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(ghostrider-smoke tests/ghostrider_smoke.cpp)
-    target_include_directories(ghostrider-smoke PRIVATE src)
-    target_link_libraries(ghostrider-smoke PRIVATE yerbas-ghostrider-reference)
-    add_test(NAME ghostrider-smoke COMMAND ghostrider-smoke)
-
-    add_executable(ghostrider-equivalence tests/ghostrider_equivalence.cpp)
-    target_include_directories(ghostrider-equivalence PRIVATE src ${YERBAS_CORE_SRC})
-    target_link_libraries(ghostrider-equivalence PRIVATE yerbas-ghostrider-reference)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_compile_options(ghostrider-equivalence PRIVATE
-            -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
-        )
-    endif()
-    add_test(NAME ghostrider-equivalence COMMAND ghostrider-equivalence)
-
-    if(YERBAS_CUDA_AVAILABLE)
-        add_library(yerbas-ghostrider-debug OBJECT "${YERBAS_SLOW_HASH}")
-        target_include_directories(yerbas-ghostrider-debug PRIVATE
-            ${YERBAS_CORE_SRC}
-            ${YERBAS_CORE_SRC}/cryptonote
-        )
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            target_compile_options(yerbas-ghostrider-debug PRIVATE
-                -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/glibc_endian_compat.h"
-            )
-        endif()
-        if(WIN32)
-            target_include_directories(yerbas-ghostrider-debug BEFORE PRIVATE
-                "${CMAKE_CURRENT_SOURCE_DIR}/compat/windows"
-            )
-        endif()
-
-        add_executable(cuda-keccak-validation
-            tests/cuda_keccak_validation.cpp
-            src/cuda/cuda_backend.cu
-            src/cuda/blake_validation.cu
-            src/cuda/skein_validation.cu
-            src/cuda/sph_batch_validation.cu
-            src/cuda/cryptonight/cn_validation.cu
-            $<TARGET_OBJECTS:yerbas-ghostrider-debug>
-        )
-        target_include_directories(cuda-keccak-validation PRIVATE
-            src
-            tests
-            "${YERBAS_CUDA_GENERATED_DIR}"
-            "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonight"
-        )
-        target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
-        target_compile_options(cuda-keccak-validation PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
-        )
-        set_target_properties(cuda-keccak-validation PROPERTIES
-            CUDA_STANDARD 17
-            CUDA_STANDARD_REQUIRED ON
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES}"
-        )
-        add_test(NAME cuda-keccak-validation COMMAND cuda-keccak-validation)
-
-        add_executable(cuda-batch-benchmark
-            tests/cuda_batch_benchmark.cpp
-            src/cuda/cuda_backend.cu
-        )
-        target_include_directories(cuda-batch-benchmark PRIVATE
-            src
-            tests
-            "${YERBAS_CUDA_GENERATED_DIR}"
-            "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonight"
-        )
-        target_link_libraries(cuda-batch-benchmark PRIVATE yerbas-ghostrider-reference)
-        target_compile_options(cuda-batch-benchmark PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
-        )
-        set_target_properties(cuda-batch-benchmark PROPERTIES
-            CUDA_STANDARD 17
-            CUDA_STANDARD_REQUIRED ON
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES}"
-        )
-    endif()
+    add_test(NAME yerbas-miner-help COMMAND yerbas-miner --help)
 endif()
