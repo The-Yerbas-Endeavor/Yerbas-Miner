@@ -83,7 +83,7 @@ Command-line equivalents:
 
 `threads` is a ceiling when tuning is enabled. `threads: 0` allows the tuner to use all logical CPUs; for example, `threads: 6` on a 12-thread machine limits the search to configurations using at most 6 CPU workers.
 
-The current production tuner selects CPU thread count and per-thread batch size by measuring full GhostRider throughput across representative schedules. True cpuminer-gr-style per-rotation `1way/2way/4way` CryptoNight selection requires genuine multi-lane CryptoNight kernels. Yerbas-Miner currently has the validated 1-way CPU CN engine only; 2-way/4-way modes will not be advertised or selected until those implementations exist and pass parity against Yerbas Core.
+The current production tuner selects CPU thread count and per-thread batch size by measuring full GhostRider throughput across representative schedules. True cpuminer-gr-style per-rotation `1way/2way/4way` CryptoNight selection requires genuine multi-lane CryptoNight kernels. Yerbas-Miner currently has experimental 2-way/4-way work behind parity and production-performance gates; wider execution is not selected unless it proves safe and faster than the 1-way production path.
 
 Command-line options override values from the configuration file:
 
@@ -137,9 +137,47 @@ Priority is command line, then JSON config, then built-in defaults.
 
 ## Build
 
-### Recommended: generic portable CPU + CUDA build
+### Fast development/testing build
 
-For normal development, testing, and release validation, use the portable release script:
+For normal development and repeated testing, use:
+
+```bash
+bash scripts/configure-dev.sh
+```
+
+This creates `build-dev/yerbas-miner` with:
+
+- `YERBAS_NATIVE_CPU=OFF`, so CPU code remains generic and is not compiled with `-march=native` / `-mtune=native`.
+- CUDA architecture `native` by default, so only the GPU architecture present on the development machine is compiled instead of every supported release architecture.
+- The same runtime CPU dispatch, CPU/GPU tuning, mining logic, and validation paths used by the release build.
+- A separate `build-dev` directory, so incremental development rebuilds do not disturb the full release build tree.
+
+Run it with:
+
+```bash
+./build-dev/yerbas-miner
+```
+
+For repeated development after the first configure, keep the same build directory:
+
+```bash
+git pull
+bash scripts/configure-dev.sh
+```
+
+The script reuses `build-dev` and Ninja only recompiles files affected by the changes.
+
+To override the development CUDA target manually:
+
+```bash
+YERBAS_DEV_CUDA_ARCHITECTURES=61 bash scripts/configure-dev.sh
+```
+
+Use this only when you intentionally want a specific development GPU architecture instead of automatic native detection.
+
+### Full generic release build
+
+Use the full release build only when validating or producing a distributable binary:
 
 ```bash
 bash scripts/configure-release.sh
@@ -147,9 +185,9 @@ bash scripts/configure-release.sh
 
 This creates `build-release/yerbas-miner` with:
 
-- `YERBAS_NATIVE_CPU=OFF`, so CPU code is not compiled with `-march=native` / `-mtune=native`.
-- A multi-architecture CUDA fat binary for compute capabilities `52;60;61;70;75;80;86;89;90`.
-- Runtime CPU and GPU tuning when explicitly enabled so production settings can be selected on the target machine.
+- `YERBAS_NATIVE_CPU=OFF`, keeping CPU code portable.
+- A CUDA fat binary for compute capabilities `52;60;61;70;75;80;86;89;90`.
+- The same runtime CPU/GPU autotuning and production code used by the development build.
 
 Run it with:
 
@@ -157,11 +195,11 @@ Run it with:
 ./build-release/yerbas-miner
 ```
 
-Keep this as the normal development/testing path when validating behavior intended for general users.
+The full release build is intentionally slower because CUDA code is generated and linked for every supported architecture. Do not use it as the normal edit/test loop.
 
-### Optional: native benchmark build
+### Optional: native CPU benchmark build
 
-For local performance experiments only:
+For local CPU performance experiments only:
 
 ```bash
 bash scripts/configure-native-cpu.sh
@@ -189,13 +227,6 @@ cmake -S . -B build-release -G Ninja \
 cmake --build build-release --parallel
 ctest --test-dir build-release --output-on-failure
 ./build-release/yerbas-miner
-```
-
-For faster repeated portable builds, keep the same `build-release` directory and run only:
-
-```bash
-git pull
-cmake --build build-release --parallel $(nproc)
 ```
 
 Optional `ccache` support can be enabled when installed:
