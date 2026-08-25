@@ -51,6 +51,12 @@
 #define autotune_cn_geometries autotune_cn_geometries_cnfast_internal
 #include "cuda/generated/cuda_backend_cn_fast_tune.inc"
 #undef autotune_cn_geometries
+
+// Focused CN-Fast phase/microkernel A/B tuner. It runs only for the explicit
+// --benchmark-cn-fast path and can refine setup, coop4 loop, and final geometry
+// after the backend family winner has been established.
+#include "cuda/generated/cuda_backend_cn_fast_microtune.inc"
+
 #include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
 
 // Public CryptoNight dispatch: selected variants use cooperative mode; all other
