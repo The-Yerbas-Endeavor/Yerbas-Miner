@@ -13,6 +13,15 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
     auto result = autotune_cn_geometries_coop(device_id, stream, states, batch_size,
                                               scratchpads, contexts);
 
+    cudaDeviceProp props{};
+    check_cuda(cudaGetDeviceProperties(&props, device_id),
+               "cudaGetDeviceProperties CN-Fast family tuner failed");
+
+    // Generic cooperative implementation selection applies to every CN variant
+    // that already qualified for coop4. No device model is special-cased.
+    ensure_cn_coop_impl_modes(device_id, props, stream, states, batch_size,
+                              scratchpads, contexts, result);
+
     const bool valid_device = device_id >= 0 && device_id < kMaxLoopTuneDevices;
     const bool coop_active = valid_device && g_cn_coop_ready[device_id] &&
                              g_cn_coop_enabled[device_id][2];
@@ -25,9 +34,6 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
         return result;
     }
 
-    cudaDeviceProp props{};
-    check_cuda(cudaGetDeviceProperties(&props, device_id),
-               "cudaGetDeviceProperties CN-Fast family tuner failed");
     tune_cn_fast_family(device_id, props, stream, states, batch_size,
                         scratchpads, contexts, result[2]);
 
