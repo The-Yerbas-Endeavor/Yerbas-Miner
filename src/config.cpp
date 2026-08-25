@@ -72,6 +72,7 @@ void apply_json(AppConfig& cfg, const json& root)
     if (root.contains("logging")) {
         const auto& l = root.at("logging");
         if (l.contains("level")) cfg.logging.level = l.at("level").get<std::string>();
+        if (l.contains("perf_csv")) cfg.logging.perf_csv = l.at("perf_csv").get<std::string>();
     }
 }
 
@@ -111,6 +112,7 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
+        else if (arg == "--perf-log") cfg.logging.perf_csv = require_value(argc, argv, i, "--perf-log");
         else if (arg == "--help" || arg == "-h") {}
         else throw std::runtime_error("Unknown option: " + arg);
     }
@@ -139,6 +141,7 @@ void print_config_help(const char* program)
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
+        << "  --perf-log FILE     Append rotation performance records to CSV\n"
         << "  -h, --help          Show this help\n\n"
         << "CPU tuning modes:\n"
         << "  off      no CPU benchmark; mine immediately with configured/default settings\n"
