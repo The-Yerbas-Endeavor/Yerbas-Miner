@@ -19,6 +19,7 @@
 namespace yerbas::stratum {
 
 struct Endpoint {
+    std::string scheme;
     std::string host;
     unsigned short port{0};
 };
