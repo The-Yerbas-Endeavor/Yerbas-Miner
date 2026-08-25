@@ -16,33 +16,22 @@ struct MinerConfig {
     bool cpu_enabled{true};
     unsigned int threads{0};
     bool hybrid{true};
-    // 16 hashes per worker is the portable out-of-box default when tuning is off.
     unsigned int cpu_batch{16};
-    // Runtime-selected execution width. This is not a user-facing config knob;
-    // the production tuner leaves it at 1 unless a parity-qualified sustained
-    // GhostRider lane plan beats the tuned 1-way baseline.
     unsigned int cpu_lanes{1};
-    // CPU tuning policy:
-    //   off     = start mining immediately with configured/default settings
-    //   simple  = quick production tuning
-    //   default = balanced production tuning
-    //   full    = exhaustive production + GhostRider rotation tuning where supported
     std::string cpu_tune{"off"};
 };
 
 struct GpuConfig {
     bool enabled{true};
-    // Empty means use every detected CUDA device. This is safer than assuming
-    // that device 0 is always the GPU the user intended to mine with.
     std::vector<int> devices{};
     int intensity{0};
-    // Skip the startup CUDA readiness probe after the backend has already been
-    // validated on the machine. Full mining coverage is still required.
     bool skip_validation{false};
 };
 
 struct LoggingConfig {
     std::string level{"info"};
+    // Optional rotation/performance CSV. Empty disables file logging.
+    std::string perf_csv;
 };
 
 struct AppConfig {
