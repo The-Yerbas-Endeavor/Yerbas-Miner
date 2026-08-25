@@ -651,6 +651,12 @@ bool Client::mine_one(std::intptr_t socket_value)
     ++cpu_hashes_done_; ++hashes_done_;
     if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) return true;
     if (hash_meets_target(hash, target_le_)) {
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
+            std::cout << timestamp() << "[CPU] stale candidate suppressed | old_job=" << work_job_id
+                      << " new_job=" << job_.job_id << '\n';
+            return true;
+        }
         std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
         return submit_share(socket_value, extranonce2, nonce, "CPU");
     }
@@ -706,7 +712,15 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
         return true;
     }
 
-    for (const auto& candidate : candidates) {
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
+            std::cout << timestamp() << "[CPU] suppressed " << (candidates.size() - index)
+                      << " stale candidate(s) before submit | old_job=" << work_job_id
+                      << " new_job=" << job_.job_id << '\n';
+            return true;
+        }
+        const auto& candidate = candidates[index];
         std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
         if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
     }
@@ -780,7 +794,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
     } while (!all_ready);
     if (!pump_socket_messages(socket_value, 0)) return false;
 
-    const bool stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+    bool stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id;
     std::size_t stale_candidates = 0;
     for (auto& task : pending) {
         const auto candidates = task.future.get();
@@ -789,13 +803,20 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
         hashes_done_ += count;
         if (stale) { stale_candidates += candidates.size(); continue; }
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
-        for (const auto& candidate : candidates) {
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            if (!pump_socket_messages(socket_value, 0)) return false;
+            stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+            if (stale) {
+                stale_candidates += candidates.size() - index;
+                break;
+            }
+            const auto& candidate = candidates[index];
             std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
     }
     if (stale) {
-        std::cout << timestamp() << "[GPU] stale round discarded | old_job=" << work_job_id
+        std::cout << timestamp() << "[GPU] stale candidates suppressed | old_job=" << work_job_id
                   << " new_job=" << job_.job_id << " | candidates=" << stale_candidates << '\n';
     }
     return true;
@@ -846,14 +867,21 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         hashes_done_ += count;
         if (stale) { stale_candidates += candidates.size(); continue; }
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
-        for (const auto& candidate : candidates) {
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            if (!pump_socket_messages(socket_value, 0)) return false;
+            stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+            if (stale) {
+                stale_candidates += candidates.size() - index;
+                break;
+            }
+            const auto& candidate = candidates[index];
             std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
             if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
         }
     }
 
     if (stale) {
-        std::cout << timestamp() << "[hybrid] stale round discarded | old_job=" << work_job_id
+        std::cout << timestamp() << "[hybrid] stale candidates suppressed | old_job=" << work_job_id
                   << " new_job=" << job_.job_id << " | GPU candidates=" << stale_candidates << '\n';
     }
     return true;
