@@ -492,6 +492,33 @@ private:
 
     static void capture_rotation_metadata(const std::string& line)
     {
+        // Current compact format:
+        // [GhostRider] rotation=<fingerprint> | CN=CN-X/CN-Y/CN-Z
+        constexpr const char* kCompactPrefix = "[GhostRider] rotation=";
+        if (line.rfind(kCompactPrefix, 0) == 0) {
+            const std::size_t fp_begin = std::char_traits<char>::length(kCompactPrefix);
+            const std::size_t fp_end = line.find(" |", fp_begin);
+            rotation_fingerprint() = line.substr(
+                fp_begin,
+                fp_end == std::string::npos ? std::string::npos : fp_end - fp_begin);
+
+            constexpr const char* kCnToken = " | CN=";
+            const std::size_t cn_pos = line.find(kCnToken, fp_begin);
+            if (cn_pos != std::string::npos) {
+                std::string variants = line.substr(cn_pos + std::char_traits<char>::length(kCnToken));
+                // Status table historically uses spaced separators for readability.
+                std::string formatted;
+                formatted.reserve(variants.size() + 4);
+                for (char c : variants) {
+                    if (c == '/') formatted += " / ";
+                    else formatted.push_back(c);
+                }
+                if (!formatted.empty()) rotation_cn_variants() = std::move(formatted);
+            }
+            return;
+        }
+
+        // Legacy format support retained for verbose/older builds.
         constexpr const char* kFingerprintPrefix = "[GhostRider] schedule fingerprint=";
         if (line.rfind(kFingerprintPrefix, 0) == 0) {
             const std::size_t begin = std::char_traits<char>::length(kFingerprintPrefix);
