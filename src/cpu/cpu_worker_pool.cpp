@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -25,6 +26,12 @@ std::atomic_uint g_runtime_lane_width{1U};
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
 {
     return lane_width == 2U || lane_width == 4U ? lane_width : 1U;
+}
+
+bool diagnostics_enabled()
+{
+    const char* value = std::getenv("YERBAS_DIAGNOSTICS");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
 void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
@@ -210,7 +217,10 @@ struct WorkerPool::Impl {
                                                    lanes,
                                                    count,
                                                    hps);
-        if ((run_count % 8U) == 0U) {
+
+        const bool new_rotation = active_fingerprint != last_logged_fingerprint;
+        const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
+        if (new_rotation || periodic_diagnostic) {
             std::cout << std::fixed << std::setprecision(2)
                       << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                       << active_fingerprint << std::dec << std::setfill(' ')
@@ -220,6 +230,7 @@ struct WorkerPool::Impl {
                       << " | learned=" << fp.ewma_hps << " H/s"
                       << " | samples=" << fp.samples
                       << std::defaultfloat << '\n';
+            last_logged_fingerprint = active_fingerprint;
         }
 
         std::size_t total_candidates = 0;
@@ -243,6 +254,7 @@ struct WorkerPool::Impl {
     std::uint64_t generation{0};
     unsigned int completed{0};
     std::uint64_t run_count{0};
+    std::uint64_t last_logged_fingerprint{0};
 
     std::array<std::uint8_t, 80> base_header{};
     std::array<std::uint8_t, 32> target_le{};
