@@ -52,6 +52,10 @@
 #include "cuda/generated/cuda_backend_cn_fast_tune.inc"
 #undef autotune_cn_geometries
 
+// Persist setup/coop/final geometry independently per GPU, driver/runtime and
+// active batch. Forced benchmark/retune modes bypass this cache.
+#include "cuda/generated/cuda_backend_cn_fast_microcache.inc"
+
 // Focused CN-Fast phase/microkernel A/B tuner. It runs only for the explicit
 // --benchmark-cn-fast path and can refine setup, coop4 loop, and final geometry
 // after the backend family winner has been established.
