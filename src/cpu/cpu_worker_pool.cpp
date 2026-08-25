@@ -1,5 +1,6 @@
 #include "cpu/cpu_worker_pool.h"
 
+#include "cpu/fingerprint_runtime.h"
 #include "ghostrider/ghostrider.h"
 
 #include <algorithm>
@@ -92,6 +93,7 @@ struct WorkerPool::Impl {
         work_ready.notify_all();
         for (auto& worker : workers)
             if (worker.joinable()) worker.join();
+        flush_fingerprint_runtime();
     }
 
     void worker_loop(unsigned int index)
@@ -199,19 +201,24 @@ struct WorkerPool::Impl {
 
         const auto perf_end = std::chrono::steady_clock::now();
         ++run_count;
-        if ((run_count % 4U) == 0U) {
-            const double elapsed_ms = std::chrono::duration<double, std::milli>(perf_end - perf_start).count();
-            const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
-            const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
-            std::cout << std::fixed << std::setprecision(3)
-                      << "[CPU GR perf] fingerprint=" << std::hex << std::setw(16) << std::setfill('0')
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(perf_end - perf_start).count();
+        const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
+        const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
+        const auto fp = record_fingerprint_runtime(active_fingerprint,
+                                                   active_cn_summary,
+                                                   threads,
+                                                   lanes,
+                                                   count,
+                                                   hps);
+        if ((run_count % 8U) == 0U) {
+            std::cout << std::fixed << std::setprecision(2)
+                      << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                       << active_fingerprint << std::dec << std::setfill(' ')
                       << " | CN=" << active_cn_summary
-                      << " | threads=" << threads
-                      << " | lanes=" << lanes
-                      << " | hashes=" << hashes
-                      << " | elapsed=" << elapsed_ms << " ms"
-                      << " | throughput=" << hps << " H/s"
+                      << " | policy=" << threads << 'x' << lanes << " batch=" << count
+                      << " | live=" << hps << " H/s"
+                      << " | learned=" << fp.ewma_hps << " H/s"
+                      << " | samples=" << fp.samples
                       << std::defaultfloat << '\n';
         }
 
