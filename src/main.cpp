@@ -21,9 +21,7 @@ namespace {
 void write_startup_log(const std::string& message)
 {
     std::ofstream log("yerbas-miner-startup.log", std::ios::app);
-    if (log) {
-        log << message << '\n';
-    }
+    if (log) log << message << '\n';
 }
 
 #ifdef _WIN32
@@ -44,35 +42,26 @@ LONG WINAPI windows_unhandled_exception_filter(EXCEPTION_POINTERS* info)
 
     if (info != nullptr && info->ExceptionRecord != nullptr) {
         const EXCEPTION_RECORD* record = info->ExceptionRecord;
-        const auto exception_address =
-            reinterpret_cast<std::uintptr_t>(record->ExceptionAddress);
+        const auto exception_address = reinterpret_cast<std::uintptr_t>(record->ExceptionAddress);
 
         ss << " | code=0x" << std::hex << std::uppercase
            << static_cast<unsigned long>(record->ExceptionCode)
            << " | address=0x" << exception_address;
 
-        if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-            record->NumberParameters >= 2) {
+        if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2) {
             ss << " | access=" << windows_access_kind(record->ExceptionInformation[0])
-               << " | fault_address=0x"
-               << static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+               << " | fault_address=0x" << static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
         }
 
         MEMORY_BASIC_INFORMATION mbi{};
-        if (VirtualQuery(record->ExceptionAddress, &mbi, sizeof(mbi)) == sizeof(mbi) &&
-            mbi.AllocationBase != nullptr) {
-            const auto module_base =
-                reinterpret_cast<std::uintptr_t>(mbi.AllocationBase);
+        if (VirtualQuery(record->ExceptionAddress, &mbi, sizeof(mbi)) == sizeof(mbi) && mbi.AllocationBase != nullptr) {
+            const auto module_base = reinterpret_cast<std::uintptr_t>(mbi.AllocationBase);
             ss << " | module_base=0x" << module_base
                << " | module_offset=0x" << (exception_address - module_base);
 
             char module_path[MAX_PATH]{};
-            const DWORD path_len = GetModuleFileNameA(
-                static_cast<HMODULE>(mbi.AllocationBase),
-                module_path,
-                static_cast<DWORD>(sizeof(module_path)));
-            if (path_len > 0 && path_len < sizeof(module_path))
-                ss << " | module=" << module_path;
+            const DWORD path_len = GetModuleFileNameA(static_cast<HMODULE>(mbi.AllocationBase), module_path, static_cast<DWORD>(sizeof(module_path)));
+            if (path_len > 0 && path_len < sizeof(module_path)) ss << " | module=" << module_path;
         }
     }
 
@@ -108,6 +97,10 @@ int main(int argc, char** argv)
 
     try {
         const auto config = yerbas::load_config(argc, argv);
+        if (!config.logging.perf_csv.empty()) {
+            yerbas::console::set_perf_csv_path(config.logging.perf_csv);
+            std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
+        }
         if (config.miner.cpu_enabled)
             (void)yerbas::cpu::qualify_cn_widths(config.miner.cpu_tune);
         yerbas::Miner miner(config);
