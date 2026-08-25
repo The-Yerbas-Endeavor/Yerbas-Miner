@@ -61,6 +61,10 @@
 // after the backend family winner has been established.
 #include "cuda/generated/cuda_backend_cn_fast_microtune.inc"
 
+// Direct repeated setup->loop->final timing confirms that a phase-sweep winner
+// improves the real whole CN-Fast stage before it is persisted for production.
+#include "cuda/generated/cuda_backend_cn_fast_microconfirm.inc"
+
 #include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
 
 // Public CryptoNight dispatch: selected variants use cooperative mode; all other
