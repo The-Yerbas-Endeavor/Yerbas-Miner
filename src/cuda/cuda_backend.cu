@@ -11,9 +11,6 @@
 #include "cuda/generated/cuda_backend_part1.inc"
 #include "cuda/generated/cuda_backend_part2a.inc"
 
-// Preserve the established small-sample tuner and split CryptoNight dispatch as
-// fallbacks. The public dispatch is replaced below only after cooperative mode
-// has passed parity and performance selection.
 #define autotune_cn_geometries autotune_cn_geometries_legacy
 #define launch_split_cryptonight_variant launch_split_cryptonight_variant_legacy
 #define launch_split_cryptonight launch_split_cryptonight_legacy
@@ -22,72 +19,35 @@
 #undef launch_split_cryptonight_variant
 #undef autotune_cn_geometries
 
-// Select the production mining batch before per-batch geometry/backend tuning.
-// The explicit YERBAS_CUDA_ACTIVE_BATCH environment variable remains an override.
 #include "cuda/generated/cuda_backend_batch_tune.inc"
 
-// Preserve production-batch thread/unroll tuning as the second-stage implementation.
 #define autotune_cn_geometries autotune_cn_geometries_prod
 #include "cuda/generated/cuda_backend_prod_tune.inc"
 #undef autotune_cn_geometries
 
-// Keep the original cooperative probe implementation available for its kernels
-// and parity helpers. Its wrapper remains diagnostic-only.
 #define autotune_cn_geometries autotune_cn_geometries_coop_fixed128
 #include "cuda/generated/cuda_backend_coop_probe.inc"
 #undef autotune_cn_geometries
 
-// Corrected register-distributed cooperative kernel. v2 is retained as a failed
-// experimental reference; v3 restores exact CryptoNight 64-bit >>4 indexing.
 #include "cuda/generated/cuda_backend_coop_v3.inc"
-
-// Narrow v4 candidate: keep the corrected distributed-state semantics but make
-// the first scratchpad fetch one aligned/coalesced 32-bit word per lane.
 #include "cuda/generated/cuda_backend_coop_v4.inc"
 
-// Cooperative production selector remains the broad all-variant tuner, but its
-// wrapper is preserved so later layers can refine the implementation generically.
 #define autotune_cn_geometries autotune_cn_geometries_coop
 #include "cuda/generated/cuda_backend_coop_tune.inc"
 #undef autotune_cn_geometries
 
-// Hardware-agnostic coop4 implementation selector. It compares the established
-// coop4-v1 kernel against corrected register-distributed coop4-v3 for every
-// cooperative CryptoNight variant, parity-gates the result, and caches the
-// winner by GPU/driver/runtime/batch without model-specific assumptions.
 #include "cuda/generated/cuda_backend_coop_impl_tune.inc"
-
-// Sampled diagnostic profiler for the proven CN-Fast coop4-v1 inner loop.
-#include "cuda/generated/cuda_backend_cn_fast_inner_profile.inc"
-
-// Targeted generic v4 selector. v4 is parity/performance gated against whichever
-// established coop implementation already won on the current GPU.
+#include "cuda/generated/cuda_backend_cn_fast_inner_profile_v2.inc"
 #include "cuda/generated/cuda_backend_cn_fast_v4_tune.inc"
 
-// Final CN-Fast selector compares the existing single, dual-state, and coop4
-// families at the real production batch size, validates parity, and caches the
-// winner only when it clears a 3% improvement gate.
 #define autotune_cn_geometries autotune_cn_geometries_cnfast_internal
 #include "cuda/generated/cuda_backend_cn_fast_tune.inc"
 #undef autotune_cn_geometries
 
-// Persist setup/coop/final geometry independently per GPU, driver/runtime and
-// active batch. Forced benchmark/retune modes bypass this cache.
 #include "cuda/generated/cuda_backend_cn_fast_microcache.inc"
-
-// Focused CN-Fast phase/microkernel A/B tuner. It runs only for the explicit
-// --benchmark-cn-fast path and can refine setup, coop4 loop, and final geometry
-// after the backend family winner has been established.
 #include "cuda/generated/cuda_backend_cn_fast_microtune.inc"
-
-// Direct repeated setup->loop->final timing confirms that a phase-sweep winner
-// improves the real whole CN-Fast stage before it is persisted for production.
 #include "cuda/generated/cuda_backend_cn_fast_microconfirm.inc"
-
 #include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
-
-// Public CryptoNight dispatch: selected variants use the parity/performance
-// qualified cooperative implementation; all others use the established fallback.
 #include "cuda/generated/cuda_backend_coop_dispatch.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
