@@ -41,6 +41,13 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                g_cn_coop_enabled[device_id][2];
     if (!coop_selected) return result;
 
+    // Narrow generic v4 experiment: one coalesced 32-bit scratch load per lane.
+    // It is compared with the already-selected cooperative implementation and
+    // cannot enter production unless final-state parity passes and loop time
+    // improves by at least 2%.
+    ensure_cn_fast_v4_mode(device_id, props, stream, states, batch_size,
+                           scratchpads, contexts, result[2]);
+
     // Normal startup first tries the per-device phase geometry learned by an
     // explicit benchmark. Forced benchmark/retune bypasses the cache.
     if (load_cn_fast_micro_cache(device_id, props, batch_size, result[2]))
@@ -101,6 +108,11 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                  result[2].setup_threads,
                                  selected_coop,
                                  result[2].final_threads);
+
+        // Diagnostic only. This profiles the established v1 inner-loop segments
+        // under a full production-size batch and never affects dispatch.
+        profile_cn_fast_coop4_inner(device_id, stream, states, batch_size,
+                                    scratchpads, contexts, result[2]);
     }
     return result;
 }
