@@ -3,6 +3,7 @@
 #include "ghostrider/ghostrider.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -53,8 +54,10 @@ std::string cn_summary(const ghostrider::StageSchedule& schedule)
 } // namespace
 
 struct WorkerPool::Impl {
-    explicit Impl(unsigned int requested_threads)
-        : threads(std::max(1u, requested_threads)), results(threads)
+    explicit Impl(unsigned int requested_threads, unsigned int requested_lanes)
+        : threads(std::max(1u, requested_threads)),
+          lanes(requested_lanes == 2U || requested_lanes == 4U ? requested_lanes : 1U),
+          results(threads)
     {
         workers.reserve(threads);
         for (unsigned int index = 0; index < threads; ++index)
@@ -95,13 +98,40 @@ struct WorkerPool::Impl {
 
             std::vector<Candidate> found;
             found.reserve(2);
-            for (unsigned int i = 0; i < count; ++i) {
-                const std::uint32_t nonce = start + i;
-                write_nonce(header, nonce);
-                const ghostrider::Work work{header.data(), header.size()};
-                const auto hash = ghostrider::hash_optimized(work);
-                if (hash_meets_target(hash, target))
-                    found.push_back({nonce});
+            std::array<unsigned int,6> widths{{lanes, lanes, lanes, lanes, lanes, lanes}};
+
+            for (unsigned int i = 0; i < count;) {
+                const unsigned int group = std::min(lanes, count - i);
+                if (group == 1U || lanes == 1U) {
+                    const std::uint32_t nonce = start + i;
+                    auto lane_header = header;
+                    write_nonce(lane_header, nonce);
+                    const ghostrider::Work work{lane_header.data(), lane_header.size()};
+                    const auto hash = ghostrider::hash_optimized(work);
+                    if (hash_meets_target(hash, target)) found.push_back({nonce});
+                    ++i;
+                    continue;
+                }
+
+                std::array<std::array<std::uint8_t,80>,4> lane_headers{};
+                std::array<ghostrider::Work,4> works{};
+                std::array<ghostrider::Hash256,4> hashes{};
+                std::array<std::uint32_t,4> nonces{};
+                for (unsigned int lane = 0; lane < group; ++lane) {
+                    lane_headers[lane] = header;
+                    nonces[lane] = start + i + lane;
+                    write_nonce(lane_headers[lane], nonces[lane]);
+                    works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
+                }
+
+                if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), group, widths)) {
+                    for (unsigned int lane = 0; lane < group; ++lane)
+                        hashes[lane] = ghostrider::hash_optimized(works[lane]);
+                }
+                for (unsigned int lane = 0; lane < group; ++lane) {
+                    if (hash_meets_target(hashes[lane], target)) found.push_back({nonces[lane]});
+                }
+                i += group;
             }
 
             {
@@ -160,6 +190,7 @@ struct WorkerPool::Impl {
                       << active_fingerprint << std::dec << std::setfill(' ')
                       << " | CN=" << active_cn_summary
                       << " | threads=" << threads
+                      << " | lanes=" << lanes
                       << " | hashes=" << hashes
                       << " | elapsed=" << elapsed_ms << " ms"
                       << " | throughput=" << hps << " H/s"
@@ -176,6 +207,7 @@ struct WorkerPool::Impl {
     }
 
     const unsigned int threads;
+    const unsigned int lanes;
     std::vector<std::thread> workers;
     std::vector<std::vector<Candidate>> results;
 
@@ -200,8 +232,8 @@ struct WorkerPool::Impl {
     std::string active_cn_summary;
 };
 
-WorkerPool::WorkerPool(unsigned int thread_count)
-    : impl_(std::make_unique<Impl>(thread_count))
+WorkerPool::WorkerPool(unsigned int thread_count, unsigned int lane_width)
+    : impl_(std::make_unique<Impl>(thread_count, lane_width))
 {
 }
 
@@ -210,6 +242,11 @@ WorkerPool::~WorkerPool() = default;
 unsigned int WorkerPool::thread_count() const noexcept
 {
     return impl_->threads;
+}
+
+unsigned int WorkerPool::lane_width() const noexcept
+{
+    return impl_->lanes;
 }
 
 std::vector<Candidate> WorkerPool::run(const std::array<std::uint8_t, 80>& base_header,
