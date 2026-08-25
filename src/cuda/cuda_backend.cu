@@ -37,6 +37,10 @@
 #include "cuda/generated/cuda_backend_coop_probe.inc"
 #undef autotune_cn_geometries
 
+// Corrected register-distributed cooperative kernel. v2 is retained as a failed
+// experimental reference; v3 restores exact CryptoNight 64-bit >>4 indexing.
+#include "cuda/generated/cuda_backend_coop_v3.inc"
+
 // Cooperative production selector remains the broad all-variant tuner, but its
 // wrapper is preserved so later layers can refine the implementation generically.
 #define autotune_cn_geometries autotune_cn_geometries_coop
@@ -44,7 +48,7 @@
 #undef autotune_cn_geometries
 
 // Hardware-agnostic coop4 implementation selector. It compares the established
-// coop4-v1 kernel against the register-distributed coop4-v2 kernel for every
+// coop4-v1 kernel against corrected register-distributed coop4-v3 for every
 // cooperative CryptoNight variant, parity-gates the result, and caches the
 // winner by GPU/driver/runtime/batch without model-specific assumptions.
 #include "cuda/generated/cuda_backend_coop_impl_tune.inc"
