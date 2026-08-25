@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -17,6 +18,13 @@
 
 namespace yerbas::cpu {
 namespace {
+
+std::atomic_uint g_runtime_lane_width{1U};
+
+unsigned int normalize_lane_width(unsigned int lane_width) noexcept
+{
+    return lane_width == 2U || lane_width == 4U ? lane_width : 1U;
+}
 
 void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
 {
@@ -53,10 +61,20 @@ std::string cn_summary(const ghostrider::StageSchedule& schedule)
 
 } // namespace
 
+void set_runtime_lane_width(unsigned int lane_width) noexcept
+{
+    g_runtime_lane_width.store(normalize_lane_width(lane_width), std::memory_order_relaxed);
+}
+
+unsigned int runtime_lane_width() noexcept
+{
+    return g_runtime_lane_width.load(std::memory_order_relaxed);
+}
+
 struct WorkerPool::Impl {
     explicit Impl(unsigned int requested_threads, unsigned int requested_lanes)
         : threads(std::max(1u, requested_threads)),
-          lanes(requested_lanes == 2U || requested_lanes == 4U ? requested_lanes : 1U),
+          lanes(requested_lanes == 0U ? runtime_lane_width() : normalize_lane_width(requested_lanes)),
           results(threads)
     {
         workers.reserve(threads);
