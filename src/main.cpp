@@ -18,11 +18,6 @@
 #include <windows.h>
 #endif
 
-/* Keep the experimental CPU tuning layers build-system neutral until their
- * production scheduling policy is finalized. */
-#include "cpu/cn_width_tune.cpp"
-#include "cpu/cpu_lane_scheduler_tune.cpp"
-
 namespace {
 
 void write_startup_log(const std::string& message)
