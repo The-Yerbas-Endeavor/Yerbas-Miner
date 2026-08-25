@@ -16,7 +16,8 @@
     "enabled": true,
     "devices": [],
     "intensity": 0,
-    "skip_validation": false
+    "skip_validation": false,
+    "benchmark_cn_fast": false
   },
   "logging": {
     "level": "info",
