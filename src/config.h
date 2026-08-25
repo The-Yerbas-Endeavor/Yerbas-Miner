@@ -18,6 +18,10 @@ struct MinerConfig {
     bool hybrid{true};
     // 16 hashes per worker is the portable out-of-box default when tuning is off.
     unsigned int cpu_batch{16};
+    // Runtime-selected execution width. This is not a user-facing config knob;
+    // the production tuner leaves it at 1 unless a parity-qualified sustained
+    // GhostRider lane plan beats the tuned 1-way baseline.
+    unsigned int cpu_lanes{1};
     // CPU tuning policy:
     //   off     = start mining immediately with configured/default settings
     //   simple  = quick production tuning
