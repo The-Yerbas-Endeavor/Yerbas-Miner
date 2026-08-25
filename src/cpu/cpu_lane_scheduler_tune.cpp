@@ -18,7 +18,7 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kLaneTuneRevision = 2;
+constexpr int kLaneTuneRevision = 3;
 constexpr double kMinimumWin = 1.02;
 
 bool env_enabled(const char* name)
