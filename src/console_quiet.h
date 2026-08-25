@@ -1,12 +1,124 @@
 #pragma once
 
+#include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <mutex>
 #include <streambuf>
 #include <string>
 
 namespace yerbas::console {
 namespace quiet_detail {
+
+inline std::string& perf_csv_path()
+{
+    static std::string path;
+    return path;
+}
+
+inline std::mutex& perf_csv_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+inline std::string csv_escape(const std::string& value)
+{
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += '"';
+    return out;
+}
+
+inline std::string field_after(const std::string& line, const std::string& key, const std::string& end = " | ")
+{
+    const auto pos = line.find(key);
+    if (pos == std::string::npos) return {};
+    const auto start = pos + key.size();
+    const auto stop = line.find(end, start);
+    return line.substr(start, stop == std::string::npos ? std::string::npos : stop - start);
+}
+
+inline void append_perf_row(const std::string& event,
+                            const std::string& rotation,
+                            const std::string& cn,
+                            const std::string& source,
+                            const std::string& hps,
+                            const std::string& total_ms,
+                            const std::string& stage,
+                            const std::string& stage_ms,
+                            const std::string& stage_pct,
+                            const std::string& details)
+{
+    const auto& path = perf_csv_path();
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> lock(perf_csv_mutex());
+    std::ifstream check(path);
+    const bool needs_header = !check.good() || check.peek() == std::ifstream::traits_type::eof();
+    check.close();
+    std::ofstream out(path, std::ios::app);
+    if (!out) return;
+    if (needs_header)
+        out << "timestamp_ms,event,rotation,cryptonight,source,hps,total_ms,stage,stage_ms,stage_pct,details\n";
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    out << now_ms << ','
+        << csv_escape(event) << ','
+        << csv_escape(rotation) << ','
+        << csv_escape(cn) << ','
+        << csv_escape(source) << ','
+        << csv_escape(hps) << ','
+        << csv_escape(total_ms) << ','
+        << csv_escape(stage) << ','
+        << csv_escape(stage_ms) << ','
+        << csv_escape(stage_pct) << ','
+        << csv_escape(details) << '\n';
+    out.flush();
+}
+
+inline void capture_perf_line(const std::string& line)
+{
+    if (perf_csv_path().empty() || line.empty()) return;
+
+    if (line.find("[GhostRider] rotation=") != std::string::npos) {
+        append_perf_row("rotation", field_after(line, "rotation=", " | "), field_after(line, "CN=", "\n"), "", "", "", "", "", "", line);
+        return;
+    }
+
+    if (line.find("[CPU fingerprint]") != std::string::npos) {
+        std::string hps = field_after(line, "live=", " H/s");
+        append_perf_row("cpu_fingerprint", field_after(line, "rotation=", " | "), field_after(line, "CN=", " | "), "CPU", hps, "", "", "", "", line);
+        return;
+    }
+
+    if (line.find("[CUDA GR perf] GPU ") != std::string::npos) {
+        const auto gpu_pos = line.find("GPU ");
+        const auto gpu_end = line.find(" |", gpu_pos);
+        const std::string source = gpu_pos == std::string::npos ? "GPU" : line.substr(gpu_pos, gpu_end - gpu_pos);
+        append_perf_row("cuda_gr", field_after(line, "fingerprint=", " | "), field_after(line, "CN=", " | "), source,
+                        field_after(line, "throughput=", " H/s"), field_after(line, "stages=", " ms"), "", "", "", line);
+        return;
+    }
+
+    if (line.find("[CPU stage profile]") != std::string::npos) {
+        append_perf_row("cpu_stage_profile", field_after(line, "rotation=", " | "), "", "CPU", "",
+                        field_after(line, "total=", " ms/hash"), field_after(line, "hot=", " "), "", field_after(line, "(", "%)"), line);
+        return;
+    }
+
+    if (line.find("[CUDA stage]") != std::string::npos) {
+        const auto marker = line.find("[CUDA stage]");
+        const auto pipe = line.find(" |", marker);
+        const std::string stage = marker == std::string::npos || pipe == std::string::npos ? "" : line.substr(marker + 12, pipe - (marker + 12));
+        append_perf_row("cuda_stage", "", "", "GPU", "", "", stage,
+                        field_after(line, "sample=", " ms"), field_after(line, "sample=", "%"), line);
+        return;
+    }
+}
 
 inline bool diagnostics_enabled()
 {
@@ -16,21 +128,12 @@ inline bool diagnostics_enabled()
 
 inline bool suppress_normal_line(const std::string& line)
 {
-    // Per-batch performance instrumentation is useful while profiling but is
-    // extremely noisy during normal pool mining. The Proof of Grass status
-    // report already carries the useful sustained hashrate information.
     if (line.find("[CPU GR perf]") != std::string::npos) return true;
     if (line.find("[CUDA GR perf]") != std::string::npos) return true;
     if (line.find("[CUDA stage]") != std::string::npos) return true;
     if (line.find("GhostRider rolling stage profile") != std::string::npos) return true;
     if (line.find("[CUDA CN runtime]") != std::string::npos) return true;
-
-    // Candidate discovery is immediately followed by SHARE SUBMITTED, so the
-    // candidate line duplicates information without adding operational value.
     if (line.find("] candidate | job=") != std::string::npos) return true;
-
-    // Detailed startup profiler lines stay available in diagnostics mode. Keep
-    // compact CUDA autotune winner summaries visible in normal mode.
     if (line.find("[CUDA CN profile]") != std::string::npos) return true;
     if (line.find("[CPU CN profile]") != std::string::npos) return true;
     if (line.find("[CPU CN phase]") != std::string::npos) return true;
@@ -39,21 +142,15 @@ inline bool suppress_normal_line(const std::string& line)
     if (line.find("[CUDA CN production test]") != std::string::npos) return true;
     if (line.find("[CUDA CN coop test]") != std::string::npos) return true;
     if (line.find("[CUDA dual-state test]") != std::string::npos) return true;
-
-    // Cache filenames are implementation details and can fill most of startup
-    // on multi-GPU systems. Selection summaries remain visible.
     if (line.find("CryptoNight geometry cache loaded |") != std::string::npos) return true;
     if (line.find("CryptoNight loop cache loaded |") != std::string::npos) return true;
     if (line.find("CryptoNight loop AES cache loaded |") != std::string::npos) return true;
     if (line.find("CryptoNight dual-state cache loaded |") != std::string::npos) return true;
     if (line.find("CryptoNight production loop cache loaded |") != std::string::npos) return true;
     if (line.find("CryptoNight cooperative cache loaded |") != std::string::npos) return true;
-
-    // Coverage is already summarized by the compact cores 15/15 | CN 6/6 line.
     if (line.rfind("CUDA-ready cores:", 0) == 0) return true;
     if (line.rfind("CUDA pending cores:", 0) == 0) return true;
     if (line.rfind("CUDA pending CryptoNight:", 0) == 0) return true;
-
     return false;
 }
 
@@ -89,6 +186,7 @@ protected:
 private:
     void emit(bool newline)
     {
+        capture_perf_line(pending_);
         const bool suppress = !diagnostics_enabled() && suppress_normal_line(pending_);
         if (!suppress && !pending_.empty())
             destination_->sputn(pending_.data(), static_cast<std::streamsize>(pending_.size()));
@@ -101,6 +199,11 @@ private:
 };
 
 } // namespace quiet_detail
+
+inline void set_perf_csv_path(const std::string& path)
+{
+    quiet_detail::perf_csv_path() = path;
+}
 
 inline void enable_quiet_output()
 {
