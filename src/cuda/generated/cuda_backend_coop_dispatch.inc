@@ -15,11 +15,14 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
     int device_id = -1;
     bool use_coop = false;
     int coop_threads = 32;
+    int coop_impl = 1;
     if (cudaGetDevice(&device_id) == cudaSuccess &&
         device_id >= 0 && device_id < kMaxLoopTuneDevices &&
         g_cn_coop_ready[device_id] && !cn_coop_disabled_by_env()) {
         use_coop = g_cn_coop_enabled[device_id][VariantIndex];
         coop_threads = g_cn_coop_threads[device_id][VariantIndex];
+        if (g_cn_coop_impl_ready[device_id])
+            coop_impl = g_cn_coop_impl[device_id][VariantIndex];
     } else if (device_id < 0 || device_id >= kMaxLoopTuneDevices) {
         cudaGetLastError();
     }
@@ -45,17 +48,15 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
             states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA cooperative CryptoNight setup launch failed");
 
-    const int coop_blocks = static_cast<int>((count * 4U + static_cast<std::size_t>(coop_threads) - 1U) /
-                                             static_cast<std::size_t>(coop_threads));
-    cryptonight_loop_stage_coop4<VariantIndex><<<coop_blocks, coop_threads, 0, stream>>>(
-        count, scratchpads, contexts);
+    launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count,
+                                      scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA cooperative CryptoNight loop launch failed");
 
     if (!g_cn_coop_runtime_reported[device_id][VariantIndex]) {
         g_cn_coop_runtime_reported[device_id][VariantIndex] = true;
         std::cout << "[CUDA CN runtime] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
-                  << " | backend=coop4"
+                  << " | backend=coop4-v" << coop_impl
                   << " | threads=" << coop_threads
                   << " | hashes=" << count << '\n';
     }
