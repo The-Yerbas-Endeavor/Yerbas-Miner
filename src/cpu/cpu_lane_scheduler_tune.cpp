@@ -361,6 +361,8 @@ LaneSchedulerTuneResult tune_lane_scheduler(unsigned int hardware_threads,
 
     LaneSchedulerTuneResult result{ceiling, 1U, batch, 0.0, false};
     if (mode == "off" || mode == "simple") return result;
+    if (!env_enabled("YERBAS_CPU_LANE_RETUNE") && !env_enabled("YERBAS_DIAGNOSTICS"))
+        return result;
 
     const auto path = cache_path(hardware_threads, ceiling, batch);
     if (load_cache(path, result)) {
