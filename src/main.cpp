@@ -3,9 +3,7 @@
 #include "console_quiet.h"
 #include "miner.h"
 #include "cpu/cn_width_tune.h"
-#include "cpu/cpu_lane_scheduler_tune.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <fstream>
@@ -13,7 +11,6 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -111,13 +108,8 @@ int main(int argc, char** argv)
 
     try {
         const auto config = yerbas::load_config(argc, argv);
-        if (config.miner.cpu_enabled) {
+        if (config.miner.cpu_enabled)
             (void)yerbas::cpu::qualify_cn_widths(config.miner.cpu_tune);
-            (void)yerbas::cpu::tune_lane_scheduler(
-                std::max(1U, std::thread::hardware_concurrency()),
-                config.miner.threads,
-                config.miner.cpu_tune);
-        }
         yerbas::Miner miner(config);
         const int result = miner.run();
         write_startup_log("Yerbas Miner exited with code " + std::to_string(result));
