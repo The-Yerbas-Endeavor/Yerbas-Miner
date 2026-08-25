@@ -70,10 +70,15 @@ int yerbas_cn_hash_quad_4way(const char* input0,
     tweak3 = *(const uint64_t*)((const uint8_t*)input3 + 35) ^ state3.hs.w[24];
 
     for (i = 0; i < iterations; ++i) {
-        yerbas_cn_lane_loop_step(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds, tweak0);
-        yerbas_cn_lane_loop_step(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds, tweak1);
-        yerbas_cn_lane_loop_step(a2, b2, c2, g_yerbas_cn_4way_scratchpad2, aes_rounds, tweak2);
-        yerbas_cn_lane_loop_step(a3, b3, c3, g_yerbas_cn_4way_scratchpad3, aes_rounds, tweak3);
+        yerbas_cn_lane_loop_phase1(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds);
+        yerbas_cn_lane_loop_phase1(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds);
+        yerbas_cn_lane_loop_phase1(a2, b2, c2, g_yerbas_cn_4way_scratchpad2, aes_rounds);
+        yerbas_cn_lane_loop_phase1(a3, b3, c3, g_yerbas_cn_4way_scratchpad3, aes_rounds);
+
+        yerbas_cn_lane_loop_phase2(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds, tweak0);
+        yerbas_cn_lane_loop_phase2(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds, tweak1);
+        yerbas_cn_lane_loop_phase2(a2, b2, c2, g_yerbas_cn_4way_scratchpad2, aes_rounds, tweak2);
+        yerbas_cn_lane_loop_phase2(a3, b3, c3, g_yerbas_cn_4way_scratchpad3, aes_rounds, tweak3);
     }
 
     yerbas_cn_lane_finish(&state0, text0, g_yerbas_cn_2way_scratchpad0,
