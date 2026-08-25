@@ -95,10 +95,12 @@ __global__ void cryptonight_loop_stage_coop4_v4(std::size_t count,
             next_a3 = static_cast<std::uint32_t>(xa1 >> 32U);
         }
 
+        // All four updated A words are produced by lane 0. Broadcast each value
+        // from the same source lane, then hand one word to each cooperative lane.
         const std::uint32_t out_a0 = __shfl_sync(mask, next_a0, base);
-        const std::uint32_t out_a1 = __shfl_sync(mask, next_a1, base + 1U);
-        const std::uint32_t out_a2 = __shfl_sync(mask, next_a2, base + 2U);
-        const std::uint32_t out_a3 = __shfl_sync(mask, next_a3, base + 3U);
+        const std::uint32_t out_a1 = __shfl_sync(mask, next_a1, base);
+        const std::uint32_t out_a2 = __shfl_sync(mask, next_a2, base);
+        const std::uint32_t out_a3 = __shfl_sync(mask, next_a3, base);
         aw = lane == 0U ? out_a0 : lane == 1U ? out_a1 : lane == 2U ? out_a2 : out_a3;
         bw = cw;
         __syncwarp(mask);
