@@ -8,7 +8,7 @@
 
 namespace {
 
-constexpr int kCnFastV4CacheRevision = 1;
+constexpr int kCnFastV4CacheRevision = 2;
 constexpr float kCnFastV4RequiredSpeedup = 0.98F;
 static std::array<bool, kMaxLoopTuneDevices> g_cn_fast_v4_enabled{};
 static std::array<bool, kMaxLoopTuneDevices> g_cn_fast_v4_ready{};
