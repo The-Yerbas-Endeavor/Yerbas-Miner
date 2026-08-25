@@ -6,6 +6,7 @@
 #include "cpu/cpu_lane_scheduler_tune.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -29,16 +30,55 @@ void write_startup_log(const std::string& message)
 }
 
 #ifdef _WIN32
+const char* windows_access_kind(ULONG_PTR kind)
+{
+    switch (kind) {
+    case 0: return "read";
+    case 1: return "write";
+    case 8: return "execute";
+    default: return "unknown";
+    }
+}
+
 LONG WINAPI windows_unhandled_exception_filter(EXCEPTION_POINTERS* info)
 {
     std::ostringstream ss;
     ss << "Fatal Windows exception";
+
     if (info != nullptr && info->ExceptionRecord != nullptr) {
+        const EXCEPTION_RECORD* record = info->ExceptionRecord;
+        const auto exception_address =
+            reinterpret_cast<std::uintptr_t>(record->ExceptionAddress);
+
         ss << " | code=0x" << std::hex << std::uppercase
-           << static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode)
-           << " | address=0x"
-           << reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+           << static_cast<unsigned long>(record->ExceptionCode)
+           << " | address=0x" << exception_address;
+
+        if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+            record->NumberParameters >= 2) {
+            ss << " | access=" << windows_access_kind(record->ExceptionInformation[0])
+               << " | fault_address=0x"
+               << static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+        }
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(record->ExceptionAddress, &mbi, sizeof(mbi)) == sizeof(mbi) &&
+            mbi.AllocationBase != nullptr) {
+            const auto module_base =
+                reinterpret_cast<std::uintptr_t>(mbi.AllocationBase);
+            ss << " | module_base=0x" << module_base
+               << " | module_offset=0x" << (exception_address - module_base);
+
+            char module_path[MAX_PATH]{};
+            const DWORD path_len = GetModuleFileNameA(
+                static_cast<HMODULE>(mbi.AllocationBase),
+                module_path,
+                static_cast<DWORD>(sizeof(module_path)));
+            if (path_len > 0 && path_len < sizeof(module_path))
+                ss << " | module=" << module_path;
+        }
     }
+
     const std::string message = ss.str();
     write_startup_log(message);
     std::ofstream crash("yerbas-miner-crash.log", std::ios::app);
