@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -168,8 +169,32 @@ bool validate_reusable_cn() noexcept
     return true;
 }
 
+bool verbose_schedule_logging()
+{
+    const char* value = std::getenv("YERBAS_VERBOSE_SCHEDULE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 void log_schedule(const StageSchedule& schedule)
 {
+    std::ostringstream fingerprint;
+    fingerprint << std::hex << std::setfill('0') << std::setw(16)
+                << schedule_fingerprint64(schedule);
+
+    std::ostringstream cn;
+    bool first_cn = true;
+    for (const auto stage : schedule) {
+        if ((stage & kCryptoNightStageFlag) == 0) continue;
+        if (!first_cn) cn << '/';
+        cn << cn_name(static_cast<std::uint8_t>(stage & 0x7fU));
+        first_cn = false;
+    }
+
+    std::cout << "[GhostRider] rotation=" << fingerprint.str()
+              << " | CN=" << cn.str() << '\n';
+
+    if (!verbose_schedule_logging()) return;
+
     std::ostringstream compact;
     compact << std::hex << std::setfill('0');
     for (std::size_t i = 0; i < schedule.size(); ++i) {
@@ -187,13 +212,8 @@ void log_schedule(const StageSchedule& schedule)
             names << i << ':' << core_name(stage);
     }
 
-    std::ostringstream fingerprint;
-    fingerprint << std::hex << std::setfill('0') << std::setw(16)
-                << schedule_fingerprint64(schedule);
-
-    std::cout << "[GhostRider] schedule fingerprint=" << fingerprint.str()
-              << " | stages=" << compact.str() << '\n'
-              << "[GhostRider] schedule " << names.str() << '\n';
+    std::cout << "[GhostRider verbose] stages=" << compact.str() << '\n'
+              << "[GhostRider verbose] schedule " << names.str() << '\n';
 }
 } // namespace
 
