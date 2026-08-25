@@ -14,6 +14,7 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
 {
     int device_id = -1;
     bool use_coop = false;
+    bool use_v4 = false;
     int coop_threads = 32;
     int coop_impl = 1;
     if (cudaGetDevice(&device_id) == cudaSuccess &&
@@ -23,6 +24,10 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
         coop_threads = g_cn_coop_threads[device_id][VariantIndex];
         if (g_cn_coop_impl_ready[device_id])
             coop_impl = g_cn_coop_impl[device_id][VariantIndex];
+        if constexpr (VariantIndex == 2) {
+            if (g_cn_fast_v4_ready[device_id])
+                use_v4 = g_cn_fast_v4_enabled[device_id];
+        }
     } else if (device_id < 0 || device_id >= kMaxLoopTuneDevices) {
         cudaGetLastError();
     }
@@ -48,16 +53,28 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
             states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA cooperative CryptoNight setup launch failed");
 
-    launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count,
-                                      scratchpads, contexts);
+    if constexpr (VariantIndex == 2) {
+        if (use_v4)
+            launch_cn_fast_v4(stream, coop_threads, count, scratchpads, contexts);
+        else
+            launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count, scratchpads, contexts);
+    } else {
+        launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count, scratchpads, contexts);
+    }
     check_cuda(cudaGetLastError(), "GhostRider CUDA cooperative CryptoNight loop launch failed");
 
     if (!g_cn_coop_runtime_reported[device_id][VariantIndex]) {
         g_cn_coop_runtime_reported[device_id][VariantIndex] = true;
         std::cout << "[CUDA CN runtime] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
-                  << " | backend=coop4-v" << coop_impl
-                  << " | threads=" << coop_threads
+                  << " | backend=";
+        if constexpr (VariantIndex == 2) {
+            if (use_v4) std::cout << "coop4-v4";
+            else std::cout << "coop4-v" << coop_impl;
+        } else {
+            std::cout << "coop4-v" << coop_impl;
+        }
+        std::cout << " | threads=" << coop_threads
                   << " | hashes=" << count << '\n';
     }
 
