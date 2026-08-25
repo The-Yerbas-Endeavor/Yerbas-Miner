@@ -30,6 +30,12 @@ struct CnFastFamilyChoice {
 
 static std::array<bool, kMaxLoopTuneDevices> g_cn_fast_family_ready{};
 
+bool cn_fast_benchmark_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_CN_FAST_BENCHMARK");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 const char* cn_fast_family_name(CnFastFamilyMode mode)
 {
     switch (mode) {
@@ -230,6 +236,7 @@ bool load_cn_fast_family_cache(int device_id,
                                std::size_t batch_size,
                                CnGeometry& geometry)
 {
+    if (cn_fast_benchmark_requested()) return false;
     const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
     if (retune && *retune && std::string(retune) != "0") return false;
     const auto path = cn_fast_family_cache_path(device_id, props, batch_size);
@@ -290,12 +297,19 @@ void tune_cn_fast_family(int device_id,
     if (device_id < 0 || device_id >= kMaxLoopTuneDevices || batch_size == 0) return;
     if (load_cn_fast_family_cache(device_id, props, batch_size, g)) return;
 
+    const bool benchmark = cn_fast_benchmark_requested();
     const CnFastFamilyMode baseline_mode = current_cn_fast_family(device_id);
-    prepare_cn_fast_family(stream, states, batch_size, scratchpads, contexts, g);
+
+    const float setup_ms = time_cuda_phase(stream, [&]() {
+        prepare_cn_fast_family(stream, states, batch_size, scratchpads, contexts, g);
+    });
     const float baseline_ms = time_cuda_phase(stream, [&]() {
         launch_cn_fast_family_loop(stream, device_id, baseline_mode, g.loop_threads,
                                    batch_size, scratchpads, contexts);
         check_cuda(cudaGetLastError(), "CN-Fast family baseline benchmark failed");
+    });
+    const float final_ms = time_cuda_phase(stream, [&]() {
+        finalize_cn_fast_family(stream, states, batch_size, scratchpads, contexts, g);
     });
 
     constexpr std::array<CnFastFamilyMode, 7> candidates{{
@@ -308,27 +322,58 @@ void tune_cn_fast_family(int device_id,
         CnFastFamilyMode::Coop4,
     }};
 
+    if (benchmark) {
+        const float baseline_hps = baseline_ms > 0.0F
+            ? static_cast<float>(batch_size) * 1000.0F / baseline_ms : 0.0F;
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[CUDA CN-Fast benchmark] GPU " << device_id
+                  << " | batch=" << batch_size
+                  << " | setup=" << setup_ms << " ms"
+                  << " | final=" << final_ms << " ms"
+                  << " | baseline=" << cn_fast_family_name(baseline_mode)
+                  << ' ' << baseline_ms << " ms"
+                  << " | loop_hps=" << baseline_hps
+                  << std::defaultfloat << '\n';
+    }
+
     CnFastFamilyChoice best{baseline_mode, baseline_ms};
     for (const auto mode : candidates) {
-        if (mode == baseline_mode) continue;
         if ((mode == CnFastFamilyMode::DualU1T64 || mode == CnFastFamilyMode::DualU2T64) &&
             props.maxThreadsPerBlock < 64)
             continue;
-        prepare_cn_fast_family(stream, states, batch_size, scratchpads, contexts, g);
-        const float ms = time_cuda_phase(stream, [&]() {
-            launch_cn_fast_family_loop(stream, device_id, mode, g.loop_threads,
-                                       batch_size, scratchpads, contexts);
-            check_cuda(cudaGetLastError(), "CN-Fast family candidate benchmark failed");
-        });
+
+        float ms = baseline_ms;
+        if (mode != baseline_mode) {
+            prepare_cn_fast_family(stream, states, batch_size, scratchpads, contexts, g);
+            ms = time_cuda_phase(stream, [&]() {
+                launch_cn_fast_family_loop(stream, device_id, mode, g.loop_threads,
+                                           batch_size, scratchpads, contexts);
+                check_cuda(cudaGetLastError(), "CN-Fast family candidate benchmark failed");
+            });
+        }
         if (ms < best.ms) best = CnFastFamilyChoice{mode, ms};
+
+        if (benchmark) {
+            const float hps = ms > 0.0F ? static_cast<float>(batch_size) * 1000.0F / ms : 0.0F;
+            const float gain = ms > 0.0F ? (baseline_ms / ms - 1.0F) * 100.0F : 0.0F;
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[CUDA CN-Fast candidate] GPU " << device_id
+                      << " | mode=" << cn_fast_family_name(mode)
+                      << " | loop=" << ms << " ms"
+                      << " | loop_hps=" << hps
+                      << " | gain=" << gain << "%"
+                      << (mode == baseline_mode ? " | baseline" : "")
+                      << std::defaultfloat << '\n';
+        }
     }
 
     CnFastFamilyMode selected = baseline_mode;
     bool parity_ok = true;
-    if (best.mode != baseline_mode && best.ms < baseline_ms * kCnFastFamilyRequiredSpeedup) {
+    if (best.mode != baseline_mode) {
         parity_ok = validate_cn_fast_family(stream, device_id, baseline_mode, best.mode,
                                             states, scratchpads, contexts, g);
-        if (parity_ok) selected = best.mode;
+        if (parity_ok && best.ms < baseline_ms * kCnFastFamilyRequiredSpeedup)
+            selected = best.mode;
     }
 
     if (selected != baseline_mode) apply_cn_fast_family_choice(device_id, g, selected);
