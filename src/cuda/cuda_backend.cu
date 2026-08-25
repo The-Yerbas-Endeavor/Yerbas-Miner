@@ -41,6 +41,10 @@
 // experimental reference; v3 restores exact CryptoNight 64-bit >>4 indexing.
 #include "cuda/generated/cuda_backend_coop_v3.inc"
 
+// Narrow v4 candidate: keep the corrected distributed-state semantics but make
+// the first scratchpad fetch one aligned/coalesced 32-bit word per lane.
+#include "cuda/generated/cuda_backend_coop_v4.inc"
+
 // Cooperative production selector remains the broad all-variant tuner, but its
 // wrapper is preserved so later layers can refine the implementation generically.
 #define autotune_cn_geometries autotune_cn_geometries_coop
@@ -52,6 +56,13 @@
 // cooperative CryptoNight variant, parity-gates the result, and caches the
 // winner by GPU/driver/runtime/batch without model-specific assumptions.
 #include "cuda/generated/cuda_backend_coop_impl_tune.inc"
+
+// Sampled diagnostic profiler for the proven CN-Fast coop4-v1 inner loop.
+#include "cuda/generated/cuda_backend_cn_fast_inner_profile.inc"
+
+// Targeted generic v4 selector. v4 is parity/performance gated against whichever
+// established coop implementation already won on the current GPU.
+#include "cuda/generated/cuda_backend_cn_fast_v4_tune.inc"
 
 // Final CN-Fast selector compares the existing single, dual-state, and coop4
 // families at the real production batch size, validates parity, and caches the
