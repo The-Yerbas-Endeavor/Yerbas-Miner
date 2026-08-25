@@ -30,5 +30,14 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                "cudaGetDeviceProperties CN-Fast family tuner failed");
     tune_cn_fast_family(device_id, props, stream, states, batch_size,
                         scratchpads, contexts, result[2]);
+
+    // Only the explicit --benchmark-cn-fast path runs this deeper phase/micro
+    // sweep. Normal cached startup remains unchanged.
+    const bool coop_selected = valid_device && g_cn_coop_ready[device_id] &&
+                               g_cn_coop_enabled[device_id][2];
+    if (coop_selected) {
+        tune_cn_fast_microkernel(device_id, props, stream, states, batch_size,
+                                 scratchpads, contexts, result[2]);
+    }
     return result;
 }
