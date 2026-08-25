@@ -1,6 +1,7 @@
 #include "cpu/cpu_worker_pool.h"
 
 #include "cpu/fingerprint_runtime.h"
+#include "cpu/stage_profiler.h"
 #include "ghostrider/ghostrider.h"
 
 #include <algorithm>
@@ -101,6 +102,7 @@ struct WorkerPool::Impl {
         for (auto& worker : workers)
             if (worker.joinable()) worker.join();
         flush_fingerprint_runtime();
+        flush_stage_profiles();
     }
 
     void worker_loop(unsigned int index)
@@ -219,6 +221,12 @@ struct WorkerPool::Impl {
                                                    lanes,
                                                    count,
                                                    hps);
+
+        if ((run_count % 64U) == 0U) {
+            auto sample_header = header;
+            write_nonce(sample_header, start);
+            sample_ghostrider_stages(sample_header, active_schedule, active_fingerprint);
+        }
 
         const bool new_rotation = active_fingerprint != last_logged_fingerprint;
         const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
