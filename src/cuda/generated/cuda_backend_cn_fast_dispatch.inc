@@ -1,7 +1,6 @@
 // Public wrapper for the final CN-Fast family tuner.
-// Keep the broad production family selector plus the proven setup/coop/final
-// geometry tuner. Narrow v4-v9 loop experiments were retired after repeated
-// tests failed to produce a durable whole-miner gain.
+// Keep the broad production family selector and honor any previously qualified
+// CN-Fast microgeometry cache. New microbenchmark generation has been retired.
 
 std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                                  cudaStream_t stream,
@@ -39,64 +38,8 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                g_cn_coop_enabled[device_id][2];
     if (!coop_selected) return result;
 
-    if (load_cn_fast_micro_cache(device_id, props, batch_size, result[2]))
-        return result;
-
-    const int baseline_setup = result[2].setup_threads;
-    const int baseline_final = result[2].final_threads;
-    int baseline_coop = g_cn_coop_threads[device_id][2];
-    if (baseline_coop <= 0) baseline_coop = 32;
-
-    tune_cn_fast_microkernel(device_id, props, stream, states, batch_size,
-                             scratchpads, contexts, result[2]);
-
-    const char* benchmark = std::getenv("YERBAS_CUDA_CN_FAST_BENCHMARK");
-    if (benchmark && *benchmark && std::string(benchmark) != "0") {
-        int candidate_coop = g_cn_coop_threads[device_id][2];
-        if (candidate_coop <= 0) candidate_coop = 32;
-        const int candidate_setup = result[2].setup_threads;
-        const int candidate_final = result[2].final_threads;
-        const bool changed = candidate_setup != baseline_setup ||
-                             candidate_coop != baseline_coop ||
-                             candidate_final != baseline_final;
-
-        bool direct_qualified = false;
-        float baseline_ms = 0.0F;
-        float candidate_ms = 0.0F;
-        float gain = 0.0F;
-        if (changed) {
-            baseline_ms = benchmark_cn_fast_whole_median(
-                stream, states, batch_size, scratchpads, contexts, result[2],
-                baseline_setup, baseline_coop, baseline_final);
-            candidate_ms = benchmark_cn_fast_whole_median(
-                stream, states, batch_size, scratchpads, contexts, result[2],
-                candidate_setup, candidate_coop, candidate_final);
-            gain = candidate_ms > 0.0F ? (baseline_ms / candidate_ms - 1.0F) * 100.0F : 0.0F;
-            direct_qualified = candidate_ms > 0.0F && candidate_ms < baseline_ms * 0.97F;
-
-            std::cout << std::fixed << std::setprecision(3)
-                      << "[CUDA CN-Fast whole A/B] GPU " << device_id
-                      << " | baseline=" << baseline_setup << '/' << baseline_coop << '/' << baseline_final
-                      << ':' << baseline_ms << " ms"
-                      << " | candidate=" << candidate_setup << '/' << candidate_coop << '/' << candidate_final
-                      << ':' << candidate_ms << " ms"
-                      << " | gain=" << gain << "%"
-                      << " | selected=" << (direct_qualified ? "candidate" : "baseline")
-                      << std::defaultfloat << '\n';
-        }
-
-        if (changed && !direct_qualified) {
-            result[2].setup_threads = baseline_setup;
-            result[2].final_threads = baseline_final;
-            g_cn_coop_threads[device_id][2] = baseline_coop;
-        }
-
-        int selected_coop = g_cn_coop_threads[device_id][2];
-        if (selected_coop <= 0) selected_coop = 32;
-        save_cn_fast_micro_cache(device_id, props, batch_size,
-                                 result[2].setup_threads,
-                                 selected_coop,
-                                 result[2].final_threads);
-    }
+    // Backward-compatible only: preserve a previously parity-qualified winner
+    // from older builds, but do not generate new CN-Fast microbenchmark caches.
+    (void)load_cn_fast_micro_cache(device_id, props, batch_size, result[2]);
     return result;
 }
