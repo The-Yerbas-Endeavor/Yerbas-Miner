@@ -14,12 +14,6 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
 {
     int device_id = -1;
     bool use_coop = false;
-    bool use_v4 = false;
-    bool use_v5 = false;
-    bool use_v6 = false;
-    bool use_v7 = false;
-    int v8_mode = 0;
-    bool use_v9 = false;
     int coop_threads = 32;
     int coop_impl = 1;
     if (cudaGetDevice(&device_id) == cudaSuccess &&
@@ -29,14 +23,6 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
         coop_threads = g_cn_coop_threads[device_id][VariantIndex];
         if (g_cn_coop_impl_ready[device_id])
             coop_impl = g_cn_coop_impl[device_id][VariantIndex];
-        if constexpr (VariantIndex == 2) {
-            if (g_cn_fast_v4_ready[device_id]) use_v4 = g_cn_fast_v4_enabled[device_id];
-            if (g_cn_fast_v5_ready[device_id]) use_v5 = g_cn_fast_v5_enabled[device_id];
-            if (g_cn_fast_v6_ready[device_id]) use_v6 = g_cn_fast_v6_enabled[device_id];
-            if (g_cn_fast_v7_ready[device_id]) use_v7 = g_cn_fast_v7_enabled[device_id];
-            if (g_cn_fast_v8_ready[device_id]) v8_mode = g_cn_fast_v8_mode[device_id];
-            if (g_cn_fast_v9_ready[device_id]) use_v9 = g_cn_fast_v9_enabled[device_id];
-        }
     } else if (device_id < 0 || device_id >= kMaxLoopTuneDevices) {
         cudaGetLastError();
     }
@@ -62,44 +48,15 @@ void launch_split_cryptonight_variant(cudaStream_t stream,
             states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA cooperative CryptoNight setup launch failed");
 
-    if constexpr (VariantIndex == 2) {
-        if (use_v9)
-            launch_cn_fast_v9(stream, coop_threads, count, scratchpads, contexts);
-        else if (v8_mode != 0)
-            launch_cn_fast_v8(stream, v8_mode, coop_threads, count, scratchpads, contexts);
-        else if (use_v7)
-            launch_cn_fast_v7(stream, coop_threads, count, scratchpads, contexts);
-        else if (use_v6)
-            launch_cn_fast_v6(stream, coop_threads, count, scratchpads, contexts);
-        else if (use_v5)
-            launch_cn_fast_v5(stream, coop_threads, count, scratchpads, contexts);
-        else if (use_v4)
-            launch_cn_fast_v4(stream, coop_threads, count, scratchpads, contexts);
-        else
-            launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count, scratchpads, contexts);
-    } else {
-        launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count, scratchpads, contexts);
-    }
+    launch_cn_coop_impl<VariantIndex>(stream, coop_impl, coop_threads, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA cooperative CryptoNight loop launch failed");
 
     if (!g_cn_coop_runtime_reported[device_id][VariantIndex]) {
         g_cn_coop_runtime_reported[device_id][VariantIndex] = true;
         std::cout << "[CUDA CN runtime] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
-                  << " | backend=";
-        if constexpr (VariantIndex == 2) {
-            if (use_v9) std::cout << "coop4-v9-pair";
-            else if (v8_mode == 2) std::cout << "coop4-v8-b2";
-            else if (v8_mode == 4) std::cout << "coop4-v8-b4";
-            else if (use_v7) std::cout << "coop4-v7";
-            else if (use_v6) std::cout << "coop4-v6";
-            else if (use_v5) std::cout << "coop4-v5";
-            else if (use_v4) std::cout << "coop4-v4";
-            else std::cout << "coop4-v" << coop_impl;
-        } else {
-            std::cout << "coop4-v" << coop_impl;
-        }
-        std::cout << " | threads=" << coop_threads
+                  << " | backend=coop4-v" << coop_impl
+                  << " | threads=" << coop_threads
                   << " | hashes=" << count << '\n';
     }
 
