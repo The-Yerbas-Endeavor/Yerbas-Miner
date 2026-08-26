@@ -40,7 +40,6 @@
 #undef autotune_cn_geometries
 
 #include "cuda/generated/cuda_backend_coop_impl_tune.inc"
-#include "cuda/generated/cuda_backend_cn_fast_inner_profile_v2.inc"
 
 #define autotune_cn_geometries autotune_cn_geometries_cnfast_internal
 #include "cuda/generated/cuda_backend_cn_fast_tune.inc"
