@@ -1,16 +1,15 @@
 #include "miner.h"
 
-// Split into implementation fragments so the CUDA backend can be maintained
-// safely through GitHub's bounded file-edit interface. The fragments are
-// textual includes and compile as one CUDA translation unit.
-//
-// part1 opens namespace yerbas::cuda and its anonymous implementation namespace.
-// part2b closes the anonymous namespace. part4 closes namespace yerbas::cuda.
-// Keep all fragments in the same lexical scope; do not wrap part3/part4 in a
-// second namespace yerbas::cuda block.
+// The CUDA backend remains one translation unit while the stable implementation
+// is being modularized. Production tuning is intentionally simple: base hash
+// kernels + one whole-GhostRider GPU policy tuner. Retired batch/CN/cooperative
+// micro-tuners are no longer compiled into the production backend.
 #include "cuda/generated/cuda_backend_part1.inc"
 #include "cuda/generated/cuda_backend_part2a.inc"
 
+// Keep the proven split-CryptoNight implementation as the untuned hash engine.
+// Its historical autotune entry points are renamed so they cannot be selected by
+// production. The new GPU policy supplies geometry directly.
 #define autotune_cn_geometries autotune_cn_geometries_legacy
 #define launch_split_cryptonight_variant launch_split_cryptonight_variant_legacy
 #define launch_split_cryptonight launch_split_cryptonight_legacy
@@ -19,28 +18,6 @@
 #undef launch_split_cryptonight_variant
 #undef autotune_cn_geometries
 
-#include "cuda/generated/cuda_backend_batch_tune.inc"
-
-#define autotune_cn_geometries autotune_cn_geometries_prod
-#include "cuda/generated/cuda_backend_prod_tune.inc"
-#undef autotune_cn_geometries
-
-#define autotune_cn_geometries autotune_cn_geometries_coop_fixed128
-#include "cuda/generated/cuda_backend_coop_probe.inc"
-#undef autotune_cn_geometries
-
-// Generic cooperative implementations retained as the only CN challenger path.
-#include "cuda/generated/cuda_backend_coop_v3.inc"
-
-#define autotune_cn_geometries autotune_cn_geometries_coop
-#include "cuda/generated/cuda_backend_coop_tune.inc"
-#undef autotune_cn_geometries
-
-#include "cuda/generated/cuda_backend_coop_impl_tune.inc"
-#include "cuda/generated/cuda_backend_cn_policy.inc"
-#include "cuda/generated/cuda_backend_coop_dispatch.inc"
-#include "cuda/generated/cuda_backend_core_tune.inc"
 #include "cuda/generated/cuda_backend_gpu_policy.inc"
-
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
