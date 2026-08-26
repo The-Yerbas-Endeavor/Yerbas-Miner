@@ -1,6 +1,5 @@
 #include "miner.h"
 #include "cpu/cpu_autotune.h"
-#include "cpu/cpu_lane_scheduler_tune.h"
 #include "cpu/cpu_worker_pool.h"
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
@@ -77,7 +76,6 @@ int Miner::run()
 #endif
 
     const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
-    double tuned_oneway_hps = 0.0;
     config_.miner.cpu_lanes = 1;
 
     if (config_.miner.cpu_enabled && !config_.pool.url.empty() && !config_.pool.user.empty()) {
@@ -85,7 +83,7 @@ int Miner::run()
             if (config_.miner.threads == 0) config_.miner.threads = hw_threads;
             std::cout << "[CPU tuning] off | direct startup"
                       << " | hardware_threads=" << hw_threads
-                      << " | threads=" << config_.miner.threads
+                      << " | workers=" << config_.miner.threads
                       << " | batch=" << config_.miner.cpu_batch
                       << " | lanes=1\n";
         } else {
@@ -95,41 +93,19 @@ int Miner::run()
                                                        config_.miner.cpu_tune,
                                                        &g_mining_stop_requested);
             if (tune.interrupted || stop_requested()) {
-                std::cout << "[CPU autotune] interrupted by user\n";
+                std::cout << "[CPU tune] interrupted by user\n";
                 return 130;
             }
             config_.miner.threads = tune.threads;
+            config_.miner.cpu_lanes = tune.lanes;
             config_.miner.cpu_batch = tune.batch;
-            tuned_oneway_hps = tune.throughput_hps;
-
-            const auto lane = cpu::tune_lane_scheduler(hw_threads,
-                                                       config_.miner.threads,
-                                                       config_.miner.cpu_batch,
-                                                       config_.miner.cpu_tune);
-            const bool wider_wins = lane.lanes > 1U && lane.throughput_hps > 0.0 &&
-                (tuned_oneway_hps <= 0.0 || lane.throughput_hps >= tuned_oneway_hps * 1.02);
-            if (wider_wins) {
-                config_.miner.threads = lane.workers;
-                config_.miner.cpu_lanes = lane.lanes;
-                std::cout << "[CPU production policy] selected"
-                          << " | workers=" << config_.miner.threads
-                          << " | batch=" << config_.miner.cpu_batch
-                          << " | lanes=" << config_.miner.cpu_lanes
-                          << " | lane_hps=" << lane.throughput_hps
-                          << " | 1way_hps=" << tuned_oneway_hps
-                          << " | gain>=2%\n";
-            } else {
-                config_.miner.cpu_lanes = 1;
-                std::cout << "[CPU production policy] selected"
-                          << " | workers=" << config_.miner.threads
-                          << " | batch=" << config_.miner.cpu_batch
-                          << " | lanes=1"
-                          << " | 1way_hps=" << tuned_oneway_hps;
-                if (lane.lanes > 1U)
-                    std::cout << " | wider_candidate=" << lane.workers << 'x' << lane.lanes
-                              << "@" << lane.throughput_hps << " H/s | below 2% gate";
-                std::cout << '\n';
-            }
+            std::cout << "[CPU production policy] selected"
+                      << " | workers=" << config_.miner.threads
+                      << " | lanes=" << config_.miner.cpu_lanes
+                      << " | batch=" << config_.miner.cpu_batch
+                      << " | throughput=" << tune.throughput_hps << " H/s"
+                      << (tune.from_cache ? " | source=cache" : " | source=fresh")
+                      << '\n';
         }
     }
 
