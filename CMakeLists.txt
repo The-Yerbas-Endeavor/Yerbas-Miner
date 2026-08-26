@@ -110,35 +110,6 @@ if(WIN32)
     endforeach()
 endif()
 
-# Generate an experimental CN-Fast candidate from the pristine pinned Core
-# implementation. It remains a separate translation unit so the established
-# production path is untouched. Runtime A/B selection decides whether it is used.
-set(YERBAS_CPU_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cpu")
-file(MAKE_DIRECTORY "${YERBAS_CPU_GENERATED_DIR}")
-set(YERBAS_CN_FAST_CANDIDATE_IMPL "${YERBAS_CPU_GENERATED_DIR}/cn_fast_candidate_impl.c")
-file(READ "${YERBAS_SLOW_HASH_PRISTINE}" YERBAS_CN_FAST_CANDIDATE_CONTENT)
-string(REPLACE
-    "void cn_slow_hash("
-    "void yerbas_cn_fast_candidate_impl("
-    YERBAS_CN_FAST_CANDIDATE_CONTENT
-    "${YERBAS_CN_FAST_CANDIDATE_CONTENT}"
-)
-string(REPLACE
-    "void cn_fast_hash("
-    "void yerbas_cn_fast_hash_candidate_impl("
-    YERBAS_CN_FAST_CANDIDATE_CONTENT
-    "${YERBAS_CN_FAST_CANDIDATE_CONTENT}"
-)
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    string(REPLACE
-        "  for (i = 0; i < iterations; i++) {"
-        "#if defined(__GNUC__) || defined(__clang__)\n#pragma GCC unroll 2\n#endif\n  for (i = 0; i < iterations; i++) {"
-        YERBAS_CN_FAST_CANDIDATE_CONTENT
-        "${YERBAS_CN_FAST_CANDIDATE_CONTENT}"
-    )
-endif()
-file(WRITE "${YERBAS_CN_FAST_CANDIDATE_IMPL}" "${YERBAS_CN_FAST_CANDIDATE_CONTENT}")
-
 set(YERBAS_GR_CORE_SOURCES
     ${YERBAS_CORE_SRC}/hash_selection.cpp
     ${YERBAS_CORE_SRC}/crypto/aes_helper.c
@@ -180,12 +151,10 @@ endforeach()
 add_library(yerbas-ghostrider-reference STATIC
     src/ghostrider/ghostrider.cpp
     src/cpu/slow_hash_reuse.c
-    src/cpu/cn_fast_candidate.c
     ${YERBAS_GR_CORE_SOURCES}
 )
 target_include_directories(yerbas-ghostrider-reference BEFORE PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/yerbas_core_pristine"
-    "${YERBAS_CPU_GENERATED_DIR}"
 )
 target_include_directories(yerbas-ghostrider-reference PUBLIC src PRIVATE
     ${YERBAS_CORE_SRC}
