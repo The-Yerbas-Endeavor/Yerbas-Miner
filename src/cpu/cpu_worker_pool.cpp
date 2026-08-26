@@ -24,6 +24,7 @@ namespace {
 
 std::atomic_uint g_runtime_lane_width{1U};
 std::array<std::atomic_uint, 6> g_runtime_cn_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
+std::atomic_bool g_tuning_measurement_mode{false};
 
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
 {
@@ -95,6 +96,16 @@ CnWidthPolicy runtime_cn_widths() noexcept
     return out;
 }
 
+void set_tuning_measurement_mode(bool enabled) noexcept
+{
+    g_tuning_measurement_mode.store(enabled, std::memory_order_relaxed);
+}
+
+bool tuning_measurement_mode() noexcept
+{
+    return g_tuning_measurement_mode.load(std::memory_order_relaxed);
+}
+
 struct WorkerPool::Impl {
     explicit Impl(unsigned int requested_threads, unsigned int requested_lanes)
         : threads(std::max(1u, requested_threads)),
@@ -116,8 +127,10 @@ struct WorkerPool::Impl {
         work_ready.notify_all();
         for (auto& worker : workers)
             if (worker.joinable()) worker.join();
-        flush_fingerprint_runtime();
-        flush_stage_profiles();
+        if (!tuning_measurement_mode()) {
+            flush_fingerprint_runtime();
+            flush_stage_profiles();
+        }
     }
 
     void worker_loop(unsigned int index)
@@ -228,41 +241,44 @@ struct WorkerPool::Impl {
         const double elapsed_ms = std::chrono::duration<double, std::milli>(perf_end - perf_start).count();
         const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
-        const std::string policy = lanes == 1U ? "standard" : (lanes == 2U ? "lane2" : "lane4");
-        const auto fp = record_fingerprint_runtime(active_fingerprint,
-                                                   active_cn_summary,
-                                                   policy,
-                                                   threads,
-                                                   lanes,
-                                                   count,
-                                                   hps);
 
-        if ((run_count % 64U) == 0U) {
-            auto sample_header = header;
-            write_nonce(sample_header, start);
-            sample_ghostrider_stages(sample_header, active_schedule, active_fingerprint);
-        }
+        if (!tuning_measurement_mode()) {
+            const std::string policy = lanes == 1U ? "standard" : (lanes == 2U ? "lane2" : "lane4");
+            const auto fp = record_fingerprint_runtime(active_fingerprint,
+                                                       active_cn_summary,
+                                                       policy,
+                                                       threads,
+                                                       lanes,
+                                                       count,
+                                                       hps);
 
-        const bool new_rotation = active_fingerprint != last_logged_fingerprint;
-        const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
-        if (new_rotation || periodic_diagnostic) {
-            const auto recommendation = recommended_fingerprint_policy(active_fingerprint);
-            const auto widths = runtime_cn_widths();
-            std::cout << std::fixed << std::setprecision(2)
-                      << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
-                      << active_fingerprint << std::dec << std::setfill(' ')
-                      << " | CN=" << active_cn_summary
-                      << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
-                      << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
-                      << widths[3] << '/' << widths[4] << '/' << widths[5]
-                      << " | live=" << hps << " H/s"
-                      << " | learned=" << fp.ewma_hps << " H/s"
-                      << " | samples=" << fp.samples;
-            if (recommendation)
-                std::cout << " | learned-best=" << recommendation->policy
-                          << "@" << recommendation->ewma_hps << " H/s";
-            std::cout << std::defaultfloat << '\n';
-            last_logged_fingerprint = active_fingerprint;
+            if ((run_count % 64U) == 0U) {
+                auto sample_header = header;
+                write_nonce(sample_header, start);
+                sample_ghostrider_stages(sample_header, active_schedule, active_fingerprint);
+            }
+
+            const bool new_rotation = active_fingerprint != last_logged_fingerprint;
+            const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
+            if (new_rotation || periodic_diagnostic) {
+                const auto recommendation = recommended_fingerprint_policy(active_fingerprint);
+                const auto widths = runtime_cn_widths();
+                std::cout << std::fixed << std::setprecision(2)
+                          << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
+                          << active_fingerprint << std::dec << std::setfill(' ')
+                          << " | CN=" << active_cn_summary
+                          << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
+                          << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
+                          << widths[3] << '/' << widths[4] << '/' << widths[5]
+                          << " | live=" << hps << " H/s"
+                          << " | learned=" << fp.ewma_hps << " H/s"
+                          << " | samples=" << fp.samples;
+                if (recommendation)
+                    std::cout << " | learned-best=" << recommendation->policy
+                              << "@" << recommendation->ewma_hps << " H/s";
+                std::cout << std::defaultfloat << '\n';
+                last_logged_fingerprint = active_fingerprint;
+            }
         }
 
         std::size_t total_candidates = 0;
