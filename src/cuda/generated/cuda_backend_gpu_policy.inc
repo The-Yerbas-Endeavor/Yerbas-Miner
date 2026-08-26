@@ -1,9 +1,10 @@
 // Unified production GPU autotuner.
 //
-// One policy is selected per CUDA device by measuring complete GhostRider
-// pipelines. Candidate launch widths are derived from the device warp size and
-// compiled kernel limits. No GPU model, compute capability, SM count or memory
-// size is hard-coded as a selection rule.
+// Production startup uses a bounded coarse-to-fine search. Candidate launch
+// widths are derived from CUDA-reported warp/kernel limits. No GPU model,
+// compute capability, SM count, or memory size is used as a hardware-specific
+// selection rule. Coarse candidates use one full GhostRider schedule; the final
+// winner is confirmed across three schedules and exact parity before caching.
 
 constexpr int kCoreAlgorithmCount = 15;
 constexpr int kCoreDefaultThreads = 256; // fallback only; tuner derives baseline
@@ -21,9 +22,6 @@ struct GpuTunePolicy {
     bool from_cache{false};
 };
 
-// Clean production dispatcher: use the proven base split-CryptoNight kernels,
-// with geometry supplied by the single GPU policy. Historical loop/dual/coop
-// selectors are not part of the production path anymore.
 template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant(cudaStream_t stream,
                                       std::uint8_t* states,
@@ -58,8 +56,8 @@ void launch_split_cryptonight(cudaStream_t stream,
 
 namespace {
 
-constexpr int kGpuPolicyRevision = 3;
-constexpr double kPolicyMinimumGain = 1.01; // ignore sub-1% tuning noise
+constexpr int kGpuPolicyRevision = 4;
+constexpr double kPolicyMinimumGain = 1.015; // require 1.5% in coarse search
 
 struct GpuPolicyShape {
     std::size_t batch{0};
@@ -93,21 +91,16 @@ int runtime_baseline_threads(const cudaDeviceProp& props, int kernel_max)
 std::vector<int> runtime_thread_candidates(const cudaDeviceProp& props, int kernel_max)
 {
     const int warp = std::max(1, props.warpSize);
-    const int limit = std::max(warp, std::min(kernel_max, props.maxThreadsPerBlock));
+    const int baseline = runtime_baseline_threads(props, kernel_max);
     std::vector<int> out;
     auto add = [&](int raw) {
-        const int value = std::max(warp, warp_aligned_down(std::min(raw, limit), warp));
-        if (!valid_policy_threads(value, limit, props)) return;
+        const int value = std::max(warp, warp_aligned_down(raw, warp));
+        if (!valid_policy_threads(value, kernel_max, props)) return;
         if (std::find(out.begin(), out.end(), value) == out.end()) out.push_back(value);
     };
+    add(baseline);
+    add(std::max(warp, baseline / 2));
     add(warp);
-    add(warp * 2);
-    add(warp * 4);
-    add(warp * 8);
-    add(warp * 16);
-    add(runtime_baseline_threads(props, limit));
-    add(limit);
-    std::sort(out.begin(), out.end());
     return out;
 }
 
@@ -126,14 +119,8 @@ std::vector<std::size_t> runtime_batch_candidates(const cudaDeviceProp& props,
         raw = std::max<std::size_t>(1U, std::min(raw, capacity));
         if (std::find(out.begin(), out.end(), raw) == out.end()) out.push_back(raw);
     };
-
     add(requested);
-    add(requested / 2U);
     add((requested * 3U) / 4U);
-    add((requested * 5U) / 4U);
-    add((capacity * 3U) / 4U);
-    add(capacity);
-    std::sort(out.begin(), out.end());
     return out;
 }
 
@@ -171,7 +158,7 @@ void apply_shape(GpuTunePolicy& policy, const GpuPolicyShape& shape)
         g.setup_threads = shape.cn_setup;
         g.loop_threads = shape.cn_loop;
         g.final_threads = shape.cn_final;
-        g.aes_backend = 0; // portable AES is the generic correctness baseline
+        g.aes_backend = 0;
     }
 }
 
@@ -314,23 +301,34 @@ float run_policy_once(cudaStream_t stream,
     }
 }
 
-double benchmark_policy_hps(cudaStream_t stream,
-                            DeviceJob* d_job,
-                            std::uint32_t* d_nonces,
-                            std::uint8_t* states,
-                            std::uint8_t* scratchpads,
-                            cryptonight::SplitContext* contexts,
-                            const std::array<DeviceJob, 3>& jobs,
-                            const GpuPolicyShape& shape)
+double quick_policy_hps(cudaStream_t stream,
+                        DeviceJob* d_job,
+                        std::uint32_t* d_nonces,
+                        std::uint8_t* states,
+                        std::uint8_t* scratchpads,
+                        cryptonight::SplitContext* contexts,
+                        const DeviceJob& job,
+                        const GpuPolicyShape& shape)
+{
+    const float ms = run_policy_once(stream, d_job, d_nonces, states, scratchpads,
+                                     contexts, job, shape);
+    return ms > 0.0F ? static_cast<double>(shape.batch) * 1000.0 / ms : 0.0;
+}
+
+double confirm_policy_hps(cudaStream_t stream,
+                          DeviceJob* d_job,
+                          std::uint32_t* d_nonces,
+                          std::uint8_t* states,
+                          std::uint8_t* scratchpads,
+                          cryptonight::SplitContext* contexts,
+                          const std::array<DeviceJob, 3>& jobs,
+                          const GpuPolicyShape& shape)
 {
     std::array<double, 3> hps{};
     for (std::size_t i = 0; i < jobs.size(); ++i) {
-        std::array<float, 3> ms{};
-        for (auto& value : ms)
-            value = run_policy_once(stream, d_job, d_nonces, states, scratchpads,
-                                    contexts, jobs[i], shape);
-        std::sort(ms.begin(), ms.end());
-        hps[i] = ms[1] > 0.0F ? static_cast<double>(shape.batch) * 1000.0 / ms[1] : 0.0;
+        const float ms = run_policy_once(stream, d_job, d_nonces, states, scratchpads,
+                                         contexts, jobs[i], shape);
+        hps[i] = ms > 0.0F ? static_cast<double>(shape.batch) * 1000.0 / ms : 0.0;
     }
     std::sort(hps.begin(), hps.end());
     return hps[1];
@@ -392,9 +390,10 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
     GpuPolicyShape baseline{};
     baseline.batch = std::max<std::size_t>(1U, std::min(requested_batch, capacity));
     baseline.core_threads = baseline_threads;
-    baseline.cn_setup = baseline_threads;
-    baseline.cn_loop = baseline_threads;
-    baseline.cn_final = baseline_threads;
+    const int warp = std::max(1, props.warpSize);
+    baseline.cn_setup = warp;
+    baseline.cn_loop = warp;
+    baseline.cn_final = warp;
 
     const auto batch_candidates = runtime_batch_candidates(props, baseline.batch, capacity);
     const auto jobs = make_tune_jobs();
@@ -413,17 +412,23 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
                   << " | baseline_threads=" << baseline_threads
                   << " | thread_candidates=" << thread_candidates.size()
                   << " | batch_candidates=" << batch_candidates.size()
-                  << " | schedules=" << jobs.size()
-                  << " | metric=median full GhostRider H/s\n";
+                  << " | coarse_schedules=1"
+                  << " | confirm_schedules=" << jobs.size()
+                  << " | metric=full GhostRider H/s\n";
 
         GpuPolicyShape best = baseline;
-        double best_hps = benchmark_policy_hps(stream, d_job, d_nonces, states,
-                                               scratchpads, contexts, jobs, best);
+        double best_hps = quick_policy_hps(stream, d_job, d_nonces, states,
+                                           scratchpads, contexts, jobs[0], best);
 
         auto test_candidate = [&](const GpuPolicyShape& candidate, const char* label) {
             try {
-                const double hps = benchmark_policy_hps(stream, d_job, d_nonces, states,
-                                                        scratchpads, contexts, jobs, candidate);
+                if (candidate.batch == best.batch &&
+                    candidate.core_threads == best.core_threads &&
+                    candidate.cn_setup == best.cn_setup &&
+                    candidate.cn_loop == best.cn_loop &&
+                    candidate.cn_final == best.cn_final) return;
+                const double hps = quick_policy_hps(stream, d_job, d_nonces, states,
+                                                    scratchpads, contexts, jobs[0], candidate);
                 const bool wins = hps > best_hps * kPolicyMinimumGain;
                 if (std::getenv("YERBAS_DIAGNOSTICS")) {
                     std::cout << std::fixed << std::setprecision(2)
@@ -461,38 +466,34 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
             test_candidate(candidate, "core");
         }
 
-        // Tune each CN phase independently, but judge every candidate by complete
-        // GhostRider throughput across multiple schedules.
+        // Keep first-launch CN search bounded: test one uniform geometry per
+        // runtime-derived thread candidate. Development profiling can be deeper.
         for (const int threads : thread_candidates) {
             GpuPolicyShape candidate = best;
             candidate.cn_setup = threads;
-            test_candidate(candidate, "cn-setup");
-        }
-        for (const int threads : thread_candidates) {
-            GpuPolicyShape candidate = best;
             candidate.cn_loop = threads;
-            test_candidate(candidate, "cn-loop");
-        }
-        for (const int threads : thread_candidates) {
-            GpuPolicyShape candidate = best;
             candidate.cn_final = threads;
-            test_candidate(candidate, "cn-final");
+            test_candidate(candidate, "cn-uniform");
         }
 
         const bool parity = parity_policy(stream, d_job, d_nonces, states, scratchpads,
                                           contexts, jobs, baseline, best);
-        if (!parity) {
+        double confirmed_hps = 0.0;
+        if (parity) {
+            confirmed_hps = confirm_policy_hps(stream, d_job, d_nonces, states,
+                                               scratchpads, contexts, jobs, best);
+        } else {
             std::cerr << "[GPU " << device_id << "] production GPU policy parity FAIL; baseline retained\n";
             best = baseline;
-            best_hps = benchmark_policy_hps(stream, d_job, d_nonces, states,
-                                            scratchpads, contexts, jobs, best);
+            confirmed_hps = confirm_policy_hps(stream, d_job, d_nonces, states,
+                                               scratchpads, contexts, jobs, best);
         }
 
         GpuTunePolicy policy{};
         apply_shape(policy, best);
-        policy.throughput_hps = best_hps;
+        policy.throughput_hps = confirmed_hps;
         policy.from_cache = false;
-        save_gpu_policy_cache(device_id, props, capacity, best, best_hps);
+        save_gpu_policy_cache(device_id, props, capacity, best, confirmed_hps);
 
         std::cout << "[GPU " << device_id << "] production GPU autotune selected"
                   << " | batch=" << best.batch
@@ -500,8 +501,8 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
                   << " | CN=" << best.cn_setup << '/' << best.cn_loop << '/' << best.cn_final
                   << " | parity=" << (parity ? "PASS" : "baseline")
                   << " | throughput=" << std::fixed << std::setprecision(2)
-                  << best_hps << " H/s"
-                  << " | policy=gpu-v3" << std::defaultfloat << '\n';
+                  << confirmed_hps << " H/s"
+                  << " | policy=gpu-v4-fast" << std::defaultfloat << '\n';
 
         cudaFree(d_nonces);
         cudaFree(d_job);
