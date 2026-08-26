@@ -2,9 +2,11 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <streambuf>
 #include <string>
 
@@ -23,6 +25,18 @@ inline std::mutex& perf_csv_mutex()
     return mutex;
 }
 
+inline std::string& current_rotation()
+{
+    static std::string value;
+    return value;
+}
+
+inline std::string& current_cn()
+{
+    static std::string value;
+    return value;
+}
+
 inline std::string csv_escape(const std::string& value)
 {
     std::string out = "\"";
@@ -34,6 +48,24 @@ inline std::string csv_escape(const std::string& value)
     return out;
 }
 
+inline std::string strip_ansi(const std::string& line)
+{
+    std::string clean;
+    clean.reserve(line.size());
+    for (std::size_t i = 0; i < line.size();) {
+        if (line[i] == '\x1b' && i + 1 < line.size() && line[i + 1] == '[') {
+            i += 2;
+            while (i < line.size()) {
+                const unsigned char c = static_cast<unsigned char>(line[i++]);
+                if (c >= 0x40 && c <= 0x7e) break;
+            }
+            continue;
+        }
+        clean.push_back(line[i++]);
+    }
+    return clean;
+}
+
 inline std::string field_after(const std::string& line, const std::string& key, const std::string& end = " | ")
 {
     const auto pos = line.find(key);
@@ -41,6 +73,30 @@ inline std::string field_after(const std::string& line, const std::string& key, 
     const auto start = pos + key.size();
     const auto stop = line.find(end, start);
     return line.substr(start, stop == std::string::npos ? std::string::npos : stop - start);
+}
+
+inline bool ensure_perf_csv_ready(const std::string& path)
+{
+    if (path.empty()) return true;
+    try {
+        const std::filesystem::path target(path);
+        if (target.has_parent_path())
+            std::filesystem::create_directories(target.parent_path());
+
+        std::ifstream check(path, std::ios::binary);
+        const bool needs_header = !check.good() || check.peek() == std::ifstream::traits_type::eof();
+        check.close();
+
+        std::ofstream out(path, std::ios::app);
+        if (!out) return false;
+        if (needs_header) {
+            out << "timestamp_ms,event,rotation,cryptonight,source,hps,total_ms,stage,stage_ms,stage_pct,details\n";
+            out.flush();
+        }
+        return out.good();
+    } catch (...) {
+        return false;
+    }
 }
 
 inline void append_perf_row(const std::string& event,
@@ -57,13 +113,9 @@ inline void append_perf_row(const std::string& event,
     const auto& path = perf_csv_path();
     if (path.empty()) return;
     std::lock_guard<std::mutex> lock(perf_csv_mutex());
-    std::ifstream check(path);
-    const bool needs_header = !check.good() || check.peek() == std::ifstream::traits_type::eof();
-    check.close();
+    if (!ensure_perf_csv_ready(path)) return;
     std::ofstream out(path, std::ios::app);
     if (!out) return;
-    if (needs_header)
-        out << "timestamp_ms,event,rotation,cryptonight,source,hps,total_ms,stage,stage_ms,stage_pct,details\n";
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     out << now_ms << ','
@@ -80,12 +132,47 @@ inline void append_perf_row(const std::string& event,
     out.flush();
 }
 
-inline void capture_perf_line(const std::string& line)
+inline void capture_status_row(const std::string& raw)
 {
-    if (perf_csv_path().empty() || line.empty()) return;
+    const std::string line = strip_ansi(raw);
+    std::istringstream ss(line);
+    std::string first;
+    if (!(ss >> first)) return;
+
+    std::string source;
+    if (first == "CPU") {
+        source = "CPU";
+    } else if (first == "GPU") {
+        std::string id;
+        if (!(ss >> id)) return;
+        source = "GPU " + id;
+    } else if (first == "TOTAL") {
+        source = "TOTAL";
+    } else {
+        return;
+    }
+
+    double value = 0.0;
+    std::string unit;
+    if (!(ss >> value >> unit)) return;
+    if (unit == "kH/s") value *= 1000.0;
+    else if (unit == "MH/s") value *= 1000000.0;
+    else if (unit != "H/s") return;
+
+    std::ostringstream hps;
+    hps << value;
+    append_perf_row("status", current_rotation(), current_cn(), source, hps.str(), "", "", "", "", line);
+}
+
+inline void capture_perf_line(const std::string& raw_line)
+{
+    if (perf_csv_path().empty() || raw_line.empty()) return;
+    const std::string line = strip_ansi(raw_line);
 
     if (line.find("[GhostRider] rotation=") != std::string::npos) {
-        append_perf_row("rotation", field_after(line, "rotation=", " | "), field_after(line, "CN=", "\n"), "", "", "", "", "", "", line);
+        current_rotation() = field_after(line, "rotation=", " | ");
+        current_cn() = field_after(line, "CN=", "\n");
+        append_perf_row("rotation", current_rotation(), current_cn(), "", "", "", "", "", "", line);
         return;
     }
 
@@ -118,6 +205,8 @@ inline void capture_perf_line(const std::string& line)
                         field_after(line, "sample=", " ms"), field_after(line, "sample=", "%"), line);
         return;
     }
+
+    capture_status_row(line);
 }
 
 inline bool diagnostics_enabled()
@@ -203,6 +292,9 @@ private:
 inline void set_perf_csv_path(const std::string& path)
 {
     quiet_detail::perf_csv_path() = path;
+    if (!quiet_detail::ensure_perf_csv_ready(path)) {
+        std::cerr << "Performance CSV error: unable to create/write " << path << '\n';
+    }
 }
 
 inline void enable_quiet_output()
