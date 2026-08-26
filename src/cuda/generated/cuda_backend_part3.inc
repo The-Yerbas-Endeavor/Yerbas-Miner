@@ -41,31 +41,11 @@ struct BatchEngine::Impl {
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
 
-        // Batch size is itself a production tuning dimension. Allocate buffers
-        // to the adaptive safe capacity first, benchmark aligned candidate batch
-        // sizes, then tune all geometry/backend choices against the selected
-        // production batch. YERBAS_CUDA_ACTIVE_BATCH remains an explicit override.
-        batch_size = autotune_cuda_active_batch(device_id, batch_size, batch_capacity, stream,
-                                                d_states, d_cn_scratchpads, d_cn_contexts);
-
-        try {
-            cn_geometries = autotune_cn_geometries(device_id, stream, d_states, batch_size,
-                                                   d_cn_scratchpads, d_cn_contexts);
-        } catch (const std::exception& e) {
-            cn_geometries.fill(CnGeometry{});
-            cudaGetLastError();
-            std::cerr << "[GPU " << device_id << "] CryptoNight geometry autotune failed; using 64/64/64: "
-                      << e.what() << '\n';
-        }
-
-        try {
-            core_threads = autotune_core_threads(device_id, stream, d_states, batch_size);
-        } catch (const std::exception& e) {
-            core_threads.fill(kCoreDefaultThreads);
-            cudaGetLastError();
-            std::cerr << "[GPU " << device_id << "] core launch autotune failed; using 256 threads: "
-                      << e.what() << '\n';
-        }
+        const auto policy = build_gpu_tune_policy(device_id, batch_size, batch_capacity, stream,
+                                                  d_states, d_cn_scratchpads, d_cn_contexts);
+        batch_size = policy.batch_size;
+        cn_geometries = policy.cn_geometries;
+        core_threads = policy.core_threads;
     }
 
     ~Impl()
