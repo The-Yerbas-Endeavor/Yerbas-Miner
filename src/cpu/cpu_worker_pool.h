@@ -18,6 +18,11 @@ unsigned int runtime_lane_width() noexcept;
 void set_runtime_cn_widths(const CnWidthPolicy& widths) noexcept;
 CnWidthPolicy runtime_cn_widths() noexcept;
 
+// Autotune measurements use the same production worker pool, but they must not
+// update live fingerprint-learning or stage-profile caches.
+void set_tuning_measurement_mode(bool enabled) noexcept;
+bool tuning_measurement_mode() noexcept;
+
 class WorkerPool {
 public:
     // lane_width=0 inherits the process-level grouping width selected by the
