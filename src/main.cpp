@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <streambuf>
 #include <string>
 
 #ifdef _WIN32
@@ -23,6 +24,28 @@ void write_startup_log(const std::string& message)
     std::ofstream log("yerbas-miner-startup.log", std::ios::app);
     if (log) log << message << '\n';
 }
+
+struct StreamBufferRestore {
+    std::streambuf* cout_buf{nullptr};
+    std::streambuf* cerr_buf{nullptr};
+
+    StreamBufferRestore() noexcept
+        : cout_buf(std::cout.rdbuf()), cerr_buf(std::cerr.rdbuf())
+    {
+    }
+
+    ~StreamBufferRestore() noexcept
+    {
+        // The color/quiet stream buffers are function-local statics. Restore
+        // the process-owned standard stream buffers before those statics are
+        // destroyed so std::ios shutdown cannot flush through a dangling
+        // streambuf pointer.
+        try { std::cout.flush(); } catch (...) {}
+        try { std::cerr.flush(); } catch (...) {}
+        if (cout_buf != nullptr) std::cout.rdbuf(cout_buf);
+        if (cerr_buf != nullptr) std::cerr.rdbuf(cerr_buf);
+    }
+};
 
 #ifdef _WIN32
 const char* windows_access_kind(ULONG_PTR kind)
@@ -87,6 +110,7 @@ int main(int argc, char** argv)
     SetUnhandledExceptionFilter(windows_unhandled_exception_filter);
 #endif
 
+    StreamBufferRestore restore_streams;
     yerbas::console::enable_colors();
     yerbas::console::enable_quiet_output();
     write_startup_log("Yerbas Miner starting");
