@@ -18,7 +18,7 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuPolicyRevision = 1;
+constexpr int kCpuPolicyRevision = 2;
 
 bool env_enabled(const char* name)
 {
@@ -77,9 +77,12 @@ struct Plan {
 std::vector<unsigned int> batches_for(const std::string& mode, unsigned int configured)
 {
     std::set<unsigned int> values;
-    if (mode == "simple") values = {16U, 24U, 32U};
-    else if (mode == "full") values = {8U, 12U, 16U, 20U, 24U, 28U, 32U, 40U, 48U, 64U};
-    else values = {8U, 16U, 24U, 32U, 48U};
+    if (mode == "full")
+        values = {8U, 12U, 16U, 20U, 24U, 28U, 32U, 40U, 48U, 64U};
+    else if (mode == "simple")
+        values = {16U, 32U};
+    else
+        values = {16U, 32U};
     if (configured > 0U && configured <= 128U) values.insert(configured);
     return {values.begin(), values.end()};
 }
@@ -90,23 +93,29 @@ std::vector<Plan> plans_for(unsigned int ceiling,
 {
     std::set<std::tuple<unsigned int, unsigned int, unsigned int>> unique;
     const auto batches = batches_for(mode, configured_batch);
-    for (const unsigned int lanes : {1U, 2U, 4U}) {
-        if (lanes > ceiling) continue;
-        const unsigned int max_workers = std::max(1U, ceiling / lanes);
-        std::set<unsigned int> workers;
-        if (mode == "full") {
-            for (unsigned int w = 1; w <= max_workers; ++w) workers.insert(w);
-        } else if (mode == "simple") {
-            workers.insert(max_workers);
-            if (max_workers > 1U) workers.insert(max_workers - 1U);
-        } else {
-            workers.insert(max_workers);
-            if (max_workers > 1U) workers.insert(max_workers - 1U);
-            workers.insert(std::max(1U, max_workers / 2U));
+
+    auto add_policy = [&](unsigned int workers, unsigned int lanes) {
+        if (workers == 0U || lanes == 0U || workers * lanes > ceiling) return;
+        for (const unsigned int batch : batches)
+            unique.emplace(workers, lanes, batch);
+    };
+
+    if (mode == "full") {
+        for (const unsigned int lanes : {1U, 2U, 4U}) {
+            if (lanes > ceiling) continue;
+            const unsigned int max_workers = std::max(1U, ceiling / lanes);
+            for (unsigned int workers = 1; workers <= max_workers; ++workers)
+                add_policy(workers, lanes);
         }
-        for (const unsigned int w : workers)
-            for (const unsigned int batch : batches)
-                unique.emplace(w, lanes, batch);
+    } else {
+        // Bounded generic production search. Cover full logical occupancy,
+        // one lower standard policy, and the useful 2/4-lane families without
+        // walking the entire matrix at every fresh install.
+        add_policy(ceiling, 1U);
+        if (ceiling > 1U) add_policy(ceiling - 1U, 1U);
+        add_policy(std::max(1U, ceiling / 2U), 1U);
+        if (ceiling >= 2U) add_policy(std::max(1U, ceiling / 2U), 2U);
+        if (ceiling >= 4U) add_policy(std::max(1U, ceiling / 4U), 4U);
     }
 
     std::vector<Plan> plans;
@@ -127,6 +136,7 @@ double benchmark_plan(const Plan& plan, const std::atomic_bool* stop)
                    std::min(4U, std::max(1U, plan.batch)));
 
     std::vector<double> samples;
+    samples.reserve(headers.size());
     for (std::size_t i = 0; i < headers.size(); ++i) {
         if (stopped(stop)) return 0.0;
         const auto start = std::chrono::steady_clock::now();
@@ -198,11 +208,12 @@ TuneResult production_autotune(unsigned int hardware_threads,
     }
 
     const auto plans = plans_for(ceiling, fallback_batch, mode);
-    std::cout << "[CPU tune] unified GhostRider search"
+    std::cout << "[CPU tune] GhostRider production search"
               << " | mode=" << mode
               << " | hardware_threads=" << hardware_threads
               << " | ceiling=" << ceiling
               << " | candidates=" << plans.size()
+              << " | schedules=3"
               << " | metric=median end-to-end H/s\n";
 
     TuneResult best{ceiling, 1U, fallback_batch, 0.0, false, false};
@@ -238,7 +249,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | batch=" << best.batch
               << " | throughput=" << std::fixed << std::setprecision(2)
               << best.throughput_hps << " H/s"
-              << " | cache=cpu-policy-v1" << std::defaultfloat << '\n';
+              << " | cache=cpu-policy-v2" << std::defaultfloat << '\n';
     return best;
 }
 
