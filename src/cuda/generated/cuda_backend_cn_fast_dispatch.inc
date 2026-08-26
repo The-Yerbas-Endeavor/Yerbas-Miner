@@ -97,9 +97,6 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                  result[2].setup_threads,
                                  selected_coop,
                                  result[2].final_threads);
-
-        profile_cn_fast_coop4_inner_v2(device_id, stream, states, batch_size,
-                                       scratchpads, contexts, result[2]);
     }
     return result;
 }
