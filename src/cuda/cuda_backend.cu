@@ -46,8 +46,6 @@
 #undef autotune_cn_geometries
 
 #include "cuda/generated/cuda_backend_cn_fast_microcache.inc"
-#include "cuda/generated/cuda_backend_cn_fast_microtune.inc"
-#include "cuda/generated/cuda_backend_cn_fast_microconfirm.inc"
 #include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
 #include "cuda/generated/cuda_backend_coop_dispatch.inc"
 #include "cuda/generated/cuda_backend_core_tune.inc"
