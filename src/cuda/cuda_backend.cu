@@ -32,6 +32,7 @@
 #include "cuda/generated/cuda_backend_coop_v3.inc"
 #include "cuda/generated/cuda_backend_coop_v4.inc"
 #include "cuda/generated/cuda_backend_coop_v5.inc"
+#include "cuda/generated/cuda_backend_coop_v6.inc"
 
 #define autotune_cn_geometries autotune_cn_geometries_coop
 #include "cuda/generated/cuda_backend_coop_tune.inc"
@@ -41,6 +42,7 @@
 #include "cuda/generated/cuda_backend_cn_fast_inner_profile_v2.inc"
 #include "cuda/generated/cuda_backend_cn_fast_v4_tune.inc"
 #include "cuda/generated/cuda_backend_cn_fast_v5_tune.inc"
+#include "cuda/generated/cuda_backend_cn_fast_v6_tune.inc"
 
 #define autotune_cn_geometries autotune_cn_geometries_cnfast_internal
 #include "cuda/generated/cuda_backend_cn_fast_tune.inc"
