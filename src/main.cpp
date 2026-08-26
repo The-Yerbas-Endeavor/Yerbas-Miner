@@ -2,7 +2,6 @@
 #include "console.h"
 #include "console_quiet.h"
 #include "miner.h"
-#include "cpu/cn_width_tune.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -102,8 +101,6 @@ int main(int argc, char** argv)
             yerbas::console::set_perf_csv_path(config.logging.perf_csv);
             std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
         }
-        if (config.miner.cpu_enabled)
-            (void)yerbas::cpu::qualify_cn_widths(config.miner.cpu_tune);
         yerbas::Miner miner(config);
         const int result = miner.run();
         write_startup_log("Yerbas Miner exited with code " + std::to_string(result));
