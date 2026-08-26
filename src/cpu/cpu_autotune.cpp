@@ -238,6 +238,44 @@ void save_cache(const std::filesystem::path& path, const TuneResult& value)
     } catch (...) {}
 }
 
+bool load_compatible_cache(unsigned int hardware_threads,
+                           unsigned int ceiling,
+                           const std::string& mode,
+                           TuneResult& out,
+                           unsigned int& source_ceiling)
+{
+    if (env_enabled("YERBAS_CPU_RETUNE")) return false;
+
+    bool found = false;
+    TuneResult best{};
+    unsigned int best_source = ceiling;
+
+    // Prefer any already-qualified policy from this hardware/build/mode that
+    // still fits the current user ceiling. This lets a max12 cache whose winner
+    // used 6 workers satisfy a later max6 startup without rerunning autotune.
+    for (unsigned int candidate_ceiling = ceiling;
+         candidate_ceiling <= hardware_threads;
+         ++candidate_ceiling) {
+        TuneResult candidate{};
+        if (!load_cache(cache_path(hardware_threads, candidate_ceiling, mode), candidate))
+            continue;
+        if (candidate.threads > ceiling)
+            continue;
+        if (!parity_width_policy(candidate.cn_widths))
+            continue;
+        if (!found || candidate.throughput_hps > best.throughput_hps) {
+            best = candidate;
+            best_source = candidate_ceiling;
+            found = true;
+        }
+    }
+
+    if (!found) return false;
+    out = best;
+    source_ceiling = best_source;
+    return true;
+}
+
 } // namespace
 
 TuneResult production_autotune(unsigned int hardware_threads,
@@ -258,8 +296,11 @@ TuneResult production_autotune(unsigned int hardware_threads,
 
     TuneResult cached{};
     const auto path = cache_path(hardware_threads, ceiling, mode);
-    if (load_cache(path, cached) && cached.threads <= ceiling && parity_width_policy(cached.cn_widths)) {
+    unsigned int source_ceiling = ceiling;
+    if (load_compatible_cache(hardware_threads, ceiling, mode, cached, source_ceiling)) {
         set_runtime_cn_widths(cached.cn_widths);
+        if (source_ceiling != ceiling)
+            save_cache(path, cached);
         std::cout << "[CPU tune] cached | mode=" << mode
                   << " | workers=" << cached.threads
                   << " | batch=" << cached.batch
@@ -267,7 +308,10 @@ TuneResult production_autotune(unsigned int hardware_threads,
                   << cached.cn_widths[2] << '/' << cached.cn_widths[3] << '/'
                   << cached.cn_widths[4] << '/' << cached.cn_widths[5]
                   << " | throughput=" << std::fixed << std::setprecision(2)
-                  << cached.throughput_hps << " H/s" << std::defaultfloat << '\n';
+                  << cached.throughput_hps << " H/s"
+                  << " | source=max" << source_ceiling
+                  << (source_ceiling == ceiling ? "" : " (compatible)")
+                  << std::defaultfloat << '\n';
         return cached;
     }
 
