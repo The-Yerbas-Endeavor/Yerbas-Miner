@@ -9,6 +9,7 @@
 #include <sstream>
 #include <streambuf>
 #include <string>
+#include <vector>
 
 namespace yerbas::console {
 namespace quiet_detail {
@@ -273,18 +274,70 @@ protected:
     }
 
 private:
+    static bool is_status_top(const std::string& line)
+    {
+        return strip_ansi(line).find("PROOF OF GRASS | STATUS UPDATE") != std::string::npos;
+    }
+
+    static bool is_status_bottom(const std::string& line)
+    {
+        const std::string clean = strip_ansi(line);
+        return clean.find("========================================================================================================") != std::string::npos &&
+               clean.find("PROOF OF GRASS | STATUS UPDATE") == std::string::npos;
+    }
+
+    void forward_line(const std::string& line, bool newline)
+    {
+        capture_perf_line(line);
+        const bool suppress = !diagnostics_enabled() && suppress_normal_line(line);
+        if (!suppress && !line.empty())
+            destination_->sputn(line.data(), static_cast<std::streamsize>(line.size()));
+        if (!suppress && newline) destination_->sputc('\n');
+    }
+
+    void flush_status_buffer()
+    {
+        bool empty_snapshot = false;
+        for (const auto& line : status_lines_) {
+            const std::string clean = strip_ansi(line);
+            if (clean.rfind("TOTAL", 0) == 0 && clean.find("0.00 H/s") != std::string::npos) {
+                empty_snapshot = true;
+                break;
+            }
+        }
+
+        if (!empty_snapshot) {
+            for (const auto& line : status_lines_) forward_line(line, true);
+        }
+        status_lines_.clear();
+        buffering_status_ = false;
+    }
+
     void emit(bool newline)
     {
-        capture_perf_line(pending_);
-        const bool suppress = !diagnostics_enabled() && suppress_normal_line(pending_);
-        if (!suppress && !pending_.empty())
-            destination_->sputn(pending_.data(), static_cast<std::streamsize>(pending_.size()));
-        if (!suppress && newline) destination_->sputc('\n');
+        if (buffering_status_) {
+            status_lines_.push_back(pending_);
+            const bool bottom = is_status_bottom(pending_);
+            pending_.clear();
+            if (bottom) flush_status_buffer();
+            return;
+        }
+
+        if (newline && is_status_top(pending_)) {
+            buffering_status_ = true;
+            status_lines_.push_back(pending_);
+            pending_.clear();
+            return;
+        }
+
+        forward_line(pending_, newline);
         pending_.clear();
     }
 
     std::streambuf* destination_{nullptr};
     std::string pending_;
+    bool buffering_status_{false};
+    std::vector<std::string> status_lines_;
 };
 
 } // namespace quiet_detail
