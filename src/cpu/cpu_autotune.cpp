@@ -32,6 +32,11 @@ bool stopped(const std::atomic_bool* stop)
     return stop != nullptr && stop->load(std::memory_order_relaxed);
 }
 
+struct TuningMeasurementGuard {
+    TuningMeasurementGuard() { set_tuning_measurement_mode(true); }
+    ~TuningMeasurementGuard() { set_tuning_measurement_mode(false); }
+};
+
 std::filesystem::path cache_dir()
 {
 #ifdef _WIN32
@@ -145,6 +150,7 @@ double benchmark_header(const Plan& plan,
                         const std::atomic_bool* stop)
 {
     if (stopped(stop)) return 0.0;
+    TuningMeasurementGuard measurement_guard;
     set_runtime_cn_widths(widths);
     const unsigned int group = max_width(widths);
     WorkerPool pool(plan.workers, group);
@@ -250,9 +256,6 @@ bool load_compatible_cache(unsigned int hardware_threads,
     TuneResult best{};
     unsigned int best_source = ceiling;
 
-    // Prefer any already-qualified policy from this hardware/build/mode that
-    // still fits the current user ceiling. This lets a max12 cache whose winner
-    // used 6 workers satisfy a later max6 startup without rerunning autotune.
     for (unsigned int candidate_ceiling = ceiling;
          candidate_ceiling <= hardware_threads;
          ++candidate_ceiling) {
