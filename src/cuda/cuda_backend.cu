@@ -29,10 +29,7 @@
 #include "cuda/generated/cuda_backend_coop_probe.inc"
 #undef autotune_cn_geometries
 
-// Keep the generic register-distributed coop4-v3 challenger because it is
-// independently parity-gated and applies to every CryptoNight variant.
-// The CN-Fast-specific v4-v9 experiment chain was retired after repeated
-// whole-stage tests showed no durable production gain worth its complexity.
+// Generic cooperative implementations retained as the only CN challenger path.
 #include "cuda/generated/cuda_backend_coop_v3.inc"
 
 #define autotune_cn_geometries autotune_cn_geometries_coop
@@ -40,13 +37,7 @@
 #undef autotune_cn_geometries
 
 #include "cuda/generated/cuda_backend_coop_impl_tune.inc"
-
-#define autotune_cn_geometries autotune_cn_geometries_cnfast_internal
-#include "cuda/generated/cuda_backend_cn_fast_tune.inc"
-#undef autotune_cn_geometries
-
-#include "cuda/generated/cuda_backend_cn_fast_microcache.inc"
-#include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
+#include "cuda/generated/cuda_backend_cn_policy.inc"
 #include "cuda/generated/cuda_backend_coop_dispatch.inc"
 #include "cuda/generated/cuda_backend_core_tune.inc"
 
