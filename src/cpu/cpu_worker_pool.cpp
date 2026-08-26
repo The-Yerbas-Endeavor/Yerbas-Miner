@@ -23,6 +23,7 @@ namespace yerbas::cpu {
 namespace {
 
 std::atomic_uint g_runtime_lane_width{1U};
+std::array<std::atomic_uint, 6> g_runtime_cn_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
 
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
 {
@@ -80,6 +81,20 @@ unsigned int runtime_lane_width() noexcept
     return g_runtime_lane_width.load(std::memory_order_relaxed);
 }
 
+void set_runtime_cn_widths(const CnWidthPolicy& widths) noexcept
+{
+    for (std::size_t i = 0; i < widths.size(); ++i)
+        g_runtime_cn_widths[i].store(normalize_lane_width(widths[i]), std::memory_order_relaxed);
+}
+
+CnWidthPolicy runtime_cn_widths() noexcept
+{
+    CnWidthPolicy out{};
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = g_runtime_cn_widths[i].load(std::memory_order_relaxed);
+    return out;
+}
+
 struct WorkerPool::Impl {
     explicit Impl(unsigned int requested_threads, unsigned int requested_lanes)
         : threads(std::max(1u, requested_threads)),
@@ -127,7 +142,7 @@ struct WorkerPool::Impl {
 
             std::vector<Candidate> found;
             found.reserve(2);
-            std::array<unsigned int,6> widths{{lanes, lanes, lanes, lanes, lanes, lanes}};
+            const auto widths = runtime_cn_widths();
 
             for (unsigned int i = 0; i < count;) {
                 const unsigned int group = std::min(lanes, count - i);
@@ -232,11 +247,14 @@ struct WorkerPool::Impl {
         const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
         if (new_rotation || periodic_diagnostic) {
             const auto recommendation = recommended_fingerprint_policy(active_fingerprint);
+            const auto widths = runtime_cn_widths();
             std::cout << std::fixed << std::setprecision(2)
                       << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                       << active_fingerprint << std::dec << std::setfill(' ')
                       << " | CN=" << active_cn_summary
                       << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
+                      << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
+                      << widths[3] << '/' << widths[4] << '/' << widths[5]
                       << " | live=" << hps << " H/s"
                       << " | learned=" << fp.ewma_hps << " H/s"
                       << " | samples=" << fp.samples;
