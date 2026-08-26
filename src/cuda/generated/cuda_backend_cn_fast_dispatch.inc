@@ -1,7 +1,7 @@
 // Public wrapper for the final CN-Fast family tuner.
-// Preserve an existing production unroll-4 result because the focused challenger
-// set intentionally compares only u1/u2, dual u1/u2, and coop4. If coop4 already
-// won the broad production selector, continue into the final family comparison.
+// Keep the broad production family selector plus the proven setup/coop/final
+// geometry tuner. Narrow v4-v9 loop experiments were retired after repeated
+// tests failed to produce a durable whole-miner gain.
 
 std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                                  cudaStream_t stream,
@@ -38,21 +38,6 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
     const bool coop_selected = valid_device && g_cn_coop_ready[device_id] &&
                                g_cn_coop_enabled[device_id][2];
     if (!coop_selected) return result;
-
-    // Narrow CN-Fast experiments remain generic and cumulative: each new
-    // candidate is compared against the best already-qualified path.
-    ensure_cn_fast_v4_mode(device_id, props, stream, states, batch_size,
-                           scratchpads, contexts, result[2]);
-    ensure_cn_fast_v5_mode(device_id, props, stream, states, batch_size,
-                           scratchpads, contexts, result[2]);
-    ensure_cn_fast_v6_mode(device_id, props, stream, states, batch_size,
-                           scratchpads, contexts, result[2]);
-    ensure_cn_fast_v7_mode(device_id, props, stream, states, batch_size,
-                           scratchpads, contexts, result[2]);
-    ensure_cn_fast_v8_mode(device_id, props, stream, states, batch_size,
-                           scratchpads, contexts, result[2]);
-    ensure_cn_fast_v9_mode(device_id, props, stream, states, batch_size,
-                           scratchpads, contexts, result[2]);
 
     if (load_cn_fast_micro_cache(device_id, props, batch_size, result[2]))
         return result;
