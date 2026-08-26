@@ -51,6 +51,7 @@
 #include "cuda/generated/cuda_backend_cn_fast_microconfirm.inc"
 #include "cuda/generated/cuda_backend_cn_fast_dispatch.inc"
 #include "cuda/generated/cuda_backend_coop_dispatch.inc"
+#include "cuda/generated/cuda_backend_core_tune.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
