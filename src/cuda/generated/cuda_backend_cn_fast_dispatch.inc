@@ -39,12 +39,13 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                                g_cn_coop_enabled[device_id][2];
     if (!coop_selected) return result;
 
-    // Target the two largest measured memory-side CN-Fast loop costs in sequence.
-    // v4 experiments with the first scratchpad/AES fetch; v5 independently tests
-    // an aligned 128-bit dependent load/writeback. Each is parity/performance gated.
+    // Narrow CN-Fast experiments remain generic and cumulative: each new
+    // candidate is compared against the best already-qualified path.
     ensure_cn_fast_v4_mode(device_id, props, stream, states, batch_size,
                            scratchpads, contexts, result[2]);
     ensure_cn_fast_v5_mode(device_id, props, stream, states, batch_size,
+                           scratchpads, contexts, result[2]);
+    ensure_cn_fast_v6_mode(device_id, props, stream, states, batch_size,
                            scratchpads, contexts, result[2]);
 
     if (load_cn_fast_micro_cache(device_id, props, batch_size, result[2]))
