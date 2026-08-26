@@ -14,6 +14,7 @@ struct BatchEngine::Impl {
     JobDescriptor host_job{};
     std::vector<std::uint8_t> host_states;
     std::array<CnGeometry, 6> cn_geometries{};
+    std::array<int, kCoreAlgorithmCount> core_threads{};
     std::uint64_t scan_count{0};
     std::uint64_t stage_profile_samples{0};
     std::array<double, 256> rolling_stage_ms{};
@@ -54,6 +55,15 @@ struct BatchEngine::Impl {
             cn_geometries.fill(CnGeometry{});
             cudaGetLastError();
             std::cerr << "[GPU " << device_id << "] CryptoNight geometry autotune failed; using 64/64/64: "
+                      << e.what() << '\n';
+        }
+
+        try {
+            core_threads = autotune_core_threads(device_id, stream, d_states, batch_size);
+        } catch (const std::exception& e) {
+            core_threads.fill(kCoreDefaultThreads);
+            cudaGetLastError();
+            std::cerr << "[GPU " << device_id << "] core launch autotune failed; using 256 threads: "
                       << e.what() << '\n';
         }
     }
@@ -98,9 +108,9 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     if (!hash_pipeline_ready()) throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream), "cudaMemsetAsync candidate counter failed");
-    constexpr int core_threads = 256;
-    const int core_blocks = static_cast<int>((impl_->batch_size + core_threads - 1) / core_threads);
-    initialize_nonce_batch<<<core_blocks, core_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
+    constexpr int utility_threads = 256;
+    const int utility_blocks = static_cast<int>((impl_->batch_size + utility_threads - 1) / utility_threads);
+    initialize_nonce_batch<<<utility_blocks, utility_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
     ++impl_->scan_count;
@@ -124,17 +134,22 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                      impl_->d_cn_scratchpads, impl_->d_cn_contexts, impl_->cn_geometries[algorithm]);
         } else {
             if (!core::core512_implemented(algorithm)) throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
-            core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job, impl_->d_nonces,
-                                                                           impl_->d_states, impl_->batch_size,
-                                                                           stage_index, algorithm);
+            int stage_threads = kCoreDefaultThreads;
+            if (algorithm < impl_->core_threads.size())
+                stage_threads = impl_->core_threads[algorithm];
+            const int stage_blocks = static_cast<int>((impl_->batch_size + static_cast<std::size_t>(stage_threads) - 1U) /
+                                                      static_cast<std::size_t>(stage_threads));
+            core512_stage<<<stage_blocks, stage_threads, 0, impl_->stream>>>(impl_->d_job, impl_->d_nonces,
+                                                                             impl_->d_states, impl_->batch_size,
+                                                                             stage_index, algorithm);
             check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
         }
         if (profile_this_scan)
             check_cuda(cudaEventRecord(stage_boundaries[static_cast<std::size_t>(stage_index) + 1U], impl_->stream),
                        "cudaEventRecord rolling stage profile boundary failed");
     }
-    collect_candidates<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
-                                                                        impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
+    collect_candidates<<<utility_blocks, utility_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
+                                                                               impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
     check_cuda(cudaGetLastError(), "collect_candidates launch failed");
     unsigned int count = 0;
     check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count), cudaMemcpyDeviceToHost, impl_->stream),
@@ -202,12 +217,8 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                 if (is_cn && algorithm < cryptonight::kVariantConfigs.size()) {
                     std::cout << cryptonight::kVariantConfigs[algorithm].name;
                 } else {
-                    static constexpr const char* kCoreNames[15] = {
-                        "BLAKE-512", "BMW-512", "Groestl-512", "JH-512", "Keccak-512",
-                        "Skein-512", "Luffa-512", "CubeHash-512", "Shavite-512", "SIMD-512",
-                        "Echo-512", "Hamsi-512", "Fugue-512", "Shabal-512", "Whirlpool"
-                    };
-                    std::cout << (algorithm < 15 ? kCoreNames[algorithm] : "UNKNOWN");
+                    std::cout << (algorithm < kCoreAlgorithmNames.size() ?
+                                  kCoreAlgorithmNames[algorithm] : "UNKNOWN");
                 }
                 std::cout << " | sample=" << sample_ms[i] << " ms"
                           << " | sample=" << std::setprecision(1) << pct << "%"
