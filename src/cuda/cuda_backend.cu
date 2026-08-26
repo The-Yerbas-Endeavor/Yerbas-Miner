@@ -40,6 +40,7 @@
 #include "cuda/generated/cuda_backend_cn_policy.inc"
 #include "cuda/generated/cuda_backend_coop_dispatch.inc"
 #include "cuda/generated/cuda_backend_core_tune.inc"
+#include "cuda/generated/cuda_backend_gpu_policy.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
