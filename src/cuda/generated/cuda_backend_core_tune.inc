@@ -4,7 +4,7 @@
 
 namespace {
 
-constexpr int kCoreThreadCacheRevision = 1;
+constexpr int kCoreThreadCacheRevision = 2;
 constexpr int kCoreAlgorithmCount = 15;
 constexpr int kCoreDefaultThreads = 256;
 constexpr float kCoreThreadRequiredSpeedup = 0.98F; // require >=2% over 256
@@ -45,15 +45,17 @@ std::filesystem::path core_thread_cache_path(int device_id,
         std::to_string(kCoreThreadCacheRevision) + '-' + key + ".txt");
 }
 
-bool valid_core_threads(int threads, const cudaDeviceProp& props)
+bool valid_core_threads(int threads, const cudaDeviceProp& props, int kernel_max_threads)
 {
     return threads > 0 && threads <= props.maxThreadsPerBlock &&
+           threads <= kernel_max_threads &&
            (threads == 64 || threads == 128 || threads == 256 || threads == 512);
 }
 
 bool load_core_thread_cache(int device_id,
                             const cudaDeviceProp& props,
                             std::size_t batch_size,
+                            int kernel_max_threads,
                             std::array<int, kCoreAlgorithmCount>& result)
 {
     const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
@@ -71,7 +73,7 @@ bool load_core_thread_cache(int device_id,
         int algorithm = -1;
         int threads = 0;
         if (!(in >> algorithm >> threads) || algorithm != i ||
-            !valid_core_threads(threads, props)) return false;
+            !valid_core_threads(threads, props, kernel_max_threads)) return false;
         loaded[static_cast<std::size_t>(i)] = threads;
     }
     result = loaded;
@@ -135,10 +137,27 @@ std::array<int, kCoreAlgorithmCount> autotune_core_threads(int device_id,
     cudaDeviceProp props{};
     check_cuda(cudaGetDeviceProperties(&props, device_id),
                "cudaGetDeviceProperties core launch tuner failed");
-    if (load_core_thread_cache(device_id, props, batch_size, result)) return result;
+
+    cudaFuncAttributes attrs{};
+    check_cuda(cudaFuncGetAttributes(&attrs, benchmark_core512_stage),
+               "cudaFuncGetAttributes core launch tuner failed");
+    const int kernel_max_threads = std::min(props.maxThreadsPerBlock, attrs.maxThreadsPerBlock);
+    if (kernel_max_threads < kCoreDefaultThreads) {
+        std::cout << "[GPU " << device_id << "] core launch autotune skipped"
+                  << " | kernel_max_threads=" << kernel_max_threads
+                  << " | production=256\n";
+        return result;
+    }
+
+    if (load_core_thread_cache(device_id, props, batch_size, kernel_max_threads, result)) return result;
 
     const std::size_t sample_count = std::min<std::size_t>(batch_size, 1024U);
     constexpr std::array<int, 4> candidates{{64, 128, 256, 512}};
+    std::cout << "[GPU " << device_id << "] core launch autotune"
+              << " | kernel_max_threads=" << kernel_max_threads
+              << " | regs=" << attrs.numRegs
+              << " | local=" << attrs.localSizeBytes
+              << " | shared=" << attrs.sharedSizeBytes << '\n';
 
     for (int algorithm = 0; algorithm < kCoreAlgorithmCount; ++algorithm) {
         if (!core::core512_implemented(static_cast<std::uint8_t>(algorithm))) continue;
@@ -147,16 +166,22 @@ std::array<int, kCoreAlgorithmCount> autotune_core_threads(int device_id,
         float best_ms = baseline_ms;
         int best_threads = kCoreDefaultThreads;
         for (const int threads : candidates) {
-            if (!valid_core_threads(threads, props) || threads == kCoreDefaultThreads) continue;
-            // Two samples reduce one-shot launch noise without making startup excessive.
-            const float a = benchmark_core_threads(stream, static_cast<std::uint8_t>(algorithm),
-                                                   states, sample_count, threads);
-            const float b = benchmark_core_threads(stream, static_cast<std::uint8_t>(algorithm),
-                                                   states, sample_count, threads);
-            const float ms = std::min(a, b);
-            if (ms < best_ms) {
-                best_ms = ms;
-                best_threads = threads;
+            if (!valid_core_threads(threads, props, kernel_max_threads) || threads == kCoreDefaultThreads) continue;
+            try {
+                const float a = benchmark_core_threads(stream, static_cast<std::uint8_t>(algorithm),
+                                                       states, sample_count, threads);
+                const float b = benchmark_core_threads(stream, static_cast<std::uint8_t>(algorithm),
+                                                       states, sample_count, threads);
+                const float ms = std::min(a, b);
+                if (ms < best_ms) {
+                    best_ms = ms;
+                    best_threads = threads;
+                }
+            } catch (const std::exception& e) {
+                cudaGetLastError();
+                std::cout << "[CUDA core tune] GPU " << device_id
+                          << " | " << kCoreAlgorithmNames[static_cast<std::size_t>(algorithm)]
+                          << " | threads=" << threads << " skipped: " << e.what() << '\n';
             }
         }
         const bool qualified = best_threads != kCoreDefaultThreads &&
