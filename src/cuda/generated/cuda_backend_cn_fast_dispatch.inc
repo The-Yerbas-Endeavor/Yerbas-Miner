@@ -49,6 +49,8 @@ std::array<CnGeometry, 6> autotune_cn_geometries(int device_id,
                            scratchpads, contexts, result[2]);
     ensure_cn_fast_v7_mode(device_id, props, stream, states, batch_size,
                            scratchpads, contexts, result[2]);
+    ensure_cn_fast_v8_mode(device_id, props, stream, states, batch_size,
+                           scratchpads, contexts, result[2]);
 
     if (load_cn_fast_micro_cache(device_id, props, batch_size, result[2]))
         return result;
