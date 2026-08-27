@@ -216,6 +216,19 @@ DeviceJob make_gpu_calibration_job()
     return best;
 }
 
+std::string gpu_calibration_cn_summary(const DeviceJob& job)
+{
+    std::ostringstream out;
+    bool first = true;
+    for (const std::uint8_t encoded : job.stages) {
+        if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
+        if (!first) out << '/';
+        first = false;
+        out << ghostrider::cryptonight_name(static_cast<std::uint8_t>(encoded & 0x7fU));
+    }
+    return out.str();
+}
+
 float run_gpu_calibration_once(cudaStream_t stream,
                                DeviceJob* d_job,
                                std::uint32_t* d_nonces,
@@ -334,35 +347,52 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                    "cudaMalloc GPU calibration nonces failed");
         const DeviceJob job = make_gpu_calibration_job();
         GpuCalibrationShape best = baseline;
+
+        constexpr unsigned int kMaxCandidateMeasurements = 5U; // baseline + four alternatives
+        unsigned int progress = 1U;
+        std::cout << "[GPU " << device_id << "] GPU autotune calibration starting"
+                  << " | candidates=" << kMaxCandidateMeasurements
+                  << " | metric=one heavy whole-GhostRider schedule"
+                  << " | CN=" << gpu_calibration_cn_summary(job) << '\n';
+        std::cout << "[GPU " << device_id << "] GPU autotune 1/" << kMaxCandidateMeasurements
+                  << " | baseline"
+                  << " | batch=" << baseline.batch
+                  << " | core=" << baseline.core_threads
+                  << " | CN=" << baseline.cn_threads
+                  << " | testing..." << std::flush;
         double best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                               scratchpads, contexts, job, best);
-
-        std::cout << "[GPU " << device_id << "] GPU autotune calibration starting"
-                  << " | candidates<=5"
-                  << " | metric=one heavy whole-GhostRider schedule"
-                  << " | baseline=" << std::fixed << std::setprecision(2) << best_hps << " H/s"
+        std::cout << std::fixed << std::setprecision(2)
+                  << " done | " << best_hps << " H/s | best=" << best_hps << " H/s"
                   << std::defaultfloat << '\n';
 
         auto test = [&](GpuCalibrationShape candidate, const char* label) {
             if (candidate.batch == best.batch && candidate.core_threads == best.core_threads &&
                 candidate.cn_threads == best.cn_threads) return;
+            ++progress;
+            std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/'
+                      << kMaxCandidateMeasurements << " | " << label
+                      << " | batch=" << candidate.batch
+                      << " | core=" << candidate.core_threads
+                      << " | CN=" << candidate.cn_threads
+                      << " | testing..." << std::flush;
             try {
+                const double previous_best = best_hps;
                 const double hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                        scratchpads, contexts, job, candidate);
-                const bool wins = hps > best_hps * kGpuCalibrationMinimumGain;
+                const double gain_pct = previous_best > 0.0 ? (hps / previous_best - 1.0) * 100.0 : 0.0;
+                const bool wins = hps > previous_best * kGpuCalibrationMinimumGain;
                 std::cout << std::fixed << std::setprecision(2)
-                          << "[GPU " << device_id << "] GPU autotune " << label
-                          << " | batch=" << candidate.batch
-                          << " | core=" << candidate.core_threads
-                          << " | CN=" << candidate.cn_threads
-                          << " | throughput=" << hps << " H/s"
-                          << " | selected=" << (wins ? "yes" : "no")
+                          << " done | " << hps << " H/s"
+                          << " | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << '%'
+                          << " | gate=+" << ((kGpuCalibrationMinimumGain - 1.0) * 100.0) << '%'
+                          << " | " << (wins ? "NEW BEST" : "keep current")
+                          << " | best=" << (wins ? hps : previous_best) << " H/s"
                           << std::defaultfloat << '\n';
                 if (wins) { best = candidate; best_hps = hps; }
             } catch (const std::exception& e) {
                 cudaGetLastError();
-                std::cerr << "[GPU " << device_id << "] GPU autotune " << label
-                          << " skipped: " << e.what() << '\n';
+                std::cerr << " skipped | " << e.what() << '\n';
             }
         };
 
@@ -389,8 +419,12 @@ GpuTunePolicy run_gpu_calibration(int device_id,
             test(candidate, "cn-wide");
         }
 
+        std::cout << "[GPU " << device_id << "] GPU autotune validation"
+                  << " | candidate=" << best.batch << '/' << best.core_threads << '/' << best.cn_threads
+                  << " | exact parity..." << std::flush;
         const bool parity = gpu_calibration_parity(stream, d_job, d_nonces, states,
                                                    scratchpads, contexts, job, baseline, best);
+        std::cout << " done | parity=" << (parity ? "PASS" : "FAIL") << '\n';
         if (!parity) {
             std::cerr << "[GPU " << device_id << "] GPU autotune parity FAIL; safe baseline retained\n";
             best = baseline;
@@ -398,7 +432,9 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                                            scratchpads, contexts, job, best);
         }
 
+        std::cout << "[GPU " << device_id << "] GPU autotune saving calibration cache..." << std::flush;
         save_gpu_calibration_cache(device_id, props, capacity, best, best_hps);
+        std::cout << " done\n";
         GpuTunePolicy policy{};
         apply_calibration_shape(policy, best);
         policy.throughput_hps = best_hps;
