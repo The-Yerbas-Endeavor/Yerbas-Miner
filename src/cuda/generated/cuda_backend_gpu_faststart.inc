@@ -2,14 +2,21 @@
 //
 // Normal production startup never benchmarks. It loads a previously calibrated
 // policy when available, otherwise derives a conservative legal policy from
-// runtime CUDA limits and starts immediately. --gpu-autotune enables a short
-// one-shot whole-GhostRider calibration, exact parity-checks the winner, saves
-// it per device/driver/runtime, and then mining continues with that policy.
+// runtime CUDA limits and starts immediately. Explicit/first-run autotune
+// calibrates the four CryptoNight scratchpad classes that drive real GhostRider
+// batch occupancy, then caches those class batches for the adaptive job switcher.
 
 constexpr int kCoreAlgorithmCount = 15;
 constexpr int kCoreDefaultThreads = 256;
-constexpr int kGpuCalibrationRevision = 1;
+constexpr int kGpuCalibrationRevision = 2;
 constexpr double kGpuCalibrationMinimumGain = 1.01;
+constexpr std::size_t kGpuBatchClassCount = 4;
+static constexpr std::array<std::size_t, kGpuBatchClassCount> kGpuBatchClassPageBytes{{
+    2097152U, 1048576U, 524288U, 262144U
+}};
+static constexpr std::array<const char*, kGpuBatchClassCount> kGpuBatchClassNames{{
+    "2MiB", "1MiB", "512KiB", "256KiB"
+}};
 static constexpr std::array<const char*, kCoreAlgorithmCount> kCoreAlgorithmNames{{
     "BLAKE-512", "BMW-512", "Groestl-512", "JH-512", "Keccak-512",
     "Skein-512", "Luffa-512", "CubeHash-512", "Shavite-512", "SIMD-512",
@@ -18,6 +25,7 @@ static constexpr std::array<const char*, kCoreAlgorithmCount> kCoreAlgorithmName
 
 struct GpuTunePolicy {
     std::size_t batch_size{0};
+    std::array<std::size_t, kGpuBatchClassCount> class_batches{};
     std::array<CnGeometry, 6> cn_geometries{};
     std::array<int, kCoreAlgorithmCount> core_threads{};
     double throughput_hps{0.0};
@@ -75,6 +83,31 @@ int faststart_core_threads(const cudaDeviceProp& props, int kernel_max)
     const int warp = std::max(1, props.warpSize);
     const int limit = std::max(warp, std::min(kernel_max, props.maxThreadsPerBlock));
     return std::max(warp, faststart_warp_aligned_down(std::min(kCoreDefaultThreads, limit), warp));
+}
+
+std::size_t gpu_batch_class_index(std::size_t page_size)
+{
+    if (page_size >= kGpuBatchClassPageBytes[0]) return 0U;
+    if (page_size >= kGpuBatchClassPageBytes[1]) return 1U;
+    if (page_size >= kGpuBatchClassPageBytes[2]) return 2U;
+    return 3U;
+}
+
+std::size_t gpu_align_batch(std::size_t value, std::size_t capacity, std::size_t quantum)
+{
+    value = std::max<std::size_t>(1U, std::min(value, capacity));
+    if (value >= quantum) value = (value / quantum) * quantum;
+    return std::max<std::size_t>(1U, std::min(value, capacity));
+}
+
+std::size_t gpu_memory_derived_class_batch(std::size_t heavy_batch,
+                                           std::size_t capacity,
+                                           std::size_t page_size,
+                                           std::size_t quantum)
+{
+    const std::size_t budget = heavy_batch * kGpuBatchClassPageBytes[0];
+    const std::size_t raw = page_size == 0U ? heavy_batch : budget / page_size;
+    return gpu_align_batch(raw, capacity, quantum);
 }
 
 bool gpu_calibration_requested()
@@ -136,26 +169,31 @@ bool load_gpu_calibration_cache(int device_id,
     int revision = 0;
     GpuCalibrationShape shape{};
     double hps = 0.0;
-    if (!(in >> magic >> revision >> shape.batch >> shape.core_threads >> shape.cn_threads >> hps))
-        return false;
+    if (!(in >> magic >> revision >> shape.batch >> shape.core_threads >> shape.cn_threads)) return false;
+    for (auto& batch : policy.class_batches) if (!(in >> batch)) return false;
+    if (!(in >> hps)) return false;
+
     const int warp = std::max(1, props.warpSize);
     if (magic != "YERBAS_GPU_CALIBRATION" || revision != kGpuCalibrationRevision ||
         shape.batch == 0 || shape.batch > capacity ||
         shape.core_threads < warp || shape.core_threads > kernel_max ||
         shape.core_threads > props.maxThreadsPerBlock || (shape.core_threads % warp) != 0 ||
         shape.cn_threads < warp || shape.cn_threads > props.maxThreadsPerBlock ||
-        (shape.cn_threads % warp) != 0)
-        return false;
+        (shape.cn_threads % warp) != 0) return false;
+    for (const auto batch : policy.class_batches)
+        if (batch == 0U || batch > capacity) return false;
 
     apply_calibration_shape(policy, shape);
+    policy.batch_size = policy.class_batches[0];
     policy.throughput_hps = hps;
     policy.from_cache = true;
     std::cout << "[GPU " << device_id << "] GPU calibration cache loaded"
-              << " | batch=" << shape.batch
+              << " | batches=" << policy.class_batches[0] << '/' << policy.class_batches[1]
+              << '/' << policy.class_batches[2] << '/' << policy.class_batches[3]
+              << " | classes=2MiB/1MiB/512KiB/256KiB"
               << " | core=" << shape.core_threads
               << " | CN=" << shape.cn_threads << '/' << shape.cn_threads << '/' << shape.cn_threads
-              << " | throughput=" << std::fixed << std::setprecision(2) << hps << " H/s"
-              << " | startup-benchmark=off" << std::defaultfloat << '\n';
+              << " | startup-benchmark=off\n";
     return true;
 }
 
@@ -163,6 +201,7 @@ void save_gpu_calibration_cache(int device_id,
                                 const cudaDeviceProp& props,
                                 std::size_t capacity,
                                 const GpuCalibrationShape& shape,
+                                const std::array<std::size_t, kGpuBatchClassCount>& class_batches,
                                 double hps)
 {
     try {
@@ -173,8 +212,9 @@ void save_gpu_calibration_cache(int device_id,
         std::ofstream out(temp, std::ios::trunc);
         if (!out) return;
         out << "YERBAS_GPU_CALIBRATION " << kGpuCalibrationRevision << ' '
-            << shape.batch << ' ' << shape.core_threads << ' ' << shape.cn_threads << ' '
-            << std::setprecision(12) << hps << '\n';
+            << shape.batch << ' ' << shape.core_threads << ' ' << shape.cn_threads;
+        for (const auto batch : class_batches) out << ' ' << batch;
+        out << ' ' << std::setprecision(12) << hps << '\n';
         out.close();
         std::error_code ec;
         std::filesystem::rename(temp, path, ec);
@@ -188,32 +228,43 @@ void save_gpu_calibration_cache(int device_id,
     }
 }
 
-DeviceJob make_gpu_calibration_job()
+std::array<DeviceJob, kGpuBatchClassCount> make_gpu_calibration_jobs_by_class()
 {
-    DeviceJob best{};
-    std::uint64_t best_score = 0;
-    for (unsigned int sample = 0; sample < 24U; ++sample) {
+    std::array<DeviceJob, kGpuBatchClassCount> jobs{};
+    std::array<std::uint64_t, kGpuBatchClassCount> scores{};
+    std::array<bool, kGpuBatchClassCount> found{};
+
+    for (unsigned int sample = 0; sample < 1024U; ++sample) {
         std::array<std::uint8_t, 80> header{};
         header[0] = 4;
         for (std::size_t i = 4; i < 76; ++i)
             header[i] = static_cast<std::uint8_t>((i * (19U + sample * 7U) + 0x4dU + sample * 31U) & 0xffU);
         const auto schedule = ghostrider::stage_schedule_quiet(ghostrider::Work{header.data(), header.size()});
-        std::uint64_t score = 0;
+        std::size_t max_page = 0U;
+        std::uint64_t score = 0U;
         for (const std::uint8_t encoded : schedule) {
             if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
             const std::uint8_t variant = static_cast<std::uint8_t>(encoded & 0x7fU);
             if (variant >= cryptonight::kVariantConfigs.size()) continue;
             const auto& cfg = cryptonight::kVariantConfigs[variant];
+            max_page = std::max<std::size_t>(max_page, cfg.page_size);
             score += static_cast<std::uint64_t>(cfg.page_size) +
                      static_cast<std::uint64_t>(cfg.iterations) * 4ULL;
         }
-        if (score <= best_score) continue;
-        best_score = score;
-        std::copy(header.begin(), header.end(), std::begin(best.header));
-        std::fill(std::begin(best.target_le), std::end(best.target_le), 0xffU);
-        std::copy(schedule.begin(), schedule.end(), std::begin(best.stages));
+        const std::size_t cls = gpu_batch_class_index(max_page);
+        if (found[cls] && score <= scores[cls]) continue;
+        found[cls] = true;
+        scores[cls] = score;
+        std::copy(header.begin(), header.end(), std::begin(jobs[cls].header));
+        std::fill(std::begin(jobs[cls].target_le), std::end(jobs[cls].target_le), 0xffU);
+        std::copy(schedule.begin(), schedule.end(), std::begin(jobs[cls].stages));
     }
-    return best;
+
+    for (std::size_t cls = 0; cls < jobs.size(); ++cls) {
+        if (found[cls]) continue;
+        jobs[cls] = jobs[0];
+    }
+    return jobs;
 }
 
 std::string gpu_calibration_cn_summary(const DeviceJob& job)
@@ -333,9 +384,14 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                                   cryptonight::SplitContext* contexts)
 {
     const int warp = std::max(1, props.warpSize);
+    const std::size_t quantum = std::max<std::size_t>(static_cast<std::size_t>(warp),
+        static_cast<std::size_t>(warp) * static_cast<std::size_t>(std::max(1, props.multiProcessorCount)));
+    const int core_threads = faststart_core_threads(props, kernel_max);
+    const auto jobs = make_gpu_calibration_jobs_by_class();
+
     GpuCalibrationShape baseline{};
     baseline.batch = std::max<std::size_t>(1U, std::min(requested_batch, capacity));
-    baseline.core_threads = faststart_core_threads(props, kernel_max);
+    baseline.core_threads = core_threads;
     baseline.cn_threads = warp;
 
     DeviceJob* d_job = nullptr;
@@ -345,109 +401,102 @@ GpuTunePolicy run_gpu_calibration(int device_id,
     try {
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), capacity * sizeof(std::uint32_t)),
                    "cudaMalloc GPU calibration nonces failed");
-        const DeviceJob job = make_gpu_calibration_job();
-        GpuCalibrationShape best = baseline;
 
-        constexpr unsigned int kMaxCandidateMeasurements = 5U; // baseline + four alternatives
-        unsigned int progress = 1U;
-        std::cout << "[GPU " << device_id << "] GPU autotune calibration starting"
-                  << " | candidates=" << kMaxCandidateMeasurements
-                  << " | metric=one heavy whole-GhostRider schedule"
-                  << " | CN=" << gpu_calibration_cn_summary(job) << '\n';
-        std::cout << "[GPU " << device_id << "] GPU autotune 1/" << kMaxCandidateMeasurements
-                  << " | baseline"
-                  << " | batch=" << baseline.batch
-                  << " | core=" << baseline.core_threads
-                  << " | CN=" << baseline.cn_threads
-                  << " | testing..." << std::flush;
-        double best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
-                                              scratchpads, contexts, job, best);
-        std::cout << std::fixed << std::setprecision(2)
-                  << " done | " << best_hps << " H/s | best=" << best_hps << " H/s"
-                  << std::defaultfloat << '\n';
+        std::array<std::size_t, kGpuBatchClassCount> class_batches{};
+        std::array<double, kGpuBatchClassCount> class_hps{};
+        constexpr unsigned int total_measurements = static_cast<unsigned int>(kGpuBatchClassCount * 2U);
+        unsigned int progress = 0U;
 
-        auto test = [&](GpuCalibrationShape candidate, const char* label) {
-            if (candidate.batch == best.batch && candidate.core_threads == best.core_threads &&
-                candidate.cn_threads == best.cn_threads) return;
+        std::cout << "[GPU " << device_id << "] GPU scratchpad-class autotune starting"
+                  << " | classes=4 | measurements=" << total_measurements
+                  << " | metric=whole-GhostRider H/s | thread-width-search=off\n";
+
+        for (std::size_t cls = 0; cls < kGpuBatchClassCount; ++cls) {
+            const std::size_t nominal = gpu_memory_derived_class_batch(
+                baseline.batch, capacity, kGpuBatchClassPageBytes[cls], quantum);
+            const std::size_t reduced = gpu_align_batch((nominal * 7U) / 8U, capacity, quantum);
+            GpuCalibrationShape best = baseline;
+            best.batch = nominal;
+
             ++progress;
-            std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/'
-                      << kMaxCandidateMeasurements << " | " << label
-                      << " | batch=" << candidate.batch
-                      << " | core=" << candidate.core_threads
-                      << " | CN=" << candidate.cn_threads
-                      << " | testing..." << std::flush;
-            try {
-                const double previous_best = best_hps;
+            std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
+                      << " | class=" << kGpuBatchClassNames[cls]
+                      << " | CN=" << gpu_calibration_cn_summary(jobs[cls])
+                      << " | batch=" << nominal << " | testing..." << std::flush;
+            double best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
+                                                  scratchpads, contexts, jobs[cls], best);
+            std::cout << std::fixed << std::setprecision(2)
+                      << " done | " << best_hps << " H/s | best=" << best_hps << " H/s"
+                      << std::defaultfloat << '\n';
+
+            ++progress;
+            if (reduced == nominal) {
+                std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
+                          << " | class=" << kGpuBatchClassNames[cls]
+                          << " | reduced candidate duplicates nominal | skipped\n";
+            } else {
+                GpuCalibrationShape candidate = baseline;
+                candidate.batch = reduced;
+                std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
+                          << " | class=" << kGpuBatchClassNames[cls]
+                          << " | batch=" << reduced << " | testing..." << std::flush;
                 const double hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
-                                                       scratchpads, contexts, job, candidate);
-                const double gain_pct = previous_best > 0.0 ? (hps / previous_best - 1.0) * 100.0 : 0.0;
-                const bool wins = hps > previous_best * kGpuCalibrationMinimumGain;
+                                                       scratchpads, contexts, jobs[cls], candidate);
+                const double gain_pct = best_hps > 0.0 ? (hps / best_hps - 1.0) * 100.0 : 0.0;
+                const bool wins = hps > best_hps * kGpuCalibrationMinimumGain;
                 std::cout << std::fixed << std::setprecision(2)
                           << " done | " << hps << " H/s"
                           << " | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << '%'
-                          << " | gate=+" << ((kGpuCalibrationMinimumGain - 1.0) * 100.0) << '%'
-                          << " | " << (wins ? "NEW BEST" : "keep current")
-                          << " | best=" << (wins ? hps : previous_best) << " H/s"
+                          << " | gate=+1.00% | " << (wins ? "NEW BEST" : "keep nominal")
                           << std::defaultfloat << '\n';
-                if (wins) { best = candidate; best_hps = hps; }
-            } catch (const std::exception& e) {
-                cudaGetLastError();
-                std::cerr << " skipped | " << e.what() << '\n';
+                if (wins) {
+                    best = candidate;
+                    best_hps = hps;
+                }
             }
-        };
-
-        if (baseline.batch >= 4U) {
-            GpuCalibrationShape candidate = best;
-            candidate.batch = std::max<std::size_t>(1U, (baseline.batch * 7U) / 8U);
-            test(candidate, "batch-7/8");
-            candidate = best;
-            candidate.batch = std::max<std::size_t>(1U, (baseline.batch * 3U) / 4U);
-            test(candidate, "batch-3/4");
+            class_batches[cls] = best.batch;
+            class_hps[cls] = best_hps;
+            std::cout << std::fixed << std::setprecision(2)
+                      << "[GPU " << device_id << "] GPU class selected"
+                      << " | class=" << kGpuBatchClassNames[cls]
+                      << " | batch=" << best.batch << " | throughput=" << best_hps << " H/s"
+                      << std::defaultfloat << '\n';
         }
 
-        const int half_core = std::max(warp, faststart_warp_aligned_down(baseline.core_threads / 2, warp));
-        if (half_core != baseline.core_threads) {
-            GpuCalibrationShape candidate = best;
-            candidate.core_threads = half_core;
-            test(candidate, "core-half");
-        }
-
-        const int wider_cn = std::min(props.maxThreadsPerBlock, warp * 2);
-        if (wider_cn != warp && (wider_cn % warp) == 0) {
-            GpuCalibrationShape candidate = best;
-            candidate.cn_threads = wider_cn;
-            test(candidate, "cn-wide");
-        }
-
+        GpuCalibrationShape selected = baseline;
+        selected.batch = class_batches[0];
         std::cout << "[GPU " << device_id << "] GPU autotune validation"
-                  << " | candidate=" << best.batch << '/' << best.core_threads << '/' << best.cn_threads
                   << " | exact parity..." << std::flush;
         const bool parity = gpu_calibration_parity(stream, d_job, d_nonces, states,
-                                                   scratchpads, contexts, job, baseline, best);
+                                                   scratchpads, contexts, jobs[0], baseline, selected);
         std::cout << " done | parity=" << (parity ? "PASS" : "FAIL") << '\n';
         if (!parity) {
-            std::cerr << "[GPU " << device_id << "] GPU autotune parity FAIL; safe baseline retained\n";
-            best = baseline;
-            best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
-                                           scratchpads, contexts, job, best);
+            std::cerr << "[GPU " << device_id << "] GPU autotune parity FAIL; memory-derived class defaults retained\n";
+            for (std::size_t cls = 0; cls < kGpuBatchClassCount; ++cls)
+                class_batches[cls] = gpu_memory_derived_class_batch(
+                    baseline.batch, capacity, kGpuBatchClassPageBytes[cls], quantum);
+            selected.batch = class_batches[0];
         }
 
         std::cout << "[GPU " << device_id << "] GPU autotune saving calibration cache..." << std::flush;
-        save_gpu_calibration_cache(device_id, props, capacity, best, best_hps);
+        save_gpu_calibration_cache(device_id, props, capacity, selected, class_batches, class_hps[0]);
         std::cout << " done\n";
+
         GpuTunePolicy policy{};
-        apply_calibration_shape(policy, best);
-        policy.throughput_hps = best_hps;
+        apply_calibration_shape(policy, selected);
+        policy.class_batches = class_batches;
+        policy.batch_size = class_batches[0];
+        policy.throughput_hps = class_hps[0];
         policy.from_cache = false;
 
         std::cout << "[GPU " << device_id << "] GPU autotune selected"
-                  << " | batch=" << best.batch
-                  << " | core=" << best.core_threads
-                  << " | CN=" << best.cn_threads << '/' << best.cn_threads << '/' << best.cn_threads
-                  << " | parity=" << (parity ? "PASS" : "baseline")
-                  << " | throughput=" << std::fixed << std::setprecision(2) << best_hps << " H/s"
-                  << " | cache=gpu-calibration-v" << kGpuCalibrationRevision
-                  << std::defaultfloat << '\n';
+                  << " | batches=" << class_batches[0] << '/' << class_batches[1]
+                  << '/' << class_batches[2] << '/' << class_batches[3]
+                  << " | classes=2MiB/1MiB/512KiB/256KiB"
+                  << " | core=" << core_threads
+                  << " | CN=" << warp << '/' << warp << '/' << warp
+                  << " | parity=" << (parity ? "PASS" : "defaults")
+                  << " | cache=gpu-calibration-v" << kGpuCalibrationRevision << '\n';
 
         cudaFree(d_nonces);
         cudaFree(d_job);
@@ -490,8 +539,14 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
 
     const int core_threads = faststart_core_threads(props, kernel_max);
     const int warp = std::max(1, props.warpSize);
+    const std::size_t quantum = std::max<std::size_t>(static_cast<std::size_t>(warp),
+        static_cast<std::size_t>(warp) * static_cast<std::size_t>(std::max(1, props.multiProcessorCount)));
     GpuTunePolicy policy{};
     policy.batch_size = std::max<std::size_t>(1U, std::min(requested_batch, capacity));
+    for (std::size_t cls = 0; cls < kGpuBatchClassCount; ++cls)
+        policy.class_batches[cls] = gpu_memory_derived_class_batch(
+            policy.batch_size, capacity, kGpuBatchClassPageBytes[cls], quantum);
+    policy.batch_size = policy.class_batches[0];
     policy.core_threads.fill(core_threads);
     for (auto& geometry : policy.cn_geometries) {
         geometry = CnGeometry{};
@@ -502,10 +557,11 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
     }
 
     std::cout << "[GPU " << device_id << "] production GPU fast-start"
-              << " | batch=" << policy.batch_size
+              << " | batches=" << policy.class_batches[0] << '/' << policy.class_batches[1]
+              << '/' << policy.class_batches[2] << '/' << policy.class_batches[3]
+              << " | classes=2MiB/1MiB/512KiB/256KiB"
               << " | core=" << core_threads
               << " | CN=" << warp << '/' << warp << '/' << warp
-              << " | source=runtime-safe"
-              << " | startup-benchmark=off\n";
+              << " | source=runtime-safe | startup-benchmark=off\n";
     return policy;
 }
