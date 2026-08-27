@@ -19,6 +19,9 @@ struct MinerConfig {
     unsigned int cpu_batch{16};
     unsigned int cpu_lanes{1};
     std::string cpu_tune{"off"};
+    // Explicit combined calibration flag. Forces fresh CPU tuning and pairs
+    // with GPU autotune when --autotune is requested.
+    bool autotune{false};
 };
 
 struct GpuConfig {
