@@ -5,6 +5,7 @@ struct BatchEngine::Impl {
     std::size_t batch_capacity{0};
     std::size_t scratchpad_budget_bytes{0};
     std::size_t batch_quantum{1};
+    std::array<std::size_t, kGpuBatchClassCount> class_batches{};
     unsigned int fallback_threads{1};
     cudaStream_t stream{};
     DeviceJob* d_job{nullptr};
@@ -32,11 +33,10 @@ struct BatchEngine::Impl {
     {
         if (base_batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
 
-        // Reserve the same scratchpad byte budget as the conservative CN-Fast
-        // baseline, but allocate lightweight nonce/state/context slots for the
-        // largest batch that budget can support on the smallest CN variant.
-        // This lets light GhostRider rotations use more hashes without consuming
-        // any more CN scratchpad VRAM than the baseline policy.
+        // Keep a fixed scratchpad byte budget based on the conservative heavy-CN
+        // baseline. Lightweight nonce/state/context slots are allocated up to the
+        // smallest CN footprint so per-class calibration can choose among all
+        // memory-safe 2MiB/1MiB/512KiB/256KiB batch sizes without reallocating.
         constexpr std::size_t min_cn_scratchpad = 262144U;
         scratchpad_budget_bytes = base_batch_size * kCnScratchpadStride;
         const std::size_t slot_limit = scratchpad_budget_bytes / min_cn_scratchpad;
@@ -62,12 +62,21 @@ struct BatchEngine::Impl {
         const auto policy = build_gpu_tune_policy(device_id, base_batch_size, batch_capacity, stream,
                                                   d_states, d_cn_scratchpads, d_cn_contexts);
         batch_size = policy.batch_size;
-        base_batch_size = policy.batch_size;
+        base_batch_size = policy.class_batches[0] == 0U ? policy.batch_size : policy.class_batches[0];
+        class_batches = policy.class_batches;
+        if (class_batches[0] == 0U) {
+            for (std::size_t cls = 0; cls < kGpuBatchClassCount; ++cls)
+                class_batches[cls] = gpu_memory_derived_class_batch(
+                    base_batch_size, batch_capacity, kGpuBatchClassPageBytes[cls], batch_quantum);
+        }
+        batch_size = class_batches[0];
         cn_geometries = policy.cn_geometries;
         core_threads = policy.core_threads;
 
         std::cout << "[GPU " << device_id << "] adaptive batch capacity"
-                  << " | base=" << base_batch_size
+                  << " | calibrated=" << class_batches[0] << '/' << class_batches[1]
+                  << '/' << class_batches[2] << '/' << class_batches[3]
+                  << " | classes=2MiB/1MiB/512KiB/256KiB"
                   << " | max=" << batch_capacity
                   << " | scratchpad-budget=" << (scratchpad_budget_bytes / (1024U * 1024U)) << " MiB"
                   << " | policy=rotation-aware\n";
@@ -97,10 +106,6 @@ void BatchEngine::upload_job(const JobDescriptor& job)
 {
     impl_->host_job = job;
 
-    // The CN variants in a GhostRider job are fixed for the entire job. Size the
-    // active batch from the largest scratchpad required by those three variants.
-    // CN-Fast therefore stays at the conservative baseline; lighter rotations
-    // can use 2x/4x/8x the hashes when their scratchpad footprint permits it.
     std::size_t max_page_size = 0;
     for (const std::uint8_t encoded : job.stages) {
         if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
@@ -111,19 +116,28 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     }
     if (max_page_size == 0) max_page_size = kCnScratchpadStride;
 
-    std::size_t adaptive_batch = std::min(impl_->batch_capacity,
-                                          impl_->scratchpad_budget_bytes / max_page_size);
-    adaptive_batch = std::max(impl_->base_batch_size, adaptive_batch);
+    const std::size_t class_index = gpu_batch_class_index(max_page_size);
+    std::size_t adaptive_batch = impl_->class_batches[class_index];
+    if (adaptive_batch == 0U || adaptive_batch > impl_->batch_capacity) {
+        adaptive_batch = gpu_memory_derived_class_batch(
+            impl_->base_batch_size, impl_->batch_capacity, max_page_size, impl_->batch_quantum);
+    }
+
+    // Final byte-budget guard. A corrupted/stale cache can never select more CN
+    // scratchpad bytes than were allocated for this engine.
+    const std::size_t memory_safe_batch = std::max<std::size_t>(1U,
+        std::min(impl_->batch_capacity, impl_->scratchpad_budget_bytes / max_page_size));
+    adaptive_batch = std::min(adaptive_batch, memory_safe_batch);
     if (adaptive_batch >= impl_->batch_quantum)
         adaptive_batch = (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
-    adaptive_batch = std::max(impl_->base_batch_size,
-                              std::min(adaptive_batch, impl_->batch_capacity));
+    adaptive_batch = std::max<std::size_t>(1U, adaptive_batch);
 
     if (adaptive_batch != impl_->batch_size) {
         std::cout << "[GPU " << impl_->device_id << "] rotation-adaptive batch"
+                  << " | class=" << kGpuBatchClassNames[class_index]
                   << " | scratchpad=" << (max_page_size / 1024U) << " KiB/hash"
                   << " | batch=" << impl_->batch_size << " -> " << adaptive_batch
-                  << " | base=" << impl_->base_batch_size
+                  << " | calibrated=" << impl_->class_batches[class_index]
                   << " | max=" << impl_->batch_capacity << '\n';
         impl_->batch_size = adaptive_batch;
     }
