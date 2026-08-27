@@ -70,6 +70,16 @@ void set_gpu_autotune_environment(bool enabled)
     setenv("YERBAS_GPU_AUTOTUNE", "1", 1);
 #endif
 }
+
+void set_cpu_retune_environment(bool enabled)
+{
+    if (!enabled) return;
+#ifdef _WIN32
+    _putenv_s("YERBAS_CPU_RETUNE", "1");
+#else
+    setenv("YERBAS_CPU_RETUNE", "1", 1);
+#endif
+}
 }
 
 Miner::Miner(AppConfig config)
@@ -89,6 +99,11 @@ int Miner::run()
     const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
     config_.miner.cpu_lanes = 1;
 
+    if (config_.miner.autotune) {
+        std::cout << "[AUTOTUNE] combined calibration requested | CPU=fresh | GPU=fresh\n";
+        set_cpu_retune_environment(true);
+    }
+
     if (config_.miner.cpu_enabled && !config_.pool.url.empty() && !config_.pool.user.empty()) {
         if (config_.miner.cpu_tune == "off") {
             if (config_.miner.threads == 0) config_.miner.threads = hw_threads;
@@ -98,6 +113,7 @@ int Miner::run()
                       << " | batch=" << config_.miner.cpu_batch
                       << " | lanes=1\n";
         } else {
+            std::cout << "[AUTOTUNE] CPU phase starting\n";
             const auto tune = cpu::production_autotune(hw_threads,
                                                        config_.miner.threads,
                                                        config_.miner.cpu_batch,
@@ -117,6 +133,7 @@ int Miner::run()
                       << " | throughput=" << tune.throughput_hps << " H/s"
                       << (tune.from_cache ? " | source=cache" : " | source=fresh")
                       << '\n';
+            std::cout << "[AUTOTUNE] CPU phase complete\n";
         }
     }
 
@@ -139,7 +156,7 @@ int Miner::run()
     print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
     if (config_.gpu.autotune)
-        std::cout << "GPU calibration: requested | bounded one-shot autotune\n";
+        std::cout << "[AUTOTUNE] GPU phase will run during CUDA initialization\n";
 
     stratum::Client stratum_client(config_);
     if (stop_requested()) {
