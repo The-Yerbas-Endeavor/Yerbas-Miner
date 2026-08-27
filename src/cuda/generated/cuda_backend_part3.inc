@@ -1,7 +1,10 @@
 struct BatchEngine::Impl {
     int device_id{-1};
     std::size_t batch_size{0};
+    std::size_t base_batch_size{0};
     std::size_t batch_capacity{0};
+    std::size_t scratchpad_budget_bytes{0};
+    std::size_t batch_quantum{1};
     unsigned int fallback_threads{1};
     cudaStream_t stream{};
     DeviceJob* d_job{nullptr};
@@ -24,28 +27,50 @@ struct BatchEngine::Impl {
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
         : device_id(id),
           batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
-          batch_capacity(std::min(requested_size, cryptonight::kInitialBatchCapacity)),
-          fallback_threads(std::max(1u, requested_fallback_threads)),
-          host_states(batch_capacity * kStateBytes)
+          base_batch_size(batch_size),
+          fallback_threads(std::max(1u, requested_fallback_threads))
     {
-        if (batch_size == 0 || batch_capacity == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
-        if (batch_capacity < batch_size) batch_capacity = batch_size;
+        if (base_batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
+
+        // Reserve the same scratchpad byte budget as the conservative CN-Fast
+        // baseline, but allocate lightweight nonce/state/context slots for the
+        // largest batch that budget can support on the smallest CN variant.
+        // This lets light GhostRider rotations use more hashes without consuming
+        // any more CN scratchpad VRAM than the baseline policy.
+        constexpr std::size_t min_cn_scratchpad = 262144U;
+        scratchpad_budget_bytes = base_batch_size * kCnScratchpadStride;
+        const std::size_t slot_limit = scratchpad_budget_bytes / min_cn_scratchpad;
+        batch_capacity = std::max(base_batch_size, std::min(requested_size, slot_limit));
 
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
+        cudaDeviceProp props{};
+        check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties adaptive batch failed");
+        const std::size_t warp = static_cast<std::size_t>(std::max(1, props.warpSize));
+        const std::size_t sms = static_cast<std::size_t>(std::max(1, props.multiProcessorCount));
+        batch_quantum = std::max<std::size_t>(warp, warp * sms);
+
+        host_states.resize(batch_capacity * kStateBytes);
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_capacity * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_capacity * kStateBytes), "cudaMalloc 512-bit state batch failed");
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), batch_capacity * kCnScratchpadStride), "cudaMalloc CryptoNight scratchpads failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_scratchpads), scratchpad_budget_bytes), "cudaMalloc CryptoNight scratchpads failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_capacity * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
 
-        const auto policy = build_gpu_tune_policy(device_id, batch_size, batch_capacity, stream,
+        const auto policy = build_gpu_tune_policy(device_id, base_batch_size, batch_capacity, stream,
                                                   d_states, d_cn_scratchpads, d_cn_contexts);
         batch_size = policy.batch_size;
+        base_batch_size = policy.batch_size;
         cn_geometries = policy.cn_geometries;
         core_threads = policy.core_threads;
+
+        std::cout << "[GPU " << device_id << "] adaptive batch capacity"
+                  << " | base=" << base_batch_size
+                  << " | max=" << batch_capacity
+                  << " | scratchpad-budget=" << (scratchpad_budget_bytes / (1024U * 1024U)) << " MiB"
+                  << " | policy=rotation-aware\n";
     }
 
     ~Impl()
@@ -71,6 +96,38 @@ BatchEngine& BatchEngine::operator=(BatchEngine&&) noexcept = default;
 void BatchEngine::upload_job(const JobDescriptor& job)
 {
     impl_->host_job = job;
+
+    // The CN variants in a GhostRider job are fixed for the entire job. Size the
+    // active batch from the largest scratchpad required by those three variants.
+    // CN-Fast therefore stays at the conservative baseline; lighter rotations
+    // can use 2x/4x/8x the hashes when their scratchpad footprint permits it.
+    std::size_t max_page_size = 0;
+    for (const std::uint8_t encoded : job.stages) {
+        if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
+        const std::uint8_t variant = static_cast<std::uint8_t>(encoded & 0x7fU);
+        if (variant >= cryptonight::kVariantConfigs.size()) continue;
+        max_page_size = std::max<std::size_t>(max_page_size,
+                                              cryptonight::kVariantConfigs[variant].page_size);
+    }
+    if (max_page_size == 0) max_page_size = kCnScratchpadStride;
+
+    std::size_t adaptive_batch = std::min(impl_->batch_capacity,
+                                          impl_->scratchpad_budget_bytes / max_page_size);
+    adaptive_batch = std::max(impl_->base_batch_size, adaptive_batch);
+    if (adaptive_batch >= impl_->batch_quantum)
+        adaptive_batch = (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
+    adaptive_batch = std::max(impl_->base_batch_size,
+                              std::min(adaptive_batch, impl_->batch_capacity));
+
+    if (adaptive_batch != impl_->batch_size) {
+        std::cout << "[GPU " << impl_->device_id << "] rotation-adaptive batch"
+                  << " | scratchpad=" << (max_page_size / 1024U) << " KiB/hash"
+                  << " | batch=" << impl_->batch_size << " -> " << adaptive_batch
+                  << " | base=" << impl_->base_batch_size
+                  << " | max=" << impl_->batch_capacity << '\n';
+        impl_->batch_size = adaptive_batch;
+    }
+
     DeviceJob device_job{};
     std::memcpy(device_job.header, job.header.data(), job.header.size());
     std::memcpy(device_job.target_le, job.target_le.data(), job.target_le.size());
