@@ -68,6 +68,7 @@ void apply_json(AppConfig& cfg, const json& root)
         if (g.contains("devices")) cfg.gpu.devices = g.at("devices").get<std::vector<int>>();
         if (g.contains("intensity")) cfg.gpu.intensity = g.at("intensity").get<int>();
         if (g.contains("skip_validation")) cfg.gpu.skip_validation = g.at("skip_validation").get<bool>();
+        if (g.contains("autotune")) cfg.gpu.autotune = g.at("autotune").get<bool>();
     }
     if (root.contains("logging")) {
         const auto& l = root.at("logging");
@@ -109,6 +110,7 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--no-hybrid") cfg.miner.hybrid = false;
         else if (arg == "--devices") cfg.gpu.devices = parse_devices(require_value(argc, argv, i, "--devices"));
         else if (arg == "--intensity") cfg.gpu.intensity = std::stoi(require_value(argc, argv, i, "--intensity"));
+        else if (arg == "--gpu-autotune") cfg.gpu.autotune = true;
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
@@ -138,6 +140,7 @@ void print_config_help(const char* program)
         << "  --no-hybrid         Do not combine CPU and GPU\n"
         << "  --devices 0,1       GPU device ids\n"
         << "  --intensity N       GPU intensity (0 = auto)\n"
+        << "  --gpu-autotune      Run one bounded GPU calibration and cache the result\n"
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
@@ -148,10 +151,13 @@ void print_config_help(const char* program)
         << "  simple   quick production tuning\n"
         << "  default  balanced production tuning\n"
         << "  full     exhaustive production/rotation tuning where supported\n\n"
+        << "GPU tuning:\n"
+        << "  Normal startup never benchmarks. --gpu-autotune runs a short explicit\n"
+        << "  calibration, validates the winner, and saves it for later instant startup.\n\n"
         << "CPU autotune environment:\n"
         << "  YERBAS_CPU_RETUNE=1            Ignore cached CPU tuning and benchmark again\n"
         << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Force direct/no-tune CPU startup\n"
-        << "  YERBAS_DIAGNOSTICS=1          Show individual CPU autotune benchmark results\n";
+        << "  YERBAS_DIAGNOSTICS=1          Show individual autotune benchmark results\n";
 }
 
 } // namespace yerbas
