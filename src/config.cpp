@@ -105,6 +105,11 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--threads") cfg.miner.threads = static_cast<unsigned int>(std::stoul(require_value(argc, argv, i, "--threads")));
         else if (arg == "--cpu-batch") cfg.miner.cpu_batch = static_cast<unsigned int>(std::stoul(require_value(argc, argv, i, "--cpu-batch")));
         else if (arg == "--tune") cfg.miner.cpu_tune = normalize_tune_mode(require_value(argc, argv, i, "--tune"));
+        else if (arg == "--autotune") {
+            cfg.miner.autotune = true;
+            cfg.miner.cpu_tune = "default";
+            cfg.gpu.autotune = true;
+        }
         else if (arg == "--no-tune") cfg.miner.cpu_tune = "off";
         else if (arg == "--no-cpu") cfg.miner.cpu_enabled = false;
         else if (arg == "--no-hybrid") cfg.miner.hybrid = false;
@@ -135,6 +140,7 @@ void print_config_help(const char* program)
         << "  --threads N         CPU thread ceiling (0 = all logical CPUs)\n"
         << "  --cpu-batch N       CPU batch when tuning is off / initial reference value\n"
         << "  --tune MODE         CPU tuning: off, simple, default, full\n"
+        << "  --autotune          Fresh CPU + GPU calibration with visible progress\n"
         << "  --no-tune           Start immediately with configured/default CPU settings\n"
         << "  --no-cpu            Disable CPU mining\n"
         << "  --no-hybrid         Do not combine CPU and GPU\n"
@@ -146,6 +152,10 @@ void print_config_help(const char* program)
         << "  --log-level LEVEL   debug, info, warn, error\n"
         << "  --perf-log FILE     Append rotation performance records to CSV\n"
         << "  -h, --help          Show this help\n\n"
+        << "Autotune:\n"
+        << "  --autotune forces one fresh CPU + GPU calibration pass. Progress is printed\n"
+        << "  to the console, winners are validated/cached, and later normal starts load\n"
+        << "  the cached policies immediately without benchmarking.\n\n"
         << "CPU tuning modes:\n"
         << "  off      no CPU benchmark; mine immediately with configured/default settings\n"
         << "  simple   quick production tuning\n"
