@@ -26,6 +26,8 @@ struct GpuConfig {
     std::vector<int> devices{};
     int intensity{0};
     bool skip_validation{false};
+    // Explicit one-shot calibration. Normal production startup never benchmarks.
+    bool autotune{false};
 };
 
 struct LoggingConfig {
