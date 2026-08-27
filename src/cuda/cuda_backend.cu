@@ -20,10 +20,15 @@
 // It is generic CUDA and contains no device-name or compute-capability rules.
 #include "cuda/generated/cuda_backend_cn_cooperative.inc"
 
-// Production must begin mining immediately.  The old synthetic whole-GhostRider
-// startup benchmark remains out of the production path; optimization is driven
-// by live rotation data instead.
+// Keep the bounded scratchpad-class tuner helpers, but replace its public policy
+// entry point with the hardened wrapper below.  The wrapper verifies the actual
+// scratchpad requirement of every representative GhostRider rotation before a
+// calibration launch, so a missing light class can never run a heavy CN job at
+// an unsafe batch size.
+#define build_gpu_tune_policy build_gpu_tune_policy_unchecked
 #include "cuda/generated/cuda_backend_gpu_faststart.inc"
+#undef build_gpu_tune_policy
+#include "cuda/generated/cuda_backend_gpu_calibration_safe.inc"
 
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
