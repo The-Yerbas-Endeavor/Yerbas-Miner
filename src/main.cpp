@@ -1,6 +1,7 @@
 #include "config.h"
 #include "console.h"
 #include "console_quiet.h"
+#include "first_run.h"
 #include "miner.h"
 
 #include <cstdint>
@@ -36,10 +37,6 @@ struct StreamBufferRestore {
 
     ~StreamBufferRestore() noexcept
     {
-        // The color/quiet stream buffers are function-local statics. Restore
-        // the process-owned standard stream buffers before those statics are
-        // destroyed so std::ios shutdown cannot flush through a dangling
-        // streambuf pointer.
         try { std::cout.flush(); } catch (...) {}
         try { std::cerr.flush(); } catch (...) {}
         if (cout_buf != nullptr) std::cout.rdbuf(cout_buf);
@@ -120,7 +117,8 @@ int main(int argc, char** argv)
               << std::flush;
 
     try {
-        const auto config = yerbas::load_config(argc, argv);
+        auto config = yerbas::load_config(argc, argv);
+        yerbas::first_run::apply(config);
         if (!config.logging.perf_csv.empty()) {
             yerbas::console::set_perf_csv_path(config.logging.perf_csv);
             std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
