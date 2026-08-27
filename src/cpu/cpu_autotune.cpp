@@ -328,29 +328,38 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | metric=end-to-end H/s\n";
 
     TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, 0.0, false, false};
+    std::size_t plan_index = 0;
     for (const auto& plan : plans) {
         if (stopped(stop)) {
             best.interrupted = true;
             return best;
         }
+        ++plan_index;
+        std::cout << "[CPU tune] baseline " << plan_index << '/' << plans.size()
+                  << " | workers=" << plan.workers
+                  << " | batch=" << plan.batch
+                  << " | testing..." << std::flush;
         const double hps = benchmark_plan(plan, scalar_widths, stop);
-        if (env_enabled("YERBAS_DIAGNOSTICS")) {
-            std::cout << "[CPU baseline] workers=" << plan.workers
-                      << " | batch=" << plan.batch
-                      << " | " << std::fixed << std::setprecision(2) << hps
-                      << " H/s" << std::defaultfloat << '\n';
-        }
         if (hps > best.throughput_hps) {
             best.threads = plan.workers;
             best.batch = plan.batch;
             best.throughput_hps = hps;
         }
+        std::cout << " done | " << std::fixed << std::setprecision(2) << hps
+                  << " H/s | best=" << best.throughput_hps << " H/s"
+                  << std::defaultfloat << '\n';
     }
 
     if (stopped(stop)) {
         best.interrupted = true;
         return best;
     }
+
+    std::cout << "[CPU tune] baseline search complete"
+              << " | workers=" << best.threads
+              << " | batch=" << best.batch
+              << " | throughput=" << std::fixed << std::setprecision(2)
+              << best.throughput_hps << " H/s" << std::defaultfloat << '\n';
 
     const Plan selected_plan{best.threads, best.batch};
     const auto variant_headers = headers_by_cn_variant();
@@ -361,28 +370,43 @@ TuneResult production_autotune(unsigned int hardware_threads,
             best.interrupted = true;
             return best;
         }
+        const char* variant_name = ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant));
+        std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
+                  << " | " << variant_name << " | testing 1/2/4\n";
         const double baseline_hps = benchmark_header(selected_plan, widths, variant_headers[variant], stop);
         unsigned int selected_width = widths[variant];
         double selected_hps = baseline_hps;
+        std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
+                  << " | " << variant_name << " | width=1 | "
+                  << std::fixed << std::setprecision(2) << baseline_hps << " H/s"
+                  << std::defaultfloat << '\n';
         for (const unsigned int candidate_width : {2U, 4U}) {
             CnWidthPolicy candidate = widths;
             candidate[variant] = candidate_width;
             const double hps = benchmark_header(selected_plan, candidate, variant_headers[variant], stop);
+            std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
+                      << " | " << variant_name << " | width=" << candidate_width
+                      << " | " << std::fixed << std::setprecision(2) << hps << " H/s"
+                      << std::defaultfloat << '\n';
             if (hps > selected_hps * kWidthRequiredGain) {
                 selected_hps = hps;
                 selected_width = candidate_width;
             }
         }
         widths[variant] = selected_width;
-        std::cout << "[CPU CN width] " << ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant))
+        std::cout << "[CPU CN width] " << variant_name
                   << " | selected=" << selected_width
                   << " | baseline=" << std::fixed << std::setprecision(2) << baseline_hps
                   << " H/s | best=" << selected_hps << " H/s"
                   << std::defaultfloat << '\n';
     }
 
+    std::cout << "[CPU tune] final validation | end-to-end throughput + parity..." << std::flush;
     const double tuned_hps = benchmark_plan(selected_plan, widths, stop);
     const bool parity_ok = parity_width_policy(widths);
+    std::cout << " done | throughput=" << std::fixed << std::setprecision(2) << tuned_hps
+              << " H/s | parity=" << (parity_ok ? "PASS" : "FAIL")
+              << std::defaultfloat << '\n';
     const bool useful = parity_ok && tuned_hps > best.throughput_hps * 1.01;
     if (useful) {
         best.cn_widths = widths;
@@ -394,7 +418,9 @@ TuneResult production_autotune(unsigned int hardware_threads,
     }
 
     set_runtime_cn_widths(best.cn_widths);
+    std::cout << "[CPU tune] saving calibration cache..." << std::flush;
     save_cache(path, best);
+    std::cout << " done\n";
     std::cout << "[CPU tune] selected"
               << " | workers=" << best.threads
               << " | batch=" << best.batch
