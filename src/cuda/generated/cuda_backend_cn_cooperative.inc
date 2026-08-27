@@ -1,17 +1,15 @@
-// Production cooperative CryptoNight loop.
+// Production cooperative CryptoNight pipeline.
 //
-// CryptoNight v1 is dependency-heavy. A one-thread-per-hash loop leaves a
-// single CUDA lane carrying the complete 128-bit AES/multiply chain. This
-// implementation distributes each hash across four adjacent CUDA lanes, one
-// 32-bit word per lane, and uses sub-warp shuffles only for dependent values.
-// The second dependent scratchpad access is also distributed across all four
-// lanes so its 128-bit load/store traffic is naturally coalesced. The 64x64
-// multiply remains on one lane because it is a true serial dependency.
+// CryptoNight v1 contains three expensive phases.  The dependency-heavy memory
+// loop uses four adjacent CUDA lanes per hash.  Setup and finalization contain
+// eight independent 16-byte AES chains, so those phases use eight adjacent CUDA
+// lanes per hash: one lane per AES block.  This preserves the exact CryptoNight
+// byte order while exposing the natural block-level parallelism that the scalar
+// one-thread-per-hash setup/final kernels leave unused.
 //
 // The design is generic CUDA: no GPU model or compute-capability selection is
-// used. This is intentionally one production implementation, not another
-// versioned experiment family. Setup/final remain on the proven split-CN
-// kernels; the whole-GhostRider parity gate validates the complete pipeline.
+// used.  Whole-GhostRider startup parity remains the production correctness
+// gate for the complete pipeline.
 
 namespace {
 
@@ -26,6 +24,71 @@ __device__ __forceinline__ std::uint32_t cn_coop_mix_column(std::uint8_t a0,
     const std::uint8_t o2 = static_cast<std::uint8_t>(a2 ^ t ^ cryptonight::xtime(static_cast<std::uint8_t>(a2 ^ a3)));
     const std::uint8_t o3 = static_cast<std::uint8_t>(a3 ^ t ^ cryptonight::xtime(static_cast<std::uint8_t>(a3 ^ a0)));
     return cryptonight::pack4(o0, o1, o2, o3);
+}
+
+template <std::uint8_t VariantIndex, bool UseTTable = false>
+__global__ void cryptonight_setup_stage_cooperative8(std::uint8_t* states,
+                                                      std::size_t count,
+                                                      std::uint8_t* scratchpads,
+                                                      cryptonight::SplitContext* contexts)
+{
+    __shared__ std::uint32_t aes_tables[1024];
+    if constexpr (UseTTable) {
+        cryptonight::init_shared_aes_ttables(aes_tables);
+        __syncthreads();
+    }
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t init_rounds = cfg.page_size / 128U;
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int lane = warp_lane & 7U;
+    const unsigned int base = warp_lane & ~7U;
+    const unsigned int group = global_thread >> 3U;
+    if (group >= count) return;
+    const unsigned int mask = 0xFFU << base;
+
+    std::uint8_t* state = states + static_cast<std::size_t>(group) * kStateBytes;
+    std::uint8_t* scratch = scratchpads + static_cast<std::size_t>(group) * cfg.page_size;
+    auto& ctx = contexts[group];
+
+    // Keccak and A/B/tweak derivation are true per-hash work.  One lane performs
+    // them once, then the subgroup fans out over the eight independent AES
+    // chains that fill the scratchpad.
+    if (lane == 0U) {
+        cryptonight::keccak1600(state, kStateBytes, ctx.state);
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            ctx.a[i] = static_cast<std::uint8_t>(ctx.state[i] ^ ctx.state[32 + i]);
+            ctx.b[i] = static_cast<std::uint8_t>(ctx.state[16 + i] ^ ctx.state[48 + i]);
+        }
+        ctx.tweak = cryptonight::cn_load64(state + 35) ^
+                    cryptonight::cn_load64_aligned(ctx.state + 192);
+    }
+    __syncwarp(mask);
+
+    alignas(16) std::uint8_t text[16];
+    #pragma unroll
+    for (int i = 0; i < 16; ++i)
+        text[i] = ctx.state[64 + static_cast<int>(lane) * 16 + i];
+
+    // Key expansion is inexpensive relative to thousands of AES pseudo-rounds;
+    // duplicating it per cooperating lane avoids shared-memory key traffic and
+    // keeps each independent AES chain self-contained.
+    alignas(16) std::uint8_t expanded[240];
+    cryptonight::aes256_expand_key(ctx.state, expanded);
+
+    #pragma unroll 1
+    for (std::size_t round = 0; round < init_rounds; ++round) {
+        if constexpr (UseTTable)
+            cryptonight::aes_pseudo_round_ttable(text, expanded, aes_tables);
+        else
+            cryptonight::aes_pseudo_round(text, expanded);
+
+        std::uint8_t* out = scratch + round * 128U + static_cast<std::size_t>(lane) * 16U;
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) out[i] = text[i];
+    }
 }
 
 template <std::uint8_t VariantIndex>
@@ -82,8 +145,6 @@ __global__ void cryptonight_loop_stage_cooperative(std::size_t count,
         const std::uint32_t j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
         std::uint8_t* slot2 = scratch + static_cast<std::size_t>(j) * 16U;
 
-        // Four adjacent lanes issue one naturally coalesced 128-bit read.
-        // lane0/1 form t0, lane2/3 form t1.
         const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
         const std::uint32_t t0_lo = __shfl_sync(mask, t_word, base);
         const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
@@ -117,8 +178,6 @@ __global__ void cryptonight_loop_stage_cooperative(std::size_t count,
         na1_lo = __shfl_sync(mask, na1_lo, base);
         na1_hi = __shfl_sync(mask, na1_hi, base);
 
-        // Four adjacent lanes issue one naturally coalesced 128-bit write.
-        // The variant tweak applies only to the stored high 64-bit half.
         std::uint32_t store_word = 0U;
         if (lane == 0U) store_word = na0_lo;
         else if (lane == 1U) store_word = na0_hi;
@@ -126,13 +185,74 @@ __global__ void cryptonight_loop_stage_cooperative(std::size_t count,
         else store_word = na1_hi ^ tweak_hi;
         reinterpret_cast<std::uint32_t*>(slot2)[lane] = store_word;
 
-        // State update uses the untweaked na0/na1 values XOR the original t0/t1.
         const std::uint32_t na_word = lane == 0U ? na0_lo :
                                       lane == 1U ? na0_hi :
                                       lane == 2U ? na1_lo : na1_hi;
         aw = na_word ^ t_word;
         bw = cw;
         __syncwarp(mask);
+    }
+}
+
+template <std::uint8_t VariantIndex, bool UseTTable = false>
+__global__ void cryptonight_final_stage_cooperative8(std::uint8_t* states,
+                                                      std::size_t count,
+                                                      std::uint8_t* scratchpads,
+                                                      cryptonight::SplitContext* contexts)
+{
+    __shared__ std::uint32_t aes_tables[1024];
+    if constexpr (UseTTable) {
+        cryptonight::init_shared_aes_ttables(aes_tables);
+        __syncthreads();
+    }
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t init_rounds = cfg.page_size / 128U;
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int lane = warp_lane & 7U;
+    const unsigned int base = warp_lane & ~7U;
+    const unsigned int group = global_thread >> 3U;
+    if (group >= count) return;
+    const unsigned int mask = 0xFFU << base;
+
+    std::uint8_t* state = states + static_cast<std::size_t>(group) * kStateBytes;
+    std::uint8_t* scratch = scratchpads + static_cast<std::size_t>(group) * cfg.page_size;
+    auto& ctx = contexts[group];
+
+    alignas(16) std::uint8_t text[16];
+    #pragma unroll
+    for (int i = 0; i < 16; ++i)
+        text[i] = ctx.state[64 + static_cast<int>(lane) * 16 + i];
+
+    alignas(16) std::uint8_t expanded[240];
+    cryptonight::aes256_expand_key(ctx.state + 32, expanded);
+
+    #pragma unroll 1
+    for (std::size_t round = 0; round < init_rounds; ++round) {
+        const std::uint8_t* in = scratch + round * 128U + static_cast<std::size_t>(lane) * 16U;
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) text[i] ^= in[i];
+
+        if constexpr (UseTTable)
+            cryptonight::aes_pseudo_round_ttable(text, expanded, aes_tables);
+        else
+            cryptonight::aes_pseudo_round(text, expanded);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 16; ++i)
+        ctx.state[64 + static_cast<int>(lane) * 16 + i] = text[i];
+    __syncwarp(mask);
+
+    if (lane == 0U) {
+        cryptonight::keccak_permute_state(ctx.state);
+        std::uint8_t digest[32];
+        cryptonight::dispatch_extra_hash(static_cast<std::uint8_t>(ctx.state[0] & 3U), ctx.state, digest);
+        #pragma unroll
+        for (int i = 0; i < 32; ++i) state[i] = digest[i];
+        #pragma unroll
+        for (int i = 32; i < 64; ++i) state[i] = 0;
     }
 }
 
@@ -144,24 +264,28 @@ void launch_split_cryptonight_variant_production(cudaStream_t stream,
                                                   cryptonight::SplitContext* contexts,
                                                   const CnGeometry& geometry)
 {
-    const int setup_threads = geometry.setup_threads;
-    const int final_threads = geometry.final_threads;
-    const int setup_blocks = static_cast<int>((count + static_cast<std::size_t>(setup_threads) - 1U) /
-                                              static_cast<std::size_t>(setup_threads));
-    const int final_blocks = static_cast<int>((count + static_cast<std::size_t>(final_threads) - 1U) /
-                                              static_cast<std::size_t>(final_threads));
-
-    if (geometry.aes_backend == 1)
-        cryptonight_setup_stage<VariantIndex, true><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    else
-        cryptonight_setup_stage<VariantIndex, false><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative setup launch failed");
-
     int device_id = 0;
     cudaDeviceProp props{};
     check_cuda(cudaGetDevice(&device_id), "cudaGetDevice cooperative CN failed");
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties cooperative CN failed");
-    const int warp = std::max(4, props.warpSize);
+    const int warp = std::max(32, props.warpSize);
+
+    // Eight lanes per hash for the eight independent 16-byte AES chains.
+    int phase_threads = std::min(props.maxThreadsPerBlock, 128);
+    phase_threads = (phase_threads / warp) * warp;
+    phase_threads = std::max(warp, phase_threads);
+    const std::size_t phase_total_threads = count * 8U;
+    const int phase_blocks = static_cast<int>((phase_total_threads + static_cast<std::size_t>(phase_threads) - 1U) /
+                                              static_cast<std::size_t>(phase_threads));
+
+    if (geometry.aes_backend == 1)
+        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    else
+        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
+
     int cooperative_threads = std::max(warp, geometry.loop_threads * 4);
     cooperative_threads = std::min(cooperative_threads, props.maxThreadsPerBlock);
     cooperative_threads = (cooperative_threads / warp) * warp;
@@ -174,10 +298,12 @@ void launch_split_cryptonight_variant_production(cudaStream_t stream,
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative loop launch failed");
 
     if (geometry.aes_backend == 1)
-        cryptonight_final_stage<VariantIndex, true><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
+        cryptonight_final_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
     else
-        cryptonight_final_stage<VariantIndex, false><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative final launch failed");
+        cryptonight_final_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
 }
 
 } // anonymous namespace
