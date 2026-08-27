@@ -18,8 +18,9 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuPolicyRevision = 3;
+constexpr int kCpuPolicyRevision = 4;
 constexpr double kWidthRequiredGain = 1.02;
+constexpr double kWholePlanWidthRequiredGain = 1.005;
 
 bool env_enabled(const char* name)
 {
@@ -364,6 +365,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
     const Plan selected_plan{best.threads, best.batch};
     const auto variant_headers = headers_by_cn_variant();
     CnWidthPolicy widths = scalar_widths;
+    double whole_plan_hps = best.throughput_hps;
 
     for (std::size_t variant = 0; variant < widths.size(); ++variant) {
         if (stopped(stop)) {
@@ -377,10 +379,11 @@ TuneResult production_autotune(unsigned int hardware_threads,
         unsigned int selected_width = widths[variant];
         double selected_hps = baseline_hps;
         std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
-                  << " | " << variant_name << " | width=1 | "
+                  << " | " << variant_name << " | width=" << widths[variant] << " | "
                   << std::fixed << std::setprecision(2) << baseline_hps << " H/s"
                   << std::defaultfloat << '\n';
         for (const unsigned int candidate_width : {2U, 4U}) {
+            if (candidate_width == widths[variant]) continue;
             CnWidthPolicy candidate = widths;
             candidate[variant] = candidate_width;
             const double hps = benchmark_header(selected_plan, candidate, variant_headers[variant], stop);
@@ -393,11 +396,34 @@ TuneResult production_autotune(unsigned int hardware_threads,
                 selected_width = candidate_width;
             }
         }
-        widths[variant] = selected_width;
+
+        if (selected_width != widths[variant]) {
+            CnWidthPolicy candidate = widths;
+            candidate[variant] = selected_width;
+            std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
+                      << " | " << variant_name << " | whole-GhostRider confirmation..." << std::flush;
+            const double candidate_whole_hps = benchmark_plan(selected_plan, candidate, stop);
+            const bool parity_ok = parity_width_policy(candidate);
+            const double gain_pct = whole_plan_hps > 0.0
+                ? ((candidate_whole_hps / whole_plan_hps) - 1.0) * 100.0 : 0.0;
+            const bool promote = parity_ok && candidate_whole_hps > whole_plan_hps * kWholePlanWidthRequiredGain;
+            std::cout << " done | " << std::fixed << std::setprecision(2)
+                      << candidate_whole_hps << " H/s | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct
+                      << "% | parity=" << (parity_ok ? "PASS" : "FAIL")
+                      << " | " << (promote ? "promote" : "reject")
+                      << std::defaultfloat << '\n';
+            if (promote) {
+                widths = candidate;
+                whole_plan_hps = candidate_whole_hps;
+            } else {
+                selected_width = widths[variant];
+            }
+        }
+
         std::cout << "[CPU CN width] " << variant_name
-                  << " | selected=" << selected_width
-                  << " | baseline=" << std::fixed << std::setprecision(2) << baseline_hps
-                  << " H/s | best=" << selected_hps << " H/s"
+                  << " | selected=" << widths[variant]
+                  << " | local-best=" << std::fixed << std::setprecision(2) << selected_hps << " H/s"
+                  << " | whole-GR=" << whole_plan_hps << " H/s"
                   << std::defaultfloat << '\n';
     }
 
@@ -407,11 +433,11 @@ TuneResult production_autotune(unsigned int hardware_threads,
     std::cout << " done | throughput=" << std::fixed << std::setprecision(2) << tuned_hps
               << " H/s | parity=" << (parity_ok ? "PASS" : "FAIL")
               << std::defaultfloat << '\n';
-    const bool useful = parity_ok && tuned_hps > best.throughput_hps * 1.01;
-    if (useful) {
+
+    if (parity_ok && tuned_hps >= best.throughput_hps * 0.995) {
         best.cn_widths = widths;
         best.lanes = max_width(widths);
-        best.throughput_hps = tuned_hps;
+        best.throughput_hps = std::max(best.throughput_hps, tuned_hps);
     } else {
         best.cn_widths = scalar_widths;
         best.lanes = 1U;
@@ -430,7 +456,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | parity=" << (parity_ok ? "PASS" : "FAIL-scalar")
               << " | throughput=" << std::fixed << std::setprecision(2)
               << best.throughput_hps << " H/s"
-              << " | cache=cpu-policy-v3" << std::defaultfloat << '\n';
+              << " | cache=cpu-policy-v4" << std::defaultfloat << '\n';
     return best;
 }
 
