@@ -1,0 +1,159 @@
+// Sparse production CryptoNight phase profiling.
+//
+// This wrapper launches the exact same generic cooperative production kernels
+// as cuda_backend_cn_cooperative.inc.  When YERBAS_DIAGNOSTICS=1 is set, a
+// small fraction of CN launches receive CUDA event boundaries around setup,
+// memory-loop and finalization.  Normal production launches take the same path
+// without event creation or synchronization.
+
+namespace {
+
+constexpr int kCnPhaseProfileMaxDevices = 32;
+static std::array<std::array<std::uint64_t, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_launches{};
+static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_setup_ms{};
+static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_loop_ms{};
+static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_final_ms{};
+static std::array<std::array<std::uint64_t, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_samples{};
+
+inline bool cn_phase_diagnostics_enabled()
+{
+    const char* value = std::getenv("YERBAS_DIAGNOSTICS");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+template <std::uint8_t VariantIndex>
+void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
+                                                     std::uint8_t* states,
+                                                     std::size_t count,
+                                                     std::uint8_t* scratchpads,
+                                                     cryptonight::SplitContext* contexts,
+                                                     const CnGeometry& geometry)
+{
+    static_assert(VariantIndex < 6, "invalid CryptoNight variant");
+
+    int device_id = 0;
+    cudaDeviceProp props{};
+    check_cuda(cudaGetDevice(&device_id), "cudaGetDevice CN phase profile failed");
+    check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase profile failed");
+    const int warp = std::max(32, props.warpSize);
+
+    int phase_threads = std::min(props.maxThreadsPerBlock, 128);
+    phase_threads = (phase_threads / warp) * warp;
+    phase_threads = std::max(warp, phase_threads);
+    const std::size_t phase_total_threads = count * 8U;
+    const int phase_blocks = static_cast<int>((phase_total_threads + static_cast<std::size_t>(phase_threads) - 1U) /
+                                              static_cast<std::size_t>(phase_threads));
+
+    int cooperative_threads = std::max(warp, geometry.loop_threads * 4);
+    cooperative_threads = std::min(cooperative_threads, props.maxThreadsPerBlock);
+    cooperative_threads = (cooperative_threads / warp) * warp;
+    cooperative_threads = std::max(warp, cooperative_threads);
+    const std::size_t total_threads = count * 4U;
+    const int cooperative_blocks = static_cast<int>((total_threads + static_cast<std::size_t>(cooperative_threads) - 1U) /
+                                                    static_cast<std::size_t>(cooperative_threads));
+
+    bool sample = false;
+    if (device_id >= 0 && device_id < kCnPhaseProfileMaxDevices && cn_phase_diagnostics_enabled()) {
+        auto& launches = g_cn_phase_launches[device_id][VariantIndex];
+        ++launches;
+        // One sample per eight launches of each variant keeps profiling useful
+        // without synchronizing every production CN stage.
+        sample = (launches % 8U) == 0U;
+    }
+
+    cudaEvent_t e0{}, e1{}, e2{}, e3{};
+    if (sample) {
+        check_cuda(cudaEventCreateWithFlags(&e0, cudaEventDefault), "cudaEventCreate CN phase setup start failed");
+        check_cuda(cudaEventCreateWithFlags(&e1, cudaEventDefault), "cudaEventCreate CN phase setup stop failed");
+        check_cuda(cudaEventCreateWithFlags(&e2, cudaEventDefault), "cudaEventCreate CN phase loop stop failed");
+        check_cuda(cudaEventCreateWithFlags(&e3, cudaEventDefault), "cudaEventCreate CN phase final stop failed");
+        check_cuda(cudaEventRecord(e0, stream), "cudaEventRecord CN phase setup start failed");
+    }
+
+    if (geometry.aes_backend == 1)
+        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    else
+        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
+    if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
+
+    cryptonight_loop_stage_cooperative<VariantIndex><<<cooperative_blocks, cooperative_threads, 0, stream>>>(
+        count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative loop launch failed");
+    if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
+
+    if (geometry.aes_backend == 1)
+        cryptonight_final_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    else
+        cryptonight_final_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
+
+    if (!sample) return;
+
+    check_cuda(cudaEventRecord(e3, stream), "cudaEventRecord CN phase final stop failed");
+    check_cuda(cudaEventSynchronize(e3), "cudaEventSynchronize CN phase profile failed");
+    float setup_ms = 0.0F;
+    float loop_ms = 0.0F;
+    float final_ms = 0.0F;
+    check_cuda(cudaEventElapsedTime(&setup_ms, e0, e1), "cudaEventElapsedTime CN setup failed");
+    check_cuda(cudaEventElapsedTime(&loop_ms, e1, e2), "cudaEventElapsedTime CN loop failed");
+    check_cuda(cudaEventElapsedTime(&final_ms, e2, e3), "cudaEventElapsedTime CN final failed");
+    cudaEventDestroy(e3);
+    cudaEventDestroy(e2);
+    cudaEventDestroy(e1);
+    cudaEventDestroy(e0);
+
+    auto& samples = g_cn_phase_samples[device_id][VariantIndex];
+    ++samples;
+    g_cn_phase_setup_ms[device_id][VariantIndex] += static_cast<double>(setup_ms);
+    g_cn_phase_loop_ms[device_id][VariantIndex] += static_cast<double>(loop_ms);
+    g_cn_phase_final_ms[device_id][VariantIndex] += static_cast<double>(final_ms);
+
+    const float total_ms = setup_ms + loop_ms + final_ms;
+    const float setup_pct = total_ms > 0.0F ? setup_ms * 100.0F / total_ms : 0.0F;
+    const float loop_pct = total_ms > 0.0F ? loop_ms * 100.0F / total_ms : 0.0F;
+    const float final_pct = total_ms > 0.0F ? final_ms * 100.0F / total_ms : 0.0F;
+    const double avg_setup = g_cn_phase_setup_ms[device_id][VariantIndex] / static_cast<double>(samples);
+    const double avg_loop = g_cn_phase_loop_ms[device_id][VariantIndex] / static_cast<double>(samples);
+    const double avg_final = g_cn_phase_final_ms[device_id][VariantIndex] / static_cast<double>(samples);
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "[CUDA CN phase] GPU " << device_id
+              << " | " << cryptonight::config_value(VariantIndex).name
+              << " | batch=" << count
+              << " | setup=" << setup_ms << " ms (" << std::setprecision(1) << setup_pct << "%)"
+              << std::setprecision(3)
+              << " | loop=" << loop_ms << " ms (" << std::setprecision(1) << loop_pct << "%)"
+              << std::setprecision(3)
+              << " | final=" << final_ms << " ms (" << std::setprecision(1) << final_pct << "%)"
+              << std::setprecision(3)
+              << " | total=" << total_ms << " ms"
+              << " | samples=" << samples
+              << " | rolling=" << avg_setup << '/' << avg_loop << '/' << avg_final << " ms"
+              << std::defaultfloat << '\n';
+}
+
+void launch_split_cryptonight_phase_profiled(cudaStream_t stream,
+                                             std::uint8_t* states,
+                                             std::size_t count,
+                                             std::uint8_t variant,
+                                             std::uint8_t* scratchpads,
+                                             cryptonight::SplitContext* contexts,
+                                             const CnGeometry& geometry)
+{
+    switch (variant) {
+    case 0: launch_split_cryptonight_variant_phase_profiled<0>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 1: launch_split_cryptonight_variant_phase_profiled<1>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 2: launch_split_cryptonight_variant_phase_profiled<2>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 3: launch_split_cryptonight_variant_phase_profiled<3>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 4: launch_split_cryptonight_variant_phase_profiled<4>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 5: launch_split_cryptonight_variant_phase_profiled<5>(stream, states, count, scratchpads, contexts, geometry); break;
+    default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+    }
+}
+
+} // anonymous namespace
