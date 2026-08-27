@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 #include <utility>
@@ -59,6 +60,16 @@ void pause_before_exit()
     std::cin.get();
 }
 #endif
+
+void set_gpu_autotune_environment(bool enabled)
+{
+    if (!enabled) return;
+#ifdef _WIN32
+    _putenv_s("YERBAS_GPU_AUTOTUNE", "1");
+#else
+    setenv("YERBAS_GPU_AUTOTUNE", "1", 1);
+#endif
+}
 }
 
 Miner::Miner(AppConfig config)
@@ -110,6 +121,7 @@ int Miner::run()
     }
 
     cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
+    set_gpu_autotune_environment(config_.gpu.autotune);
 
     std::cout << "Yerbas Miner 0.5.2\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
@@ -126,6 +138,8 @@ int Miner::run()
               << " | tune " << config_.miner.cpu_tune << "\n";
     print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
+    if (config_.gpu.autotune)
+        std::cout << "GPU calibration: requested | bounded one-shot autotune\n";
 
     stratum::Client stratum_client(config_);
     if (stop_requested()) {
