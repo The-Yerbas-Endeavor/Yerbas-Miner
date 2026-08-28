@@ -16,40 +16,23 @@
 #undef launch_split_cryptonight_variant
 #undef autotune_cn_geometries
 
-// Keep the original cooperative setup/loop/final kernels compiled as a parity
-// reference. Production setup/final use the compact shared-key variants below.
 #include "cuda/generated/cuda_backend_cn_cooperative.inc"
 #include "cuda/generated/cuda_backend_cn_sharedkey.inc"
-
-// Two-lane memory-loop candidate plus exact output parity gate.
 #include "cuda/generated/cuda_backend_cn_2lane.inc"
-
-// After parity, choose the production cooperation width and block size from the
-// actual kernel occupancy limits and a small timing sample of real scratchpad
-// state. This lets each GPU/variant retain four lanes when two lanes are tied or
-// slower instead of forcing one loop width globally.
+#include "cuda/generated/cuda_backend_cn_ttable_loop.inc"
 #include "cuda/generated/cuda_backend_cn_residency.inc"
 
-// Sparse production diagnostics around the exact same production kernels.
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
 #include "cuda/generated/cuda_backend_cn_phase_profile.inc"
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
 
-// Keep the bounded scratchpad-class tuner helpers, but replace its public policy
-// entry point with the hardened wrapper below.  The wrapper verifies the actual
-// scratchpad requirement of every representative GhostRider rotation before a
-// calibration launch, so a missing light class can never run a heavy CN job at
-// an unsafe batch size.
 #define build_gpu_tune_policy build_gpu_tune_policy_unchecked
 #include "cuda/generated/cuda_backend_gpu_faststart.inc"
 #undef build_gpu_tune_policy
 #include "cuda/generated/cuda_backend_gpu_calibration_safe.inc"
 
-// Route production scans through the phase-profile wrapper. Setup/final use the
-// shared-key 8-lane path; the memory loop is parity-gated and then occupancy/
-// timing selected independently for every GPU and CryptoNight variant.
 #define launch_split_cryptonight launch_split_cryptonight_phase_profiled
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
