@@ -21,13 +21,16 @@
 #include "cuda/generated/cuda_backend_cn_cooperative.inc"
 #include "cuda/generated/cuda_backend_cn_sharedkey.inc"
 
-// Two-lane memory-loop candidate. This file also owns the one-time direct parity
-// gate against the current four-lane production reference.
+// Two-lane memory-loop candidate plus exact output parity gate.
 #include "cuda/generated/cuda_backend_cn_2lane.inc"
 
+// After parity, choose the production cooperation width and block size from the
+// actual kernel occupancy limits and a small timing sample of real scratchpad
+// state. This lets each GPU/variant retain four lanes when two lanes are tied or
+// slower instead of forcing one loop width globally.
+#include "cuda/generated/cuda_backend_cn_residency.inc"
+
 // Sparse production diagnostics around the exact same production kernels.
-// Rename setup/final symbols consumed by the wrapper to the compact shared-key
-// variants; the loop is selected by the direct parity gate inside the wrapper.
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
 #include "cuda/generated/cuda_backend_cn_phase_profile.inc"
@@ -45,8 +48,8 @@
 #include "cuda/generated/cuda_backend_gpu_calibration_safe.inc"
 
 // Route production scans through the phase-profile wrapper. Setup/final use the
-// shared-key 8-lane path; the memory loop promotes from 4 lanes to 2 only after
-// exact per-GPU/per-variant output parity succeeds.
+// shared-key 8-lane path; the memory loop is parity-gated and then occupancy/
+// timing selected independently for every GPU and CryptoNight variant.
 #define launch_split_cryptonight launch_split_cryptonight_phase_profiled
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
