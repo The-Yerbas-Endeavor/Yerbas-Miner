@@ -16,14 +16,20 @@
 #undef launch_split_cryptonight_variant
 #undef autotune_cn_geometries
 
-// Production CryptoNight uses cooperative setup/loop/final kernels. It is
-// generic CUDA and contains no device-name or compute-capability rules.
+// Keep the original cooperative setup/loop/final kernels compiled as a parity
+// reference. Production setup/final are replaced below with shared-key variants;
+// the four-lane memory loop remains unchanged for this measured step.
 #include "cuda/generated/cuda_backend_cn_cooperative.inc"
+#include "cuda/generated/cuda_backend_cn_sharedkey.inc"
 
-// Sparse production diagnostics around the exact same cooperative kernels.
-// Normal launches do not create events; YERBAS_DIAGNOSTICS=1 samples setup,
-// loop and final separately so the next optimization is data-driven.
+// Sparse production diagnostics around the exact same production kernels.
+// Rename only the setup/final symbols consumed by the wrapper so the original
+// cooperative kernels remain available as an immediate correctness reference.
+#define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
+#define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
 #include "cuda/generated/cuda_backend_cn_phase_profile.inc"
+#undef cryptonight_final_stage_cooperative8
+#undef cryptonight_setup_stage_cooperative8
 
 // Keep the bounded scratchpad-class tuner helpers, but replace its public policy
 // entry point with the hardened wrapper below.  The wrapper verifies the actual
@@ -36,7 +42,8 @@
 #include "cuda/generated/cuda_backend_gpu_calibration_safe.inc"
 
 // Route production scans through the phase-profile wrapper. With diagnostics
-// disabled this is the same 8-lane setup / 4-lane loop / 8-lane final path.
+// disabled it launches shared-key 8-lane setup / 4-lane loop / shared-key
+// 8-lane final with no event creation.
 #define launch_split_cryptonight launch_split_cryptonight_phase_profiled
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
