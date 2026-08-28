@@ -192,6 +192,28 @@ inline void capture_perf_line(const std::string& raw_line)
         return;
     }
 
+    if (line.find("[CUDA CN phase] GPU ") != std::string::npos) {
+        const auto gpu_pos = line.find("GPU ");
+        const auto gpu_end = line.find(" |", gpu_pos);
+        const std::string source = gpu_pos == std::string::npos ? "GPU" : line.substr(gpu_pos, gpu_end - gpu_pos);
+
+        std::string cn;
+        if (gpu_end != std::string::npos) {
+            const auto cn_start = gpu_end + 3U;
+            const auto cn_end = line.find(" |", cn_start);
+            if (cn_end != std::string::npos) cn = line.substr(cn_start, cn_end - cn_start);
+        }
+
+        const std::string total_ms = field_after(line, "total=", " ms");
+        append_perf_row("cuda_cn_phase", current_rotation(), cn, source, "", total_ms, "setup",
+                        field_after(line, "setup=", " ms"), "", line);
+        append_perf_row("cuda_cn_phase", current_rotation(), cn, source, "", total_ms, "loop",
+                        field_after(line, "loop=", " ms"), "", line);
+        append_perf_row("cuda_cn_phase", current_rotation(), cn, source, "", total_ms, "final",
+                        field_after(line, "final=", " ms"), "", line);
+        return;
+    }
+
     if (line.find("[CPU stage profile]") != std::string::npos) {
         append_perf_row("cpu_stage_profile", field_after(line, "rotation=", " | "), "", "CPU", "",
                         field_after(line, "total=", " ms/hash"), field_after(line, "hot=", " "), "", field_after(line, "(", "%)"), line);
@@ -223,6 +245,7 @@ inline bool suppress_normal_line(const std::string& line)
     if (line.find("[CUDA stage]") != std::string::npos) return true;
     if (line.find("GhostRider rolling stage profile") != std::string::npos) return true;
     if (line.find("[CUDA CN runtime]") != std::string::npos) return true;
+    if (line.find("[CUDA CN phase]") != std::string::npos) return true;
     if (line.find("] candidate | job=") != std::string::npos) return true;
     if (line.find("[CUDA CN profile]") != std::string::npos) return true;
     if (line.find("[CPU CN profile]") != std::string::npos) return true;
