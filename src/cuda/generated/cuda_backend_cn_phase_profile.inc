@@ -3,7 +3,7 @@
 // Setup/final use the compact shared-key cooperative kernels. The memory loop is
 // first parity-gated against the four-lane reference, then selected per GPU and
 // variant from kernel occupancy plus a timing sample of cloned real scratchpad
-// state. Diagnostics report the resulting production loop width.
+// state. Diagnostics report the resulting production loop architecture.
 
 namespace {
 
@@ -60,11 +60,9 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     }
 
     if (geometry.aes_backend == 1)
-        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(
-            states, count, scratchpads, contexts);
+        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
     else
-        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(
-            states, count, scratchpads, contexts);
+        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
     if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
 
@@ -75,27 +73,20 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
 
     if (geometry.aes_backend == 1)
-        cryptonight_final_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(
-            states, count, scratchpads, contexts);
+        cryptonight_final_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
     else
-        cryptonight_final_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(
-            states, count, scratchpads, contexts);
+        cryptonight_final_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
 
     if (!sample) return;
 
     check_cuda(cudaEventRecord(e3, stream), "cudaEventRecord CN phase final stop failed");
     check_cuda(cudaEventSynchronize(e3), "cudaEventSynchronize CN phase profile failed");
-    float setup_ms = 0.0F;
-    float loop_ms = 0.0F;
-    float final_ms = 0.0F;
+    float setup_ms = 0.0F, loop_ms = 0.0F, final_ms = 0.0F;
     check_cuda(cudaEventElapsedTime(&setup_ms, e0, e1), "cudaEventElapsedTime CN setup failed");
     check_cuda(cudaEventElapsedTime(&loop_ms, e1, e2), "cudaEventElapsedTime CN loop failed");
     check_cuda(cudaEventElapsedTime(&final_ms, e2, e3), "cudaEventElapsedTime CN final failed");
-    cudaEventDestroy(e3);
-    cudaEventDestroy(e2);
-    cudaEventDestroy(e1);
-    cudaEventDestroy(e0);
+    cudaEventDestroy(e3); cudaEventDestroy(e2); cudaEventDestroy(e1); cudaEventDestroy(e0);
 
     auto& samples = g_cn_phase_samples[device_id][VariantIndex];
     ++samples;
@@ -116,7 +107,7 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
               << "[CUDA CN phase] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
-              << " | loop-mode=" << loop_mode << "-lane"
+              << " | loop-mode=" << cn_residency_mode_name(loop_mode)
               << " | setup=" << setup_ms << " ms (" << std::setprecision(1) << setup_pct << "%)"
               << std::setprecision(3)
               << " | loop=" << loop_ms << " ms (" << std::setprecision(1) << loop_pct << "%)"
