@@ -1,10 +1,9 @@
 // Sparse production CryptoNight phase profiling.
 //
-// This wrapper launches the exact same generic cooperative production kernels
-// as cuda_backend_cn_cooperative.inc.  When YERBAS_DIAGNOSTICS=1 is set, a
-// small fraction of CN launches receive CUDA event boundaries around setup,
-// memory-loop and finalization.  Normal production launches take the same path
-// without event creation or synchronization.
+// Setup/final use the compact shared-key cooperative kernels. The memory loop is
+// selected by launch_cn_loop_parity_gated(): the existing four-lane loop remains
+// authoritative until the two-lane candidate produces an exact finalized state
+// match for the same real post-setup hash on each GPU/variant pair.
 
 namespace {
 
@@ -44,20 +43,10 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     const int phase_blocks = static_cast<int>((phase_total_threads + static_cast<std::size_t>(phase_threads) - 1U) /
                                               static_cast<std::size_t>(phase_threads));
 
-    int cooperative_threads = std::max(warp, geometry.loop_threads * 4);
-    cooperative_threads = std::min(cooperative_threads, props.maxThreadsPerBlock);
-    cooperative_threads = (cooperative_threads / warp) * warp;
-    cooperative_threads = std::max(warp, cooperative_threads);
-    const std::size_t total_threads = count * 4U;
-    const int cooperative_blocks = static_cast<int>((total_threads + static_cast<std::size_t>(cooperative_threads) - 1U) /
-                                                    static_cast<std::size_t>(cooperative_threads));
-
     bool sample = false;
     if (device_id >= 0 && device_id < kCnPhaseProfileMaxDevices && cn_phase_diagnostics_enabled()) {
         auto& launches = g_cn_phase_launches[device_id][VariantIndex];
         ++launches;
-        // One sample per eight launches of each variant keeps profiling useful
-        // without synchronizing every production CN stage.
         sample = (launches % 8U) == 0U;
     }
 
@@ -79,9 +68,10 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
     if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
 
-    cryptonight_loop_stage_cooperative<VariantIndex><<<cooperative_blocks, cooperative_threads, 0, stream>>>(
-        count, scratchpads, contexts);
-    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative loop launch failed");
+    if (geometry.aes_backend == 1)
+        launch_cn_loop_parity_gated<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
+    else
+        launch_cn_loop_parity_gated<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
     if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
 
     if (geometry.aes_backend == 1)
@@ -120,11 +110,14 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     const double avg_setup = g_cn_phase_setup_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const double avg_loop = g_cn_phase_loop_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const double avg_final = g_cn_phase_final_ms[device_id][VariantIndex] / static_cast<double>(samples);
+    const int loop_mode = (device_id >= 0 && device_id < kCn2LaneMaxDevices)
+        ? g_cn2lane_parity[device_id][VariantIndex] : -1;
 
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN phase] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
+              << " | loop-mode=" << (loop_mode == 1 ? "2-lane" : "4-lane")
               << " | setup=" << setup_ms << " ms (" << std::setprecision(1) << setup_pct << "%)"
               << std::setprecision(3)
               << " | loop=" << loop_ms << " ms (" << std::setprecision(1) << loop_pct << "%)"
