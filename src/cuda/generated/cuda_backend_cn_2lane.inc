@@ -1,9 +1,10 @@
 // Two-lane CryptoNight memory-loop candidate with direct production parity gate.
 //
 // The existing four-lane loop remains the reference implementation. On first use
-// of each GPU/variant pair, one real post-setup hash is cloned, run through both
-// loops, finalized through the same production final kernel, and compared. The
-// two-lane path is promoted for that GPU/variant only after exact state parity.
+// of each GPU/variant pair, one real post-setup hash is cloned twice, run through
+// the reference and candidate loops independently, finalized through the same
+// production final kernel, and compared. The two-lane path is promoted only
+// after exact output parity for that GPU/variant.
 
 namespace {
 
@@ -30,8 +31,8 @@ __global__ void cryptonight_loop_stage_cooperative2(std::size_t count,
     std::uint8_t* scratch = scratchpads + static_cast<std::size_t>(group) * cfg.page_size;
     const auto& ctx = contexts[group];
 
-    // Each lane owns one 64-bit half of A/B. This halves the cooperation width
-    // while keeping the entire 128-bit state resident in registers.
+    // One lane owns each 64-bit half of A/B. This cuts the cooperation width in
+    // half while keeping the full 128-bit dependency state resident in registers.
     std::uint64_t a = reinterpret_cast<const std::uint64_t*>(ctx.a)[lane];
     std::uint64_t b = reinterpret_cast<const std::uint64_t*>(ctx.b)[lane];
     const std::uint64_t tweak = ctx.tweak;
@@ -42,36 +43,23 @@ __global__ void cryptonight_loop_stage_cooperative2(std::size_t count,
         const std::uint32_t index = static_cast<std::uint32_t>((a0 >> 4U) & address_mask);
         std::uint8_t* slot = scratch + static_cast<std::size_t>(index) * 16U;
 
-        // Load the full 128-bit slot cooperatively. Each lane owns one u64 half,
-        // then exchanges the half needed to form its AES output columns.
         const std::uint64_t s = reinterpret_cast<const std::uint64_t*>(slot)[lane];
-        const std::uint64_t so = __shfl_sync(mask, s, base + (lane ^ 1U));
-
+        const std::uint64_t other = __shfl_sync(mask, s, base + (lane ^ 1U));
         const std::uint8_t* sb = reinterpret_cast<const std::uint8_t*>(&s);
-        const std::uint8_t* ob = reinterpret_cast<const std::uint8_t*>(&so);
-        std::uint32_t cw0 = 0U;
-        std::uint32_t cw1 = 0U;
-        if (lane == 0U) {
-            cw0 = cn_coop_mix_column(
-                cryptonight::aes_sbox(sb[0]), cryptonight::aes_sbox(sb[5]),
-                cryptonight::aes_sbox(ob[2]), cryptonight::aes_sbox(ob[7])) ^
-                static_cast<std::uint32_t>(a);
-            cw1 = cn_coop_mix_column(
-                cryptonight::aes_sbox(sb[4]), cryptonight::aes_sbox(ob[1]),
-                cryptonight::aes_sbox(ob[6]), cryptonight::aes_sbox(sb[3])) ^
-                static_cast<std::uint32_t>(a >> 32U);
-        } else {
-            cw0 = cn_coop_mix_column(
-                cryptonight::aes_sbox(sb[0]), cryptonight::aes_sbox(sb[5]),
-                cryptonight::aes_sbox(ob[2]), cryptonight::aes_sbox(ob[7])) ^
-                static_cast<std::uint32_t>(a);
-            cw1 = cn_coop_mix_column(
-                cryptonight::aes_sbox(sb[4]), cryptonight::aes_sbox(ob[1]),
-                cryptonight::aes_sbox(ob[6]), cryptonight::aes_sbox(sb[3])) ^
-                static_cast<std::uint32_t>(a >> 32U);
-        }
-        const std::uint64_t c = static_cast<std::uint64_t>(cw0) |
-                                (static_cast<std::uint64_t>(cw1) << 32U);
+        const std::uint8_t* ob = reinterpret_cast<const std::uint8_t*>(&other);
+
+        // lane 0 computes AES output words 0/1; lane 1 computes words 2/3.
+        // The byte pattern is identical relative to each lane's own 64-bit half.
+        const std::uint32_t cw_lo = cn_coop_mix_column(
+            cryptonight::aes_sbox(sb[0]), cryptonight::aes_sbox(sb[5]),
+            cryptonight::aes_sbox(ob[2]), cryptonight::aes_sbox(ob[7])) ^
+            static_cast<std::uint32_t>(a);
+        const std::uint32_t cw_hi = cn_coop_mix_column(
+            cryptonight::aes_sbox(sb[4]), cryptonight::aes_sbox(ob[1]),
+            cryptonight::aes_sbox(ob[6]), cryptonight::aes_sbox(sb[3])) ^
+            static_cast<std::uint32_t>(a >> 32U);
+        const std::uint64_t c = static_cast<std::uint64_t>(cw_lo) |
+                                (static_cast<std::uint64_t>(cw_hi) << 32U);
 
         reinterpret_cast<std::uint64_t*>(slot)[lane] = c ^ b;
         __syncwarp(mask);
@@ -96,11 +84,8 @@ __global__ void cryptonight_loop_stage_cooperative2(std::size_t count,
         next0 = __shfl_sync(mask, next0, base);
         next1 = __shfl_sync(mask, next1, base);
 
-        const std::uint64_t store = lane == 0U ? next0 : (next1 ^ tweak);
-        reinterpret_cast<std::uint64_t*>(slot2)[lane] = store;
-
-        const std::uint64_t next = lane == 0U ? next0 : next1;
-        a = next ^ t;
+        reinterpret_cast<std::uint64_t*>(slot2)[lane] = lane == 0U ? next0 : (next1 ^ tweak);
+        a = (lane == 0U ? next0 : next1) ^ t;
         b = c;
         __syncwarp(mask);
     }
@@ -154,48 +139,56 @@ void launch_cn_loop_4lane_reference(cudaStream_t stream,
 
 template <std::uint8_t VariantIndex, bool UseTTable>
 bool cn_2lane_parity_once(cudaStream_t stream,
-                          std::uint8_t* states,
-                          std::uint8_t* scratchpads,
-                          cryptonight::SplitContext* contexts,
+                          const std::uint8_t* states,
+                          const std::uint8_t* scratchpads,
+                          const cryptonight::SplitContext* contexts,
                           const CnGeometry& geometry)
 {
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
-    std::uint8_t* ref_state = nullptr;
-    std::uint8_t* ref_scratch = nullptr;
-    cryptonight::SplitContext* ref_ctx = nullptr;
+    std::uint8_t *candidate_state = nullptr, *reference_state = nullptr;
+    std::uint8_t *candidate_scratch = nullptr, *reference_scratch = nullptr;
+    cryptonight::SplitContext *candidate_ctx = nullptr, *reference_ctx = nullptr;
 
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_state), kStateBytes), "cudaMalloc CN 2-lane parity state failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_scratch), cfg.page_size), "cudaMalloc CN 2-lane parity scratch failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN 2-lane parity context failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_state), kStateBytes), "cudaMalloc CN 2-lane parity candidate state failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&reference_state), kStateBytes), "cudaMalloc CN 2-lane parity reference state failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_scratch), cfg.page_size), "cudaMalloc CN 2-lane parity candidate scratch failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&reference_scratch), cfg.page_size), "cudaMalloc CN 2-lane parity reference scratch failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN 2-lane parity candidate context failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&reference_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN 2-lane parity reference context failed");
 
-    check_cuda(cudaMemcpyAsync(ref_state, states, kStateBytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane parity state failed");
-    check_cuda(cudaMemcpyAsync(ref_scratch, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane parity scratch failed");
-    check_cuda(cudaMemcpyAsync(ref_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane parity context failed");
+    check_cuda(cudaMemcpyAsync(candidate_state, states, kStateBytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane candidate state failed");
+    check_cuda(cudaMemcpyAsync(reference_state, states, kStateBytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane reference state failed");
+    check_cuda(cudaMemcpyAsync(candidate_scratch, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane candidate scratch failed");
+    check_cuda(cudaMemcpyAsync(reference_scratch, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane reference scratch failed");
+    check_cuda(cudaMemcpyAsync(candidate_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane candidate context failed");
+    check_cuda(cudaMemcpyAsync(reference_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN 2-lane reference context failed");
 
-    // Candidate runs on the real first hash; reference runs on the clone.
-    launch_cn_loop_2lane<VariantIndex>(stream, 1U, scratchpads, contexts, geometry);
-    launch_cn_loop_4lane_reference<VariantIndex>(stream, 1U, ref_scratch, ref_ctx, geometry);
+    launch_cn_loop_2lane<VariantIndex>(stream, 1U, candidate_scratch, candidate_ctx, geometry);
+    launch_cn_loop_4lane_reference<VariantIndex>(stream, 1U, reference_scratch, reference_ctx, geometry);
 
     cryptonight_final_stage_cooperative8_sharedkey<VariantIndex, UseTTable><<<1, 32, 0, stream>>>(
-        states, 1U, scratchpads, contexts);
+        candidate_state, 1U, candidate_scratch, candidate_ctx);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CN 2-lane parity candidate final failed");
     cryptonight_final_stage_cooperative8_sharedkey<VariantIndex, UseTTable><<<1, 32, 0, stream>>>(
-        ref_state, 1U, ref_scratch, ref_ctx);
+        reference_state, 1U, reference_scratch, reference_ctx);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CN 2-lane parity reference final failed");
 
     std::array<std::uint8_t, kStateBytes> candidate{};
     std::array<std::uint8_t, kStateBytes> reference{};
-    check_cuda(cudaMemcpyAsync(candidate.data(), states, kStateBytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN 2-lane parity candidate result failed");
-    check_cuda(cudaMemcpyAsync(reference.data(), ref_state, kStateBytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN 2-lane parity reference result failed");
+    check_cuda(cudaMemcpyAsync(candidate.data(), candidate_state, kStateBytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN 2-lane candidate result failed");
+    check_cuda(cudaMemcpyAsync(reference.data(), reference_state, kStateBytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN 2-lane reference result failed");
     check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CN 2-lane parity failed");
 
-    cudaFree(ref_ctx);
-    cudaFree(ref_scratch);
-    cudaFree(ref_state);
+    cudaFree(reference_ctx);
+    cudaFree(candidate_ctx);
+    cudaFree(reference_scratch);
+    cudaFree(candidate_scratch);
+    cudaFree(reference_state);
+    cudaFree(candidate_state);
     return candidate == reference;
 }
 
-template <std::uint8_t VariantIndex>
+template <std::uint8_t VariantIndex, bool UseTTable>
 void launch_cn_loop_parity_gated(cudaStream_t stream,
                                  std::uint8_t* states,
                                  std::size_t count,
@@ -205,24 +198,29 @@ void launch_cn_loop_parity_gated(cudaStream_t stream,
 {
     int device_id = 0;
     check_cuda(cudaGetDevice(&device_id), "cudaGetDevice CN 2-lane gate failed");
-    int* status = nullptr;
-    if (device_id >= 0 && device_id < kCn2LaneMaxDevices)
-        status = &g_cn2lane_parity[device_id][VariantIndex];
 
-    if (status != nullptr && *status == 1) {
+    int status = -1;
+    int* cached = nullptr;
+    if (device_id >= 0 && device_id < kCn2LaneMaxDevices) {
+        cached = &g_cn2lane_parity[device_id][VariantIndex];
+        status = *cached;
+    }
+
+    if (cached != nullptr && status == 0) {
+        const bool pass = cn_2lane_parity_once<VariantIndex, UseTTable>(
+            stream, states, scratchpads, contexts, geometry);
+        *cached = pass ? 1 : -1;
+        status = *cached;
+        std::cout << "[CUDA CN 2-lane parity] GPU " << device_id
+                  << " | " << cryptonight::config_value(VariantIndex).name
+                  << " | result=" << (pass ? "PASS" : "FAIL")
+                  << " | production=" << (pass ? "2-lane" : "4-lane") << '\n';
+    }
+
+    if (status == 1)
         launch_cn_loop_2lane<VariantIndex>(stream, count, scratchpads, contexts, geometry);
-        return;
-    }
-    if (status != nullptr && *status == -1) {
+    else
         launch_cn_loop_4lane_reference<VariantIndex>(stream, count, scratchpads, contexts, geometry);
-        return;
-    }
-
-    // Unknown: validate first hash exactly, then finish the remainder using the
-    // selected implementation. The first hash has already been finalized by the
-    // parity test, so this function is intended for the dedicated gated wrapper
-    // below which handles first-launch finalization separately.
-    launch_cn_loop_4lane_reference<VariantIndex>(stream, count, scratchpads, contexts, geometry);
 }
 
 } // anonymous namespace
