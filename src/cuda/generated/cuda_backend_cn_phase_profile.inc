@@ -1,9 +1,9 @@
 // Sparse production CryptoNight phase profiling.
 //
 // Setup/final use the compact shared-key cooperative kernels. The memory loop is
-// selected by launch_cn_loop_parity_gated(): the existing four-lane loop remains
-// authoritative until the two-lane candidate produces an exact finalized state
-// match for the same real post-setup hash on each GPU/variant pair.
+// first parity-gated against the four-lane reference, then selected per GPU and
+// variant from kernel occupancy plus a timing sample of cloned real scratchpad
+// state. Diagnostics report the resulting production loop width.
 
 namespace {
 
@@ -69,9 +69,9 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
 
     if (geometry.aes_backend == 1)
-        launch_cn_loop_parity_gated<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_residency_gated<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
     else
-        launch_cn_loop_parity_gated<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_residency_gated<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
     if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
 
     if (geometry.aes_backend == 1)
@@ -110,14 +110,13 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     const double avg_setup = g_cn_phase_setup_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const double avg_loop = g_cn_phase_loop_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const double avg_final = g_cn_phase_final_ms[device_id][VariantIndex] / static_cast<double>(samples);
-    const int loop_mode = (device_id >= 0 && device_id < kCn2LaneMaxDevices)
-        ? g_cn2lane_parity[device_id][VariantIndex] : -1;
+    const int loop_mode = cn_residency_mode(device_id, VariantIndex);
 
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN phase] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
-              << " | loop-mode=" << (loop_mode == 1 ? "2-lane" : "4-lane")
+              << " | loop-mode=" << loop_mode << "-lane"
               << " | setup=" << setup_ms << " ms (" << std::setprecision(1) << setup_pct << "%)"
               << std::setprecision(3)
               << " | loop=" << loop_ms << " ms (" << std::setprecision(1) << loop_pct << "%)"
