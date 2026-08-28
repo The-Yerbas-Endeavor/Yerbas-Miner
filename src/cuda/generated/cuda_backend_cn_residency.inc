@@ -8,6 +8,7 @@
 
 namespace {
 
+constexpr int kCnPhase2SelectorCacheRevision = 1;
 // 0 unknown, 4 historical reference, 44 promoted 4-lane T-table baseline,
 // 222 two-lane T-table + 64-byte shared scratchpad tile candidate.
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_mode{};
@@ -64,6 +65,114 @@ inline const char* cn_residency_mode_name(int mode)
     if (mode == 222) return "2-lane-tile64";
     if (mode == 44) return "4-lane-ttable";
     return "4-lane-ref";
+}
+
+template <std::uint8_t VariantIndex>
+std::filesystem::path cn_phase2_selector_cache_path(int device_id,
+                                                    const cudaDeviceProp& props,
+                                                    std::size_t batch_size)
+{
+    int driver_version = 0;
+    int runtime_version = 0;
+    if (cudaDriverGetVersion(&driver_version) != cudaSuccess ||
+        cudaRuntimeGetVersion(&runtime_version) != cudaSuccess) {
+        cudaGetLastError();
+        return {};
+    }
+    const std::string key = cn_cache_key(device_id, props, batch_size, driver_version, runtime_version);
+    return cn_cache_directory() /
+        ("cn-phase2-rev" + std::to_string(kCnPhase2SelectorCacheRevision) +
+         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) + '-' + key + ".txt");
+}
+
+template <std::uint8_t VariantIndex>
+bool load_cn_phase2_selector_cache(int device_id,
+                                   const cudaDeviceProp& props,
+                                   std::size_t batch_size)
+{
+    if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return false;
+    const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
+    if (retune && *retune && std::string(retune) != "0") return false;
+    const auto path = cn_phase2_selector_cache_path<VariantIndex>(device_id, props, batch_size);
+    if (path.empty()) return false;
+    std::ifstream in(path);
+    if (!in) return false;
+
+    std::string magic;
+    int revision = 0;
+    unsigned int variant = 0;
+    int mode = 0;
+    int threads = 0;
+    if (!(in >> magic >> revision >> variant >> mode >> threads) ||
+        magic != "YERBAS_CN_PHASE2" || revision != kCnPhase2SelectorCacheRevision ||
+        variant != static_cast<unsigned int>(VariantIndex) ||
+        (mode != 4 && mode != 44 && mode != 222) ||
+        threads < std::max(32, props.warpSize) || threads > props.maxThreadsPerBlock ||
+        (threads % std::max(32, props.warpSize)) != 0) {
+        return false;
+    }
+
+    if (mode == 222) {
+        int active_blocks = 0;
+        const cudaError_t rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &active_blocks,
+            cryptonight_loop_stage_ttable2_tile64<VariantIndex>,
+            threads,
+            cn_tile64_dynamic_shared_bytes(threads));
+        if (rc != cudaSuccess || active_blocks <= 0) {
+            cudaGetLastError();
+            return false;
+        }
+    }
+
+    g_cn_residency_mode[device_id][VariantIndex] = mode;
+    g_cn_residency_threads[device_id][VariantIndex] = threads;
+    g_cn_ttable4_parity[device_id][VariantIndex] = mode == 4 ? -1 : 1;
+    g_cn_tile64_parity[device_id][VariantIndex] = mode == 222 ? 1 : 0;
+    std::cout << "[GPU " << device_id << "] CryptoNight phase2 cache loaded | "
+              << cryptonight::config_value(VariantIndex).name
+              << " | production=" << cn_residency_mode_name(mode)
+              << " | threads=" << threads << '\n';
+    return true;
+}
+
+template <std::uint8_t VariantIndex>
+void save_cn_phase2_selector_cache(int device_id,
+                                   const cudaDeviceProp& props,
+                                   std::size_t batch_size)
+{
+    if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return;
+    const int mode = g_cn_residency_mode[device_id][VariantIndex];
+    const int threads = g_cn_residency_threads[device_id][VariantIndex];
+    if ((mode != 4 && mode != 44 && mode != 222) || threads <= 0) return;
+    try {
+        const auto path = cn_phase2_selector_cache_path<VariantIndex>(device_id, props, batch_size);
+        if (path.empty()) return;
+        std::filesystem::create_directories(path.parent_path());
+        const auto temp = path.string() + ".tmp";
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out) return;
+        out << "YERBAS_CN_PHASE2 " << kCnPhase2SelectorCacheRevision << ' '
+            << static_cast<unsigned int>(VariantIndex) << ' '
+            << mode << ' ' << threads << '\n';
+        out.close();
+        if (!out) return;
+        std::error_code ec;
+        std::filesystem::rename(temp, path, ec);
+        if (ec) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+            std::filesystem::rename(temp, path, ec);
+        }
+        if (!ec)
+            std::cout << "[GPU " << device_id << "] CryptoNight phase2 cache saved | "
+                      << cryptonight::config_value(VariantIndex).name
+                      << " | production=" << cn_residency_mode_name(mode)
+                      << " | threads=" << threads << '\n';
+    } catch (const std::exception& e) {
+        std::cerr << "[GPU " << device_id << "] CryptoNight phase2 cache write skipped: "
+                  << e.what() << '\n';
+    }
 }
 
 template <std::uint8_t VariantIndex>
@@ -165,8 +274,9 @@ void cn_residency_autoselect_once(cudaStream_t stream,
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
     cudaDeviceProp props{};
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN selector failed");
-    const int warp = std::max(32, props.warpSize);
+    if (load_cn_phase2_selector_cache<VariantIndex>(device_id, props, count)) return;
 
+    const int warp = std::max(32, props.warpSize);
     const int threads_ref = cn_occupancy_block_size(
         cryptonight_loop_stage_cooperative<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_t4 = cn_occupancy_block_size(
@@ -181,6 +291,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
     if (!parity_t4) {
         g_cn_residency_mode[device_id][VariantIndex] = 4;
         g_cn_residency_threads[device_id][VariantIndex] = threads_ref;
+        save_cn_phase2_selector_cache<VariantIndex>(device_id, props, count);
         std::cout << "[CUDA CN selector] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
                   << " | baseline-parity=FAIL | production=4-lane-ref\n";
@@ -237,6 +348,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
 
     g_cn_residency_mode[device_id][VariantIndex] = best_mode;
     g_cn_residency_threads[device_id][VariantIndex] = best_threads;
+    save_cn_phase2_selector_cache<VariantIndex>(device_id, props, count);
 
     int tile_active_blocks = 0;
     const cudaError_t occ_rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -276,8 +388,6 @@ void launch_cn_loop_residency_gated(cudaStream_t stream,
     int device_id = 0;
     check_cuda(cudaGetDevice(&device_id), "cudaGetDevice CN selector gate failed");
     if (device_id < 0 || device_id >= kCn2LaneMaxDevices) {
-        // Conservative fallback when the fixed-size per-device selector cache
-        // cannot represent this CUDA device id.
         const int threads = 128;
         cn_launch_mode<VariantIndex>(stream, 4, threads, count, scratchpads, contexts);
         return;
