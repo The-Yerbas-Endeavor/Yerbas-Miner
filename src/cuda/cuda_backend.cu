@@ -18,6 +18,8 @@
 
 #include "cuda/generated/cuda_backend_cn_cooperative.inc"
 #include "cuda/generated/cuda_backend_cn_sharedkey.inc"
+#include "cuda/generated/cuda_backend_cn_wordphase.inc"
+#include "cuda/generated/cuda_backend_cn_wordphase_selector.inc"
 #include "cuda/generated/cuda_backend_cn_2lane.inc"
 #include "cuda/generated/cuda_backend_cn_ttable_loop.inc"
 #include "cuda/generated/cuda_backend_cn_tile64.inc"
