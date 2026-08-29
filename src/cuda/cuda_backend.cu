@@ -21,6 +21,7 @@
 #include "cuda/generated/cuda_backend_cn_2lane.inc"
 #include "cuda/generated/cuda_backend_cn_ttable_loop.inc"
 #include "cuda/generated/cuda_backend_cn_tile64.inc"
+#include "cuda/generated/cuda_backend_cn_cg_loop.inc"
 #include "cuda/generated/cuda_backend_cn_residency.inc"
 
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
