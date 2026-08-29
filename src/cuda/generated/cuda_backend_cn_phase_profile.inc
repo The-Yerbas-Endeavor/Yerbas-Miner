@@ -1,12 +1,15 @@
 // Sparse production CryptoNight phase profiling.
 //
 // Setup/final use the compact shared-key cooperative kernels. Their launch widths
-// are selected from the compiled kernel/device occupancy instead of a fixed 128
-// threads. Phase-2 uses the hardened repeated-median runtime selector.
+// are selected from the compiled kernel/device occupancy, but are capped at the
+// kernel's structural limit of 128 threads: shared_keys[16][160] provides one
+// key schedule for each of sixteen 8-lane hash groups. Phase-2 uses the hardened
+// repeated-median runtime selector.
 
 namespace {
 
 constexpr int kCnPhaseProfileMaxDevices = 32;
+constexpr int kCnSharedKeyMaxThreads = 128;
 static std::array<std::array<std::uint64_t, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_launches{};
 static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_setup_ms{};
 static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_loop_ms{};
@@ -23,20 +26,22 @@ template <std::uint8_t VariantIndex, bool UseTTable>
 int cn_setup_occupancy_threads(const cudaDeviceProp& props)
 {
     const int warp = std::max(32, props.warpSize);
+    const int structural_max = std::min(props.maxThreadsPerBlock, kCnSharedKeyMaxThreads);
     return cn_occupancy_block_size(
         cryptonight_setup_stage_cooperative8<VariantIndex, UseTTable>,
         warp,
-        props.maxThreadsPerBlock);
+        structural_max);
 }
 
 template <std::uint8_t VariantIndex, bool UseTTable>
 int cn_final_occupancy_threads(const cudaDeviceProp& props)
 {
     const int warp = std::max(32, props.warpSize);
+    const int structural_max = std::min(props.maxThreadsPerBlock, kCnSharedKeyMaxThreads);
     return cn_occupancy_block_size(
         cryptonight_final_stage_cooperative8<VariantIndex, UseTTable>,
         warp,
-        props.maxThreadsPerBlock);
+        structural_max);
 }
 
 template <std::uint8_t VariantIndex>
