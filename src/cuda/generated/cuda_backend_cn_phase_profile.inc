@@ -1,9 +1,10 @@
-// Sparse production CryptoNight phase profiling.
+// Sparse production CryptoNight phase profiling plus optional generic overlap.
 //
-// T-table setup/final can independently promote the register-word candidate
-// after exact parity and a repeated >=5% median win. The legacy shared-key path
-// remains the production fallback. Both 8-lane kernels are structurally capped
-// at 128 threads/block. Phase-2 uses the hardened runtime selector.
+// YERBAS_CUDA_OVERLAP=1 enables two disjoint nonce partitions for each
+// CryptoNight stage. Each partition executes the canonical setup -> loop -> final
+// dependency chain on its own stream, then the primary stream joins before the
+// next GhostRider stage. No GPU model or compute-capability rule is used.
+// Lazy kernel selectors always warm on the single-stream path before overlap.
 
 namespace {
 
@@ -14,11 +15,29 @@ static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_s
 static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_loop_ms{};
 static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_final_ms{};
 static std::array<std::array<std::uint64_t, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_samples{};
+static std::array<cudaStream_t, kCnPhaseProfileMaxDevices> g_cn_overlap_streams{};
+static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_overlap_reported{};
 
 inline bool cn_phase_diagnostics_enabled()
 {
     const char* value = std::getenv("YERBAS_DIAGNOSTICS");
     return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+inline bool cn_overlap_enabled()
+{
+    const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+inline cudaStream_t cn_overlap_stream(int device_id)
+{
+    if (device_id < 0 || device_id >= kCnPhaseProfileMaxDevices) return nullptr;
+    auto& secondary = g_cn_overlap_streams[device_id];
+    if (!secondary)
+        check_cuda(cudaStreamCreateWithFlags(&secondary, cudaStreamNonBlocking),
+                   "cudaStreamCreateWithFlags CN overlap failed");
+    return secondary;
 }
 
 template <std::uint8_t VariantIndex, bool UseTTable>
@@ -44,6 +63,121 @@ int cn_final_occupancy_threads(const cudaDeviceProp& props)
 }
 
 template <std::uint8_t VariantIndex>
+bool cn_overlap_selectors_ready(int device_id, bool use_ttable)
+{
+    if (device_id < 0 || device_id >= kCnPhaseProfileMaxDevices) return false;
+    if (g_cn_hardened_mode[device_id][VariantIndex] == 0) return false;
+    if (use_ttable &&
+        (g_cn_word_setup[device_id][VariantIndex] == 0 ||
+         g_cn_word_final[device_id][VariantIndex] == 0))
+        return false;
+    return true;
+}
+
+template <std::uint8_t VariantIndex>
+void launch_cn_partition(cudaStream_t stream,
+                         int device_id,
+                         std::size_t count,
+                         std::uint8_t* states,
+                         std::uint8_t* scratchpads,
+                         cryptonight::SplitContext* contexts,
+                         const CnGeometry& geometry,
+                         const cudaDeviceProp& props)
+{
+    if (count == 0) return;
+    const bool use_ttable = geometry.aes_backend == 1;
+    const int setup_threads = use_ttable ? kCnSharedKeyMaxThreads
+        : cn_setup_occupancy_threads<VariantIndex, false>(props);
+    const int final_threads = use_ttable ? kCnSharedKeyMaxThreads
+        : cn_final_occupancy_threads<VariantIndex, false>(props);
+    const std::size_t total_threads = count * 8U;
+    const int setup_blocks = static_cast<int>(
+        (total_threads + static_cast<std::size_t>(setup_threads) - 1U) /
+        static_cast<std::size_t>(setup_threads));
+    const int final_blocks = static_cast<int>(
+        (total_threads + static_cast<std::size_t>(final_threads) - 1U) /
+        static_cast<std::size_t>(final_threads));
+
+    if (use_ttable) {
+        launch_cn_setup_selected<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
+    } else {
+        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<setup_blocks, setup_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
+    }
+
+    if (use_ttable)
+        launch_cn_loop_hardened<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
+    else
+        launch_cn_loop_hardened<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
+
+    if (use_ttable) {
+        launch_cn_final_selected<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
+    } else {
+        cryptonight_final_stage_cooperative8<VariantIndex, false><<<final_blocks, final_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
+    }
+}
+
+template <std::uint8_t VariantIndex>
+bool launch_cn_overlap_if_ready(cudaStream_t primary,
+                                int device_id,
+                                std::size_t count,
+                                std::uint8_t* states,
+                                std::uint8_t* scratchpads,
+                                cryptonight::SplitContext* contexts,
+                                const CnGeometry& geometry,
+                                const cudaDeviceProp& props)
+{
+    if (!cn_overlap_enabled() || count < 64U) return false;
+    const bool use_ttable = geometry.aes_backend == 1;
+    if (!cn_overlap_selectors_ready<VariantIndex>(device_id, use_ttable)) return false;
+
+    cudaStream_t secondary = cn_overlap_stream(device_id);
+    if (!secondary) return false;
+
+    // Keep subgroup-friendly partition boundaries without assuming any GPU model.
+    std::size_t first = (count / 2U / 32U) * 32U;
+    if (first == 0 || first >= count) return false;
+    const std::size_t second = count - first;
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+
+    std::uint8_t* states2 = states + first * kStateBytes;
+    std::uint8_t* scratch2 = scratchpads + first * cfg.page_size;
+    cryptonight::SplitContext* contexts2 = contexts + first;
+
+    cudaEvent_t ready{}, secondary_done{};
+    check_cuda(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming),
+               "cudaEventCreate CN overlap ready failed");
+    check_cuda(cudaEventCreateWithFlags(&secondary_done, cudaEventDisableTiming),
+               "cudaEventCreate CN overlap done failed");
+    check_cuda(cudaEventRecord(ready, primary), "cudaEventRecord CN overlap ready failed");
+    check_cuda(cudaStreamWaitEvent(secondary, ready, 0), "cudaStreamWaitEvent CN overlap ready failed");
+
+    launch_cn_partition<VariantIndex>(primary, device_id, first,
+                                      states, scratchpads, contexts, geometry, props);
+    launch_cn_partition<VariantIndex>(secondary, device_id, second,
+                                      states2, scratch2, contexts2, geometry, props);
+
+    check_cuda(cudaEventRecord(secondary_done, secondary), "cudaEventRecord CN overlap done failed");
+    check_cuda(cudaStreamWaitEvent(primary, secondary_done, 0), "cudaStreamWaitEvent CN overlap done failed");
+    check_cuda(cudaEventDestroy(secondary_done), "cudaEventDestroy CN overlap done failed");
+    check_cuda(cudaEventDestroy(ready), "cudaEventDestroy CN overlap ready failed");
+
+    if (!g_cn_overlap_reported[device_id][VariantIndex]) {
+        g_cn_overlap_reported[device_id][VariantIndex] = true;
+        std::cout << "[CUDA CN overlap] GPU " << device_id
+                  << " | " << cfg.name
+                  << " | mode=2-stream"
+                  << " | batch=" << count
+                  << " | partitions=" << first << '+' << second
+                  << " | generic=yes\n";
+    }
+    return true;
+}
+
+template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
                                                      std::uint8_t* states,
                                                      std::size_t count,
@@ -59,11 +193,19 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase profile failed");
 
     const bool use_ttable = geometry.aes_backend == 1;
+
+    // First encounter of a variant remains single-stream so lazy parity/timing
+    // selectors cannot race between streams. Later encounters may overlap.
+    if (launch_cn_overlap_if_ready<VariantIndex>(stream, device_id, count,
+                                                 states, scratchpads, contexts,
+                                                 geometry, props)) {
+        return;
+    }
+
     const int setup_threads = use_ttable ? kCnSharedKeyMaxThreads
         : cn_setup_occupancy_threads<VariantIndex, false>(props);
     const int final_threads = use_ttable ? kCnSharedKeyMaxThreads
         : cn_final_occupancy_threads<VariantIndex, false>(props);
-
     const std::size_t phase_total_threads = count * 8U;
     const int setup_blocks = static_cast<int>(
         (phase_total_threads + static_cast<std::size_t>(setup_threads) - 1U) /
