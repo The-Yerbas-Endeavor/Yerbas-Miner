@@ -1,9 +1,8 @@
 // Sparse production CryptoNight phase profiling.
 //
-// Setup/final use the compact shared-key cooperative kernels. The memory loop is
-// first parity-gated against the four-lane reference, then selected per GPU and
-// variant from kernel occupancy plus a timing sample of cloned real scratchpad
-// state. Diagnostics report the resulting production loop architecture.
+// Setup/final use the compact shared-key cooperative kernels. Their launch widths
+// are selected from the compiled kernel/device occupancy instead of a fixed 128
+// threads. Phase-2 uses the hardened repeated-median runtime selector.
 
 namespace {
 
@@ -20,6 +19,26 @@ inline bool cn_phase_diagnostics_enabled()
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+template <std::uint8_t VariantIndex, bool UseTTable>
+int cn_setup_occupancy_threads(const cudaDeviceProp& props)
+{
+    const int warp = std::max(32, props.warpSize);
+    return cn_occupancy_block_size(
+        cryptonight_setup_stage_cooperative8<VariantIndex, UseTTable>,
+        warp,
+        props.maxThreadsPerBlock);
+}
+
+template <std::uint8_t VariantIndex, bool UseTTable>
+int cn_final_occupancy_threads(const cudaDeviceProp& props)
+{
+    const int warp = std::max(32, props.warpSize);
+    return cn_occupancy_block_size(
+        cryptonight_final_stage_cooperative8<VariantIndex, UseTTable>,
+        warp,
+        props.maxThreadsPerBlock);
+}
+
 template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
                                                      std::uint8_t* states,
@@ -34,14 +53,22 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     cudaDeviceProp props{};
     check_cuda(cudaGetDevice(&device_id), "cudaGetDevice CN phase profile failed");
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase profile failed");
-    const int warp = std::max(32, props.warpSize);
 
-    int phase_threads = std::min(props.maxThreadsPerBlock, 128);
-    phase_threads = (phase_threads / warp) * warp;
-    phase_threads = std::max(warp, phase_threads);
+    const bool use_ttable = geometry.aes_backend == 1;
+    const int setup_threads = use_ttable
+        ? cn_setup_occupancy_threads<VariantIndex, true>(props)
+        : cn_setup_occupancy_threads<VariantIndex, false>(props);
+    const int final_threads = use_ttable
+        ? cn_final_occupancy_threads<VariantIndex, true>(props)
+        : cn_final_occupancy_threads<VariantIndex, false>(props);
+
     const std::size_t phase_total_threads = count * 8U;
-    const int phase_blocks = static_cast<int>((phase_total_threads + static_cast<std::size_t>(phase_threads) - 1U) /
-                                              static_cast<std::size_t>(phase_threads));
+    const int setup_blocks = static_cast<int>(
+        (phase_total_threads + static_cast<std::size_t>(setup_threads) - 1U) /
+        static_cast<std::size_t>(setup_threads));
+    const int final_blocks = static_cast<int>(
+        (phase_total_threads + static_cast<std::size_t>(final_threads) - 1U) /
+        static_cast<std::size_t>(final_threads));
 
     bool sample = false;
     if (device_id >= 0 && device_id < kCnPhaseProfileMaxDevices && cn_phase_diagnostics_enabled()) {
@@ -59,23 +86,23 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
         check_cuda(cudaEventRecord(e0, stream), "cudaEventRecord CN phase setup start failed");
     }
 
-    if (geometry.aes_backend == 1)
-        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
+    if (use_ttable)
+        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
     else
-        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
+        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
     if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
 
-    if (geometry.aes_backend == 1)
-        launch_cn_loop_residency_gated<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
+    if (use_ttable)
+        launch_cn_loop_hardened<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
     else
-        launch_cn_loop_residency_gated<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_hardened<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
     if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
 
-    if (geometry.aes_backend == 1)
-        cryptonight_final_stage_cooperative8<VariantIndex, true><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
+    if (use_ttable)
+        cryptonight_final_stage_cooperative8<VariantIndex, true><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
     else
-        cryptonight_final_stage_cooperative8<VariantIndex, false><<<phase_blocks, phase_threads, 0, stream>>>(states, count, scratchpads, contexts);
+        cryptonight_final_stage_cooperative8<VariantIndex, false><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
 
     if (!sample) return;
@@ -101,12 +128,14 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     const double avg_setup = g_cn_phase_setup_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const double avg_loop = g_cn_phase_loop_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const double avg_final = g_cn_phase_final_ms[device_id][VariantIndex] / static_cast<double>(samples);
-    const int loop_mode = cn_residency_mode(device_id, VariantIndex);
+    const int loop_mode = cn_hardened_mode(device_id, VariantIndex);
 
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN phase] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
+              << " | setup-threads=" << setup_threads
+              << " final-threads=" << final_threads
               << " | loop-mode=" << cn_residency_mode_name(loop_mode)
               << " | setup=" << setup_ms << " ms (" << std::setprecision(1) << setup_pct << "%)"
               << std::setprecision(3)
