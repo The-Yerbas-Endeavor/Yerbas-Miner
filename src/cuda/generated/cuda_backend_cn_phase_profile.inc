@@ -1,10 +1,9 @@
 // Sparse production CryptoNight phase profiling.
 //
-// Setup/final use the compact shared-key cooperative kernels. Their launch widths
-// are selected from the compiled kernel/device occupancy, but are capped at the
-// kernel's structural limit of 128 threads: shared_keys[16][160] provides one
-// key schedule for each of sixteen 8-lane hash groups. Phase-2 uses the hardened
-// repeated-median runtime selector.
+// T-table setup/final can independently promote the register-word candidate
+// after exact parity and a repeated >=5% median win. The legacy shared-key path
+// remains the production fallback. Both 8-lane kernels are structurally capped
+// at 128 threads/block. Phase-2 uses the hardened runtime selector.
 
 namespace {
 
@@ -60,11 +59,9 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase profile failed");
 
     const bool use_ttable = geometry.aes_backend == 1;
-    const int setup_threads = use_ttable
-        ? cn_setup_occupancy_threads<VariantIndex, true>(props)
+    const int setup_threads = use_ttable ? kCnSharedKeyMaxThreads
         : cn_setup_occupancy_threads<VariantIndex, false>(props);
-    const int final_threads = use_ttable
-        ? cn_final_occupancy_threads<VariantIndex, true>(props)
+    const int final_threads = use_ttable ? kCnSharedKeyMaxThreads
         : cn_final_occupancy_threads<VariantIndex, false>(props);
 
     const std::size_t phase_total_threads = count * 8U;
@@ -91,11 +88,13 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
         check_cuda(cudaEventRecord(e0, stream), "cudaEventRecord CN phase setup start failed");
     }
 
-    if (use_ttable)
-        cryptonight_setup_stage_cooperative8<VariantIndex, true><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    else
-        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<setup_blocks, setup_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
+    if (use_ttable) {
+        launch_cn_setup_selected<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
+    } else {
+        cryptonight_setup_stage_cooperative8<VariantIndex, false><<<setup_blocks, setup_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
+    }
     if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
 
     if (use_ttable)
@@ -104,11 +103,13 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
         launch_cn_loop_hardened<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
     if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
 
-    if (use_ttable)
-        cryptonight_final_stage_cooperative8<VariantIndex, true><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    else
-        cryptonight_final_stage_cooperative8<VariantIndex, false><<<final_blocks, final_threads, 0, stream>>>(states, count, scratchpads, contexts);
-    check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
+    if (use_ttable) {
+        launch_cn_final_selected<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
+    } else {
+        cryptonight_final_stage_cooperative8<VariantIndex, false><<<final_blocks, final_threads, 0, stream>>>(
+            states, count, scratchpads, contexts);
+        check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 final launch failed");
+    }
 
     if (!sample) return;
 
@@ -139,6 +140,8 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
               << "[CUDA CN phase] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
+              << " | setup-mode=" << (use_ttable ? cn_word_setup_name(device_id, VariantIndex) : "byte-aes")
+              << " final-mode=" << (use_ttable ? cn_word_final_name(device_id, VariantIndex) : "byte-aes")
               << " | setup-threads=" << setup_threads
               << " final-threads=" << final_threads
               << " | loop-mode=" << cn_residency_mode_name(loop_mode)
