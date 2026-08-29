@@ -23,6 +23,7 @@
 #include "cuda/generated/cuda_backend_cn_tile64.inc"
 #include "cuda/generated/cuda_backend_cn_cg_loop.inc"
 #include "cuda/generated/cuda_backend_cn_residency.inc"
+#include "cuda/generated/cuda_backend_cn_selector_hardened.inc"
 
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
