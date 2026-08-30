@@ -24,6 +24,10 @@ void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 
 static YERBAS_TLS uint8_t* g_yerbas_cn_scratchpad = NULL;
 static YERBAS_TLS OAES_CTX* g_yerbas_cn_oaes = NULL;
+/* CPU feature bits are immutable for a running process. Cache the runtime
+ * dispatch decision per worker thread so the AES hot path never repeats CPUID
+ * / XGETBV (MSVC) or builtin feature checks for every CryptoNight AES round. */
+static YERBAS_TLS int g_yerbas_aes_avx2_runtime = -1;
 
 static void* yerbas_tls_cn_malloc(size_t requested)
 {
@@ -63,7 +67,7 @@ static void yerbas_tls_oaes_free(OAES_CTX** ctx)
 #define YERBAS_AES_TARGET
 #endif
 
-static int yerbas_runtime_has_aes_avx2(void)
+static int yerbas_detect_aes_avx2(void)
 {
 #if YERBAS_X86_AES_RUNTIME && (defined(__GNUC__) || defined(__clang__))
     __builtin_cpu_init();
@@ -83,6 +87,13 @@ static int yerbas_runtime_has_aes_avx2(void)
 #else
     return 0;
 #endif
+}
+
+static int yerbas_runtime_has_aes_avx2(void)
+{
+    if (g_yerbas_aes_avx2_runtime < 0)
+        g_yerbas_aes_avx2_runtime = yerbas_detect_aes_avx2() ? 1 : 0;
+    return g_yerbas_aes_avx2_runtime;
 }
 
 #if YERBAS_X86_AES_RUNTIME
@@ -188,7 +199,7 @@ void yerbas_cn_slow_hash_reuse(const char* input,
                                size_t aes_rounds)
 {
     if (!g_yerbas_cn_backend_reported) {
-        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes\n",
+        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | feature-check=thread-cache\n",
                yerbas_cn_reuse_backend());
         g_yerbas_cn_backend_reported = 1;
     }
