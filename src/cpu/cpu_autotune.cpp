@@ -1,5 +1,6 @@
 #include "cpu/cpu_autotune.h"
 
+#include "cpu/cn_2way.h"
 #include "cpu/cpu_worker_pool.h"
 #include "ghostrider/ghostrider.h"
 
@@ -18,12 +19,27 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuPolicyRevision = 5;
+constexpr int kCpuPolicyRevision = 6;
 constexpr double kCnLocalRequiredGain = 1.03;
 constexpr double kWholePlanWidthRequiredGain = 1.005;
 constexpr double kAffinityRequiredGain = 1.02;
 constexpr unsigned int kCnProbePasses = 5;
 constexpr unsigned int kAffinityProbePasses = 5;
+
+struct ProbeCnParams {
+    std::uint32_t page_size;
+    std::uint32_t iterations;
+    std::size_t aes_rounds;
+};
+
+constexpr std::array<ProbeCnParams, 6> kProbeCnParams{{
+    {524288U, 131072U, 32768U},
+    {524288U, 131072U, 16384U},
+    {2097152U, 262144U, 131072U},
+    {1048576U, 262144U, 65536U},
+    {262144U, 65536U, 16384U},
+    {262144U, 65536U, 8192U},
+}};
 
 bool env_enabled(const char* name)
 {
@@ -132,8 +148,7 @@ double benchmark_header(const Plan& plan,
     if (stopped(stop)) return 0.0;
     TuningMeasurementGuard measurement_guard;
     set_runtime_cn_widths(widths);
-    const unsigned int group = max_width(widths);
-    WorkerPool pool(plan.workers, group);
+    WorkerPool pool(plan.workers, max_width(widths));
     std::array<std::uint8_t, 32> impossible_target{};
 
     (void)pool.run(header, impossible_target, 0x51000000U,
@@ -149,10 +164,8 @@ double benchmark_plan(const Plan& plan,
                       const CnWidthPolicy& widths,
                       const std::atomic_bool* stop)
 {
-    const auto headers = representative_headers();
     std::vector<double> samples;
-    samples.reserve(headers.size());
-    for (const auto& header : headers) {
+    for (const auto& header : representative_headers()) {
         if (stopped(stop)) return 0.0;
         const double hps = benchmark_header(plan, widths, header, stop);
         if (hps > 0.0) samples.push_back(hps);
@@ -166,7 +179,6 @@ double benchmark_plan_repeated(const Plan& plan,
                                const std::atomic_bool* stop)
 {
     std::vector<double> samples;
-    samples.reserve(passes);
     for (unsigned int pass = 0; pass < passes; ++pass) {
         if (stopped(stop)) return 0.0;
         const double hps = benchmark_plan(plan, widths, stop);
@@ -193,65 +205,92 @@ bool parity_width_policy(const CnWidthPolicy& widths)
             works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
             scalar_hashes[lane] = ghostrider::hash_optimized(works[lane]);
         }
-        if (!ghostrider::hash_optimized_batch(works.data(), batch_hashes.data(), works.size(), widths))
-            return false;
+        if (!ghostrider::hash_optimized_batch(works.data(), batch_hashes.data(), works.size(), widths)) return false;
         if (batch_hashes != scalar_hashes) return false;
     }
     return true;
 }
 
 struct CnProbeResult {
-    bool parity{false};
+    bool pair_parity{false};
+    bool quad_parity{false};
     double scalar_hps{0.0};
     double pair_hps{0.0};
+    double quad_hps{0.0};
 };
 
-CnProbeResult probe_cn_pair(std::uint8_t variant, const std::atomic_bool* stop)
+bool run_quad_stage(const std::array<ghostrider::Hash512, 4>& inputs,
+                    std::uint8_t variant,
+                    std::array<ghostrider::Hash512, 4>& outputs)
+{
+    if (variant >= kProbeCnParams.size()) return false;
+    const auto& p = kProbeCnParams[variant];
+    return yerbas_cn_hash_quad_4way(
+               reinterpret_cast<const char*>(inputs[0].data()),
+               reinterpret_cast<const char*>(inputs[1].data()),
+               reinterpret_cast<const char*>(inputs[2].data()),
+               reinterpret_cast<const char*>(inputs[3].data()),
+               reinterpret_cast<char*>(outputs[0].data()),
+               reinterpret_cast<char*>(outputs[1].data()),
+               reinterpret_cast<char*>(outputs[2].data()),
+               reinterpret_cast<char*>(outputs[3].data()),
+               64U, 1, p.page_size, p.iterations, p.aes_rounds) != 0;
+}
+
+CnProbeResult probe_cn_widths(std::uint8_t variant, const std::atomic_bool* stop)
 {
     CnProbeResult out{};
-    ghostrider::Hash512 input0{};
-    ghostrider::Hash512 input1{};
-    for (std::size_t i = 0; i < input0.size(); ++i) {
-        input0[i] = static_cast<std::uint8_t>((i * 29U + variant * 47U + 11U) & 0xffU);
-        input1[i] = static_cast<std::uint8_t>((i * 53U + variant * 31U + 97U) & 0xffU);
-    }
+    std::array<ghostrider::Hash512, 4> inputs{};
+    for (std::size_t lane = 0; lane < inputs.size(); ++lane)
+        for (std::size_t i = 0; i < inputs[lane].size(); ++i)
+            inputs[lane][i] = static_cast<std::uint8_t>((i * (29U + lane * 11U) + variant * 47U + 11U + lane * 53U) & 0xffU);
 
-    ghostrider::Hash512 scalar0{}, scalar1{}, pair0{}, pair1{};
-    if (!ghostrider::optimized_cn_stage(input0, variant, scalar0) ||
-        !ghostrider::optimized_cn_stage(input1, variant, scalar1) ||
-        !ghostrider::optimized_cn_pair_stage(input0, input1, variant, pair0, pair1))
-        return out;
-    out.parity = scalar0 == pair0 && scalar1 == pair1;
-    if (!out.parity) return out;
+    std::array<ghostrider::Hash512, 4> scalar{}, pair{}, quad{};
+    for (std::size_t lane = 0; lane < 4; ++lane)
+        if (!ghostrider::optimized_cn_stage(inputs[lane], variant, scalar[lane])) return out;
 
-    std::vector<double> scalar_samples;
-    std::vector<double> pair_samples;
-    scalar_samples.reserve(kCnProbePasses);
-    pair_samples.reserve(kCnProbePasses);
+    if (ghostrider::optimized_cn_pair_stage(inputs[0], inputs[1], variant, pair[0], pair[1]) &&
+        ghostrider::optimized_cn_pair_stage(inputs[2], inputs[3], variant, pair[2], pair[3]))
+        out.pair_parity = pair == scalar;
+
+    if (run_quad_stage(inputs, variant, quad)) out.quad_parity = quad == scalar;
+
+    std::vector<double> scalar_samples, pair_samples, quad_samples;
     for (unsigned int pass = 0; pass < kCnProbePasses; ++pass) {
         if (stopped(stop)) return out;
-        ghostrider::Hash512 a{}, b{};
         auto begin = std::chrono::steady_clock::now();
-        (void)ghostrider::optimized_cn_stage(input0, variant, a);
-        (void)ghostrider::optimized_cn_stage(input1, variant, b);
+        for (std::size_t lane = 0; lane < 4; ++lane)
+            (void)ghostrider::optimized_cn_stage(inputs[lane], variant, scalar[lane]);
         auto end = std::chrono::steady_clock::now();
-        const double scalar_seconds = std::chrono::duration<double>(end - begin).count();
-        if (scalar_seconds > 0.0) scalar_samples.push_back(2.0 / scalar_seconds);
+        double seconds = std::chrono::duration<double>(end - begin).count();
+        if (seconds > 0.0) scalar_samples.push_back(4.0 / seconds);
 
-        begin = std::chrono::steady_clock::now();
-        (void)ghostrider::optimized_cn_pair_stage(input0, input1, variant, a, b);
-        end = std::chrono::steady_clock::now();
-        const double pair_seconds = std::chrono::duration<double>(end - begin).count();
-        if (pair_seconds > 0.0) pair_samples.push_back(2.0 / pair_seconds);
+        if (out.pair_parity) {
+            begin = std::chrono::steady_clock::now();
+            (void)ghostrider::optimized_cn_pair_stage(inputs[0], inputs[1], variant, pair[0], pair[1]);
+            (void)ghostrider::optimized_cn_pair_stage(inputs[2], inputs[3], variant, pair[2], pair[3]);
+            end = std::chrono::steady_clock::now();
+            seconds = std::chrono::duration<double>(end - begin).count();
+            if (seconds > 0.0) pair_samples.push_back(4.0 / seconds);
+        }
+
+        if (out.quad_parity) {
+            begin = std::chrono::steady_clock::now();
+            (void)run_quad_stage(inputs, variant, quad);
+            end = std::chrono::steady_clock::now();
+            seconds = std::chrono::duration<double>(end - begin).count();
+            if (seconds > 0.0) quad_samples.push_back(4.0 / seconds);
+        }
     }
     out.scalar_hps = median(std::move(scalar_samples));
     out.pair_hps = median(std::move(pair_samples));
+    out.quad_hps = median(std::move(quad_samples));
     return out;
 }
 
 bool valid_width(unsigned int width)
 {
-    return width == 1U || width == 2U;
+    return width == 1U || width == 2U || width == 4U;
 }
 
 bool valid_affinity(unsigned int value)
@@ -267,13 +306,11 @@ bool load_cache(const std::filesystem::path& path, TuneResult& out)
     int revision = 0;
     unsigned int affinity = 0;
     if (!(in >> magic >> revision >> out.threads >> out.lanes >> out.batch)) return false;
-    for (auto& width : out.cn_widths)
-        if (!(in >> width)) return false;
+    for (auto& width : out.cn_widths) if (!(in >> width)) return false;
     if (!(in >> affinity >> out.throughput_hps)) return false;
     if (magic != "YERBAS_CPU_POLICY" || revision != kCpuPolicyRevision ||
         out.threads == 0U || out.batch == 0U || !valid_width(out.lanes) || !valid_affinity(affinity)) return false;
-    for (const auto width : out.cn_widths)
-        if (!valid_width(width)) return false;
+    for (const auto width : out.cn_widths) if (!valid_width(width)) return false;
     if (out.lanes != max_width(out.cn_widths)) return false;
     out.affinity = static_cast<AffinityPolicy>(affinity);
     out.from_cache = true;
@@ -354,24 +391,21 @@ TuneResult production_autotune(unsigned int hardware_threads,
                   << cached.cn_widths[4] << '/' << cached.cn_widths[5]
                   << " | affinity=" << affinity_policy_name(cached.affinity)
                   << " | throughput=" << std::fixed << std::setprecision(2) << cached.throughput_hps << " H/s"
-                  << " | source=max" << source_ceiling
-                  << (source_ceiling == ceiling ? "" : " (compatible)")
                   << std::defaultfloat << '\n';
         return cached;
     }
 
     const auto topology = detect_cpu_topology();
+    const auto plans = plans_for(ceiling, fallback_batch, mode);
     std::cout << "[CPU topology] logical=" << topology.logical_cpus
               << " | physical=" << topology.physical_cores
               << " | detected=" << (topology.available ? "yes" : "no") << '\n';
-
-    const auto plans = plans_for(ceiling, fallback_batch, mode);
     std::cout << "[CPU tune] GhostRider production search"
               << " | mode=" << mode
               << " | hardware_threads=" << hardware_threads
               << " | ceiling=" << ceiling
               << " | baseline_candidates=" << plans.size()
-              << " | CN-probes=6x(scalar/2way)x5"
+              << " | CN-probes=6x(1way/2way/4way)x" << kCnProbePasses
               << " | metric=end-to-end H/s\n";
 
     TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, AffinityPolicy::Unpinned, 0.0, false, false};
@@ -401,33 +435,44 @@ TuneResult production_autotune(unsigned int hardware_threads,
     for (std::size_t variant = 0; variant < widths.size(); ++variant) {
         if (stopped(stop)) { best.interrupted = true; return best; }
         const char* name = ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant));
-        const auto probe = probe_cn_pair(static_cast<std::uint8_t>(variant), stop);
-        const double local_gain = probe.scalar_hps > 0.0 ? ((probe.pair_hps / probe.scalar_hps) - 1.0) * 100.0 : 0.0;
-        const bool local_candidate = probe.parity && probe.pair_hps > probe.scalar_hps * kCnLocalRequiredGain;
+        const auto probe = probe_cn_widths(static_cast<std::uint8_t>(variant), stop);
         std::cout << "[CPU CN probe] " << name
-                  << " | scalar=" << std::fixed << std::setprecision(2) << probe.scalar_hps
-                  << " H/s | 2way=" << probe.pair_hps
-                  << " H/s | gain=" << (local_gain >= 0.0 ? "+" : "") << local_gain << "%"
-                  << " | parity=" << (probe.parity ? "PASS" : "FAIL")
-                  << " | " << (local_candidate ? "candidate" : "scalar")
+                  << " | 1way=" << std::fixed << std::setprecision(2) << probe.scalar_hps
+                  << " | 2way=" << probe.pair_hps << " (" << (probe.pair_parity ? "PASS" : "FAIL") << ')'
+                  << " | 4way=" << probe.quad_hps << " (" << (probe.quad_parity ? "PASS" : "FAIL") << ')'
                   << std::defaultfloat << '\n';
-        if (!local_candidate) continue;
 
-        CnWidthPolicy candidate = widths;
-        candidate[variant] = 2U;
-        set_runtime_affinity_policy(AffinityPolicy::Unpinned);
-        std::cout << "[CPU CN confirm] " << name << " | whole-GhostRider x3..." << std::flush;
-        const double candidate_hps = benchmark_plan_repeated(selected_plan, candidate, 3U, stop);
-        const bool parity_ok = parity_width_policy(candidate);
-        const double gain_pct = whole_plan_hps > 0.0 ? ((candidate_hps / whole_plan_hps) - 1.0) * 100.0 : 0.0;
-        const bool promote = parity_ok && candidate_hps > whole_plan_hps * kWholePlanWidthRequiredGain;
-        std::cout << " done | " << std::fixed << std::setprecision(2) << candidate_hps
-                  << " H/s | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << "%"
-                  << " | parity=" << (parity_ok ? "PASS" : "FAIL")
-                  << " | " << (promote ? "promote" : "reject") << std::defaultfloat << '\n';
-        if (promote) {
-            widths = candidate;
-            whole_plan_hps = candidate_hps;
+        struct Candidate { unsigned int width; double local_hps; bool parity; };
+        std::array<Candidate, 2> candidates{{
+            {2U, probe.pair_hps, probe.pair_parity},
+            {4U, probe.quad_hps, probe.quad_parity}
+        }};
+        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+            return a.local_hps > b.local_hps;
+        });
+
+        for (const auto& local : candidates) {
+            if (!local.parity || probe.scalar_hps <= 0.0 ||
+                local.local_hps <= probe.scalar_hps * kCnLocalRequiredGain) continue;
+
+            CnWidthPolicy candidate = widths;
+            candidate[variant] = local.width;
+            set_runtime_affinity_policy(AffinityPolicy::Unpinned);
+            std::cout << "[CPU CN confirm] " << name << " | width=" << local.width
+                      << " | whole-GhostRider x3..." << std::flush;
+            const double candidate_hps = benchmark_plan_repeated(selected_plan, candidate, 3U, stop);
+            const bool parity_ok = parity_width_policy(candidate);
+            const double gain_pct = whole_plan_hps > 0.0 ? ((candidate_hps / whole_plan_hps) - 1.0) * 100.0 : 0.0;
+            const bool promote = parity_ok && candidate_hps > whole_plan_hps * kWholePlanWidthRequiredGain;
+            std::cout << " done | " << std::fixed << std::setprecision(2) << candidate_hps
+                      << " H/s | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << "%"
+                      << " | parity=" << (parity_ok ? "PASS" : "FAIL")
+                      << " | " << (promote ? "promote" : "reject") << std::defaultfloat << '\n';
+            if (promote) {
+                widths = candidate;
+                whole_plan_hps = candidate_hps;
+                break;
+            }
         }
     }
 
@@ -481,7 +526,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | affinity=" << affinity_policy_name(best.affinity)
               << " | parity=" << (parity_ok ? "PASS" : "FAIL-scalar")
               << " | throughput=" << std::fixed << std::setprecision(2) << best.throughput_hps << " H/s"
-              << " | cache=cpu-policy-v5" << std::defaultfloat << '\n';
+              << " | cache=cpu-policy-v6" << std::defaultfloat << '\n';
     return best;
 }
 
