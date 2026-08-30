@@ -3,6 +3,7 @@
 #include "cpu/cpu_topology.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -46,7 +47,8 @@ public:
     std::vector<Candidate> run(const std::array<std::uint8_t, 80>& base_header,
                                const std::array<std::uint8_t, 32>& target_le,
                                std::uint32_t batch_start,
-                               unsigned int per_thread);
+                               unsigned int per_thread,
+                               const std::atomic_bool* stop = nullptr);
 
 private:
     struct Impl;
