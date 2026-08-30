@@ -15,9 +15,9 @@ static YERBAS_TLS OAES_CTX* g_yerbas_cn_2way_oaes1 = NULL;
 static int yerbas_cn_2way_resources(void)
 {
     if (g_yerbas_cn_2way_scratchpad0 == NULL)
-        g_yerbas_cn_2way_scratchpad0 = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
+        g_yerbas_cn_2way_scratchpad0 = yerbas_cn_alloc_scratchpad();
     if (g_yerbas_cn_2way_scratchpad1 == NULL)
-        g_yerbas_cn_2way_scratchpad1 = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
+        g_yerbas_cn_2way_scratchpad1 = yerbas_cn_alloc_scratchpad();
     if (g_yerbas_cn_2way_oaes0 == NULL) g_yerbas_cn_2way_oaes0 = oaes_alloc();
     if (g_yerbas_cn_2way_oaes1 == NULL) g_yerbas_cn_2way_oaes1 = oaes_alloc();
     return g_yerbas_cn_2way_scratchpad0 != NULL &&
@@ -274,23 +274,25 @@ int yerbas_cn_hash_pair_2way(const char* input0,
         const uint64_t offset_mask = ((uint64_t)aes_rounds - 1U) << 4;
         __m128i ax0 = _mm_loadu_si128((const __m128i*)a0), ax1 = _mm_loadu_si128((const __m128i*)a1);
         __m128i bx0 = _mm_loadu_si128((const __m128i*)b0), bx1 = _mm_loadu_si128((const __m128i*)b1);
-        __m128i cx0, cx1;
         if (page_size == 2097152U && iterations == YERBAS_CN_FAST_ITERATIONS && aes_rounds == 131072U) {
             yerbas_cn_fast_pair_loop(&ax0,&bx0,&ax1,&bx1,
                                      g_yerbas_cn_2way_scratchpad0,g_yerbas_cn_2way_scratchpad1,
                                      tweak0,tweak1);
         } else {
-            for (i = 0; i < iterations; ++i) {
+            for (i=0;i<iterations;++i) {
+                __m128i cx0,cx1;
                 yerbas_cn_lane_loop_phase1_xmm(ax0,bx0,&cx0,g_yerbas_cn_2way_scratchpad0,offset_mask);
                 yerbas_cn_lane_loop_phase1_xmm(ax1,bx1,&cx1,g_yerbas_cn_2way_scratchpad1,offset_mask);
                 yerbas_cn_lane_loop_phase2_xmm(&ax0,&bx0,cx0,g_yerbas_cn_2way_scratchpad0,offset_mask,tweak0);
                 yerbas_cn_lane_loop_phase2_xmm(&ax1,&bx1,cx1,g_yerbas_cn_2way_scratchpad1,offset_mask,tweak1);
             }
         }
+        _mm_storeu_si128((__m128i*)a0,ax0); _mm_storeu_si128((__m128i*)a1,ax1);
+        _mm_storeu_si128((__m128i*)b0,bx0); _mm_storeu_si128((__m128i*)b1,bx1);
     } else
 #endif
     {
-        for (i = 0; i < iterations; ++i) {
+        for (i=0;i<iterations;++i) {
             yerbas_cn_lane_loop_phase1(a0,b0,c0,g_yerbas_cn_2way_scratchpad0,aes_rounds);
             yerbas_cn_lane_loop_phase1(a1,b1,c1,g_yerbas_cn_2way_scratchpad1,aes_rounds);
             yerbas_cn_lane_loop_phase2(a0,b0,c0,g_yerbas_cn_2way_scratchpad0,aes_rounds,tweak0);
