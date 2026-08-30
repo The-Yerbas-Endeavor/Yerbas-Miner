@@ -2,9 +2,9 @@
  *
  * The production x86 path keeps A/B/C in XMM registers and uses byte offsets
  * directly. GhostRider CN address spaces are powers of two, so
- * e2i(x,aes_rounds)*16 is exactly low64(x) & ((aes_rounds-1)<<4). This removes
- * e2i(), temporary vector spills and runtime divide/scale work from the hot
- * multiway loop while preserving the Core variant-1 dependency chain.
+ * e2i(x,aes_rounds)*16 is exactly low64(x) & ((aes_rounds-1)<<4). CN-Fast has
+ * an additional fixed-parameter loop that issues independent chain loads
+ * together so cache/DRAM latency can overlap across lanes.
  */
 
 static YERBAS_TLS uint8_t* g_yerbas_cn_2way_scratchpad0 = NULL;
@@ -117,6 +117,17 @@ static inline uint64_t yerbas_xmm_hi64(__m128i x)
 }
 
 YERBAS_AES_TARGET
+static inline __m128i yerbas_cn_variant1_store_tweak_xmm(__m128i value)
+{
+    static const uint32_t table = 0x75310;
+    const uint64_t high = yerbas_xmm_hi64(value);
+    const uint8_t tmp = (uint8_t)(high >> 24);
+    const uint8_t index = (uint8_t)((((tmp >> 3) & 6U) | (tmp & 1U)) << 1);
+    const uint64_t delta = (uint64_t)((table >> index) & 0x30U) << 24;
+    return _mm_xor_si128(value, _mm_set_epi64x((long long)delta, 0));
+}
+
+YERBAS_AES_TARGET
 static inline void yerbas_cn_lane_loop_phase1_xmm(__m128i a,
                                                    __m128i b,
                                                    __m128i* c,
@@ -125,16 +136,9 @@ static inline void yerbas_cn_lane_loop_phase1_xmm(__m128i a,
 {
     const uint64_t off = yerbas_xmm_lo64(a) & offset_mask;
     __m128i* p = (__m128i*)(long_state + off);
-    __m128i x = _mm_aesenc_si128(_mm_load_si128(p), a);
+    const __m128i x = _mm_aesenc_si128(_mm_load_si128(p), a);
     *c = x;
-    _mm_store_si128(p, _mm_xor_si128(x, b));
-    {
-        uint8_t* bytes = (uint8_t*)p;
-        const uint8_t tmp = bytes[11];
-        static const uint32_t table = 0x75310;
-        const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1;
-        bytes[11] = tmp ^ ((table >> index) & 0x30);
-    }
+    _mm_store_si128(p, yerbas_cn_variant1_store_tweak_xmm(_mm_xor_si128(x, b)));
     _mm_prefetch((const char*)(long_state + (yerbas_xmm_lo64(x) & offset_mask)), _MM_HINT_T0);
 }
 
@@ -160,6 +164,51 @@ static inline void yerbas_cn_lane_loop_phase2_xmm(__m128i* a,
     *a = _mm_set_epi64x((long long)a1, (long long)a0);
     *b = c;
     _mm_prefetch((const char*)(long_state + (a0 & offset_mask)), _MM_HINT_T0);
+}
+
+#define YERBAS_CN_FAST_OFFSET_MASK 2097136ULL
+#define YERBAS_CN_FAST_ITERATIONS 262144U
+
+YERBAS_AES_TARGET
+static void yerbas_cn_fast_pair_loop(__m128i* ax0p, __m128i* bx0p,
+                                     __m128i* ax1p, __m128i* bx1p,
+                                     uint8_t* sp0, uint8_t* sp1,
+                                     uint64_t tweak0, uint64_t tweak1)
+{
+    __m128i ax0 = *ax0p, bx0 = *bx0p, ax1 = *ax1p, bx1 = *bx1p;
+    uint32_t i;
+    for (i = 0; i < YERBAS_CN_FAST_ITERATIONS; ++i) {
+        __m128i* p00 = (__m128i*)(sp0 + (yerbas_xmm_lo64(ax0) & YERBAS_CN_FAST_OFFSET_MASK));
+        __m128i* p01 = (__m128i*)(sp1 + (yerbas_xmm_lo64(ax1) & YERBAS_CN_FAST_OFFSET_MASK));
+        const __m128i s0 = _mm_load_si128(p00);
+        const __m128i s1 = _mm_load_si128(p01);
+        const __m128i cx0 = _mm_aesenc_si128(s0, ax0);
+        const __m128i cx1 = _mm_aesenc_si128(s1, ax1);
+        _mm_store_si128(p00, yerbas_cn_variant1_store_tweak_xmm(_mm_xor_si128(cx0, bx0)));
+        _mm_store_si128(p01, yerbas_cn_variant1_store_tweak_xmm(_mm_xor_si128(cx1, bx1)));
+
+        {
+            uint64_t* d0 = (uint64_t*)(sp0 + (yerbas_xmm_lo64(cx0) & YERBAS_CN_FAST_OFFSET_MASK));
+            uint64_t* d1 = (uint64_t*)(sp1 + (yerbas_xmm_lo64(cx1) & YERBAS_CN_FAST_OFFSET_MASK));
+            const uint64_t t00 = d0[0], t01 = d0[1];
+            const uint64_t t10 = d1[0], t11 = d1[1];
+            uint64_t hi0, hi1;
+            const uint64_t lo0 = mul128(yerbas_xmm_lo64(cx0), t00, &hi0);
+            const uint64_t lo1 = mul128(yerbas_xmm_lo64(cx1), t10, &hi1);
+            uint64_t a00 = yerbas_xmm_lo64(ax0) + hi0;
+            uint64_t a01 = yerbas_xmm_hi64(ax0) + lo0;
+            uint64_t a10 = yerbas_xmm_lo64(ax1) + hi1;
+            uint64_t a11 = yerbas_xmm_hi64(ax1) + lo1;
+            d0[0] = a00; d0[1] = a01 ^ tweak0;
+            d1[0] = a10; d1[1] = a11 ^ tweak1;
+            a00 ^= t00; a01 ^= t01;
+            a10 ^= t10; a11 ^= t11;
+            ax0 = _mm_set_epi64x((long long)a01, (long long)a00);
+            ax1 = _mm_set_epi64x((long long)a11, (long long)a10);
+            bx0 = cx0; bx1 = cx1;
+        }
+    }
+    *ax0p = ax0; *bx0p = bx0; *ax1p = ax1; *bx1p = bx1;
 }
 #endif
 
@@ -226,11 +275,17 @@ int yerbas_cn_hash_pair_2way(const char* input0,
         __m128i ax0 = _mm_loadu_si128((const __m128i*)a0), ax1 = _mm_loadu_si128((const __m128i*)a1);
         __m128i bx0 = _mm_loadu_si128((const __m128i*)b0), bx1 = _mm_loadu_si128((const __m128i*)b1);
         __m128i cx0, cx1;
-        for (i = 0; i < iterations; ++i) {
-            yerbas_cn_lane_loop_phase1_xmm(ax0,bx0,&cx0,g_yerbas_cn_2way_scratchpad0,offset_mask);
-            yerbas_cn_lane_loop_phase1_xmm(ax1,bx1,&cx1,g_yerbas_cn_2way_scratchpad1,offset_mask);
-            yerbas_cn_lane_loop_phase2_xmm(&ax0,&bx0,cx0,g_yerbas_cn_2way_scratchpad0,offset_mask,tweak0);
-            yerbas_cn_lane_loop_phase2_xmm(&ax1,&bx1,cx1,g_yerbas_cn_2way_scratchpad1,offset_mask,tweak1);
+        if (page_size == 2097152U && iterations == YERBAS_CN_FAST_ITERATIONS && aes_rounds == 131072U) {
+            yerbas_cn_fast_pair_loop(&ax0,&bx0,&ax1,&bx1,
+                                     g_yerbas_cn_2way_scratchpad0,g_yerbas_cn_2way_scratchpad1,
+                                     tweak0,tweak1);
+        } else {
+            for (i = 0; i < iterations; ++i) {
+                yerbas_cn_lane_loop_phase1_xmm(ax0,bx0,&cx0,g_yerbas_cn_2way_scratchpad0,offset_mask);
+                yerbas_cn_lane_loop_phase1_xmm(ax1,bx1,&cx1,g_yerbas_cn_2way_scratchpad1,offset_mask);
+                yerbas_cn_lane_loop_phase2_xmm(&ax0,&bx0,cx0,g_yerbas_cn_2way_scratchpad0,offset_mask,tweak0);
+                yerbas_cn_lane_loop_phase2_xmm(&ax1,&bx1,cx1,g_yerbas_cn_2way_scratchpad1,offset_mask,tweak1);
+            }
         }
     } else
 #endif
