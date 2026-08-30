@@ -170,6 +170,17 @@ unsigned int yerbas_cn_reuse_compile_features(void)
 #if YERBAS_X86_AES_RUNTIME
 #include "cn_aesni_parallel.inc"
 
+YERBAS_AES_TARGET
+static inline __m128i yerbas_cn_variant1_tweak_xmm(__m128i value)
+{
+    const uint64_t upper = (uint64_t)_mm_cvtsi128_si64(_mm_srli_si128(value, 8));
+    const uint8_t tmp = (uint8_t)(upper >> 24);
+    static const uint32_t table = 0x75310;
+    const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1;
+    const uint64_t tweak = (uint64_t)((table >> index) & 0x30) << 24;
+    return _mm_xor_si128(value, _mm_set_epi64x((long long)tweak, 0));
+}
+
 /* The six Yerbas GhostRider CryptoNight flavours are fixed parameter sets.
  * Generate one scalar variant-1 AES-NI kernel per set so the dependency-heavy
  * loop contains no e2i() call, no runtime page/iteration arithmetic and no
@@ -216,15 +227,8 @@ static void NAME(const char* input, char* output, uint32_t len) \
             const uint64_t off0 = ((uint64_t)_mm_cvtsi128_si64(ax)) & offset_mask; \
             __m128i* p0 = (__m128i*)(long_state + off0); \
             const __m128i cx = _mm_aesenc_si128(_mm_load_si128(p0), ax); \
-            __m128i wr = _mm_xor_si128(bx, cx); \
+            __m128i wr = yerbas_cn_variant1_tweak_xmm(_mm_xor_si128(bx, cx)); \
             _mm_store_si128(p0, wr); \
-            { \
-                uint8_t* q = (uint8_t*)p0; \
-                const uint8_t tmp = q[11]; \
-                static const uint32_t table = 0x75310; \
-                const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1; \
-                q[11] = tmp ^ ((table >> index) & 0x30); \
-            } \
             { \
                 const uint64_t off1 = ((uint64_t)_mm_cvtsi128_si64(cx)) & offset_mask; \
                 uint64_t* dst = (uint64_t*)(long_state + off1); \
@@ -303,7 +307,7 @@ void yerbas_cn_slow_hash_reuse(const char* input,
                                size_t aes_rounds)
 {
     if (!g_yerbas_cn_backend_reported) {
-        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes\n",
+        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes | register-tweak=yes\n",
                yerbas_cn_reuse_backend());
         g_yerbas_cn_backend_reported = 1;
     }
