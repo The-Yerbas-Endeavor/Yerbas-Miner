@@ -1,9 +1,10 @@
 /* Genuine two-lane CryptoNight execution path.
  *
- * The production x86 path keeps the hot A/B/C state in XMM registers across
- * each sub-step, uses AESENC directly, and prefetches the dependent phase-2
- * address as soon as C is known. Two independent chains are interleaved so the
- * CPU can make progress while either chain waits on scratchpad latency.
+ * The production x86 path keeps A/B/C in XMM registers and uses byte offsets
+ * directly. GhostRider CN address spaces are powers of two, so
+ * e2i(x,aes_rounds)*16 is exactly low64(x) & ((aes_rounds-1)<<4). This removes
+ * e2i(), temporary vector spills and runtime divide/scale work from the hot
+ * multiway loop while preserving the Core variant-1 dependency chain.
  */
 
 static YERBAS_TLS uint8_t* g_yerbas_cn_2way_scratchpad0 = NULL;
@@ -17,10 +18,8 @@ static int yerbas_cn_2way_resources(void)
         g_yerbas_cn_2way_scratchpad0 = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
     if (g_yerbas_cn_2way_scratchpad1 == NULL)
         g_yerbas_cn_2way_scratchpad1 = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
-    if (g_yerbas_cn_2way_oaes0 == NULL)
-        g_yerbas_cn_2way_oaes0 = oaes_alloc();
-    if (g_yerbas_cn_2way_oaes1 == NULL)
-        g_yerbas_cn_2way_oaes1 = oaes_alloc();
+    if (g_yerbas_cn_2way_oaes0 == NULL) g_yerbas_cn_2way_oaes0 = oaes_alloc();
+    if (g_yerbas_cn_2way_oaes1 == NULL) g_yerbas_cn_2way_oaes1 = oaes_alloc();
     return g_yerbas_cn_2way_scratchpad0 != NULL &&
            g_yerbas_cn_2way_scratchpad1 != NULL &&
            g_yerbas_cn_2way_oaes0 != NULL &&
@@ -40,12 +39,10 @@ static void yerbas_cn_lane_setup(const char* input,
     uint8_t aes_key[AES_KEY_SIZE];
     const size_t init_rounds = page_size / INIT_SIZE_BYTE;
     size_t i, j;
-
     hash_process(&state->hs, (const uint8_t*)input, len);
     memcpy(text, state->init, INIT_SIZE_BYTE);
     memcpy(aes_key, state->hs.b, AES_KEY_SIZE);
     oaes_key_import_data((oaes_ctx*)aes_ctx, aes_key, AES_KEY_SIZE);
-
     for (i = 0; i < init_rounds; ++i) {
 #if YERBAS_X86_AES_RUNTIME
         if (yerbas_runtime_has_aes_avx2()) {
@@ -60,7 +57,6 @@ static void yerbas_cn_lane_setup(const char* input,
         }
         memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE);
     }
-
     for (i = 0; i < 16; ++i) {
         a[i] = state->k[i] ^ state->k[32 + i];
         b[i] = state->k[16 + i] ^ state->k[48 + i];
@@ -94,8 +90,7 @@ static inline void yerbas_cn_lane_loop_phase2(uint8_t a[AES_BLOCK_SIZE],
 {
     const size_t j = e2i(c, aes_rounds);
     uint64_t* dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
-    const uint64_t t0 = dst[0];
-    const uint64_t t1 = dst[1];
+    const uint64_t t0 = dst[0], t1 = dst[1];
     uint64_t hi;
     const uint64_t lo = mul128(((const uint64_t*)c)[0], t0, &hi);
     ((uint64_t*)a)[0] += hi;
@@ -110,19 +105,29 @@ static inline void yerbas_cn_lane_loop_phase2(uint8_t a[AES_BLOCK_SIZE],
 
 #if YERBAS_X86_AES_RUNTIME
 YERBAS_AES_TARGET
+static inline uint64_t yerbas_xmm_lo64(__m128i x)
+{
+    return (uint64_t)_mm_cvtsi128_si64(x);
+}
+
+YERBAS_AES_TARGET
+static inline uint64_t yerbas_xmm_hi64(__m128i x)
+{
+    return (uint64_t)_mm_cvtsi128_si64(_mm_srli_si128(x, 8));
+}
+
+YERBAS_AES_TARGET
 static inline void yerbas_cn_lane_loop_phase1_xmm(__m128i a,
                                                    __m128i b,
                                                    __m128i* c,
                                                    uint8_t* long_state,
-                                                   size_t aes_rounds)
+                                                   uint64_t offset_mask)
 {
-    const size_t j = e2i((const uint8_t*)&a, aes_rounds);
-    __m128i* p = (__m128i*)(long_state + j * AES_BLOCK_SIZE);
-    __m128i x = _mm_loadu_si128(p);
-    x = _mm_aesenc_si128(x, a);
+    const uint64_t off = yerbas_xmm_lo64(a) & offset_mask;
+    __m128i* p = (__m128i*)(long_state + off);
+    __m128i x = _mm_aesenc_si128(_mm_load_si128(p), a);
     *c = x;
-    x = _mm_xor_si128(x, b);
-    _mm_storeu_si128(p, x);
+    _mm_store_si128(p, _mm_xor_si128(x, b));
     {
         uint8_t* bytes = (uint8_t*)p;
         const uint8_t tmp = bytes[11];
@@ -130,10 +135,7 @@ static inline void yerbas_cn_lane_loop_phase1_xmm(__m128i a,
         const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1;
         bytes[11] = tmp ^ ((table >> index) & 0x30);
     }
-    {
-        const size_t next = e2i((const uint8_t*)c, aes_rounds);
-        _mm_prefetch((const char*)(long_state + next * AES_BLOCK_SIZE), _MM_HINT_T0);
-    }
+    _mm_prefetch((const char*)(long_state + (yerbas_xmm_lo64(x) & offset_mask)), _MM_HINT_T0);
 }
 
 YERBAS_AES_TARGET
@@ -141,32 +143,23 @@ static inline void yerbas_cn_lane_loop_phase2_xmm(__m128i* a,
                                                    __m128i* b,
                                                    __m128i c,
                                                    uint8_t* long_state,
-                                                   size_t aes_rounds,
+                                                   uint64_t offset_mask,
                                                    uint64_t tweak1_2)
 {
-    const size_t j = e2i((const uint8_t*)&c, aes_rounds);
-    uint64_t* dst = (uint64_t*)(long_state + j * AES_BLOCK_SIZE);
-    const uint64_t t0 = dst[0];
-    const uint64_t t1 = dst[1];
-    uint64_t av[2];
-    uint64_t cv[2];
+    const uint64_t off = yerbas_xmm_lo64(c) & offset_mask;
+    uint64_t* dst = (uint64_t*)(long_state + off);
+    const uint64_t t0 = dst[0], t1 = dst[1];
     uint64_t hi;
-    uint64_t lo;
-    _mm_storeu_si128((__m128i*)av, *a);
-    _mm_storeu_si128((__m128i*)cv, c);
-    lo = mul128(cv[0], t0, &hi);
-    av[0] += hi;
-    av[1] += lo;
-    dst[0] = av[0];
-    dst[1] = av[1] ^ tweak1_2;
-    av[0] ^= t0;
-    av[1] ^= t1;
-    *a = _mm_loadu_si128((const __m128i*)av);
+    const uint64_t lo = mul128(yerbas_xmm_lo64(c), t0, &hi);
+    uint64_t a0 = yerbas_xmm_lo64(*a) + hi;
+    uint64_t a1 = yerbas_xmm_hi64(*a) + lo;
+    dst[0] = a0;
+    dst[1] = a1 ^ tweak1_2;
+    a0 ^= t0;
+    a1 ^= t1;
+    *a = _mm_set_epi64x((long long)a1, (long long)a0);
     *b = c;
-    {
-        const size_t next = e2i((const uint8_t*)a, aes_rounds);
-        _mm_prefetch((const char*)(long_state + next * AES_BLOCK_SIZE), _MM_HINT_T0);
-    }
+    _mm_prefetch((const char*)(long_state + (a0 & offset_mask)), _MM_HINT_T0);
 }
 #endif
 
@@ -220,44 +213,37 @@ int yerbas_cn_hash_pair_2way(const char* input0,
     uint8_t c0[AES_BLOCK_SIZE], c1[AES_BLOCK_SIZE];
     uint64_t tweak0, tweak1;
     uint32_t i;
-
-    if (input0 == NULL || input1 == NULL || output0 == NULL || output1 == NULL) return 0;
+    if (!input0 || !input1 || !output0 || !output1) return 0;
     if (variant != 1 || len < 43U || page_size > YERBAS_CN_MAX_PAGE_SIZE) return 0;
     if (!yerbas_cn_2way_resources()) return 0;
-
-    yerbas_cn_lane_setup(input0, (int)len, &state0, text0, a0, b0, g_yerbas_cn_2way_scratchpad0, g_yerbas_cn_2way_oaes0, page_size);
-    yerbas_cn_lane_setup(input1, (int)len, &state1, text1, a1, b1, g_yerbas_cn_2way_scratchpad1, g_yerbas_cn_2way_oaes1, page_size);
+    yerbas_cn_lane_setup(input0,(int)len,&state0,text0,a0,b0,g_yerbas_cn_2way_scratchpad0,g_yerbas_cn_2way_oaes0,page_size);
+    yerbas_cn_lane_setup(input1,(int)len,&state1,text1,a1,b1,g_yerbas_cn_2way_scratchpad1,g_yerbas_cn_2way_oaes1,page_size);
     tweak0 = *(const uint64_t*)((const uint8_t*)input0 + 35) ^ state0.hs.w[24];
     tweak1 = *(const uint64_t*)((const uint8_t*)input1 + 35) ^ state1.hs.w[24];
-
 #if YERBAS_X86_AES_RUNTIME
     if (yerbas_runtime_has_aes_avx2()) {
-        __m128i ax0 = _mm_loadu_si128((const __m128i*)a0);
-        __m128i ax1 = _mm_loadu_si128((const __m128i*)a1);
-        __m128i bx0 = _mm_loadu_si128((const __m128i*)b0);
-        __m128i bx1 = _mm_loadu_si128((const __m128i*)b1);
+        const uint64_t offset_mask = ((uint64_t)aes_rounds - 1U) << 4;
+        __m128i ax0 = _mm_loadu_si128((const __m128i*)a0), ax1 = _mm_loadu_si128((const __m128i*)a1);
+        __m128i bx0 = _mm_loadu_si128((const __m128i*)b0), bx1 = _mm_loadu_si128((const __m128i*)b1);
         __m128i cx0, cx1;
         for (i = 0; i < iterations; ++i) {
-            yerbas_cn_lane_loop_phase1_xmm(ax0, bx0, &cx0, g_yerbas_cn_2way_scratchpad0, aes_rounds);
-            yerbas_cn_lane_loop_phase1_xmm(ax1, bx1, &cx1, g_yerbas_cn_2way_scratchpad1, aes_rounds);
-            yerbas_cn_lane_loop_phase2_xmm(&ax0, &bx0, cx0, g_yerbas_cn_2way_scratchpad0, aes_rounds, tweak0);
-            yerbas_cn_lane_loop_phase2_xmm(&ax1, &bx1, cx1, g_yerbas_cn_2way_scratchpad1, aes_rounds, tweak1);
+            yerbas_cn_lane_loop_phase1_xmm(ax0,bx0,&cx0,g_yerbas_cn_2way_scratchpad0,offset_mask);
+            yerbas_cn_lane_loop_phase1_xmm(ax1,bx1,&cx1,g_yerbas_cn_2way_scratchpad1,offset_mask);
+            yerbas_cn_lane_loop_phase2_xmm(&ax0,&bx0,cx0,g_yerbas_cn_2way_scratchpad0,offset_mask,tweak0);
+            yerbas_cn_lane_loop_phase2_xmm(&ax1,&bx1,cx1,g_yerbas_cn_2way_scratchpad1,offset_mask,tweak1);
         }
-        _mm_storeu_si128((__m128i*)a0, ax0); _mm_storeu_si128((__m128i*)a1, ax1);
-        _mm_storeu_si128((__m128i*)b0, bx0); _mm_storeu_si128((__m128i*)b1, bx1);
     } else
 #endif
     {
         for (i = 0; i < iterations; ++i) {
-            yerbas_cn_lane_loop_phase1(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds);
-            yerbas_cn_lane_loop_phase1(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds);
-            yerbas_cn_lane_loop_phase2(a0, b0, c0, g_yerbas_cn_2way_scratchpad0, aes_rounds, tweak0);
-            yerbas_cn_lane_loop_phase2(a1, b1, c1, g_yerbas_cn_2way_scratchpad1, aes_rounds, tweak1);
+            yerbas_cn_lane_loop_phase1(a0,b0,c0,g_yerbas_cn_2way_scratchpad0,aes_rounds);
+            yerbas_cn_lane_loop_phase1(a1,b1,c1,g_yerbas_cn_2way_scratchpad1,aes_rounds);
+            yerbas_cn_lane_loop_phase2(a0,b0,c0,g_yerbas_cn_2way_scratchpad0,aes_rounds,tweak0);
+            yerbas_cn_lane_loop_phase2(a1,b1,c1,g_yerbas_cn_2way_scratchpad1,aes_rounds,tweak1);
         }
     }
-
-    yerbas_cn_lane_finish(&state0, text0, g_yerbas_cn_2way_scratchpad0, g_yerbas_cn_2way_oaes0, page_size, output0);
-    yerbas_cn_lane_finish(&state1, text1, g_yerbas_cn_2way_scratchpad1, g_yerbas_cn_2way_oaes1, page_size, output1);
+    yerbas_cn_lane_finish(&state0,text0,g_yerbas_cn_2way_scratchpad0,g_yerbas_cn_2way_oaes0,page_size,output0);
+    yerbas_cn_lane_finish(&state1,text1,g_yerbas_cn_2way_scratchpad1,g_yerbas_cn_2way_oaes1,page_size,output1);
     return 1;
 }
 
