@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 #include "slow-hash.h"
 #include "oaes_lib.h"
@@ -22,12 +25,45 @@ void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 static YERBAS_TLS uint8_t* g_yerbas_cn_scratchpad = NULL;
 static YERBAS_TLS OAES_CTX* g_yerbas_cn_oaes = NULL;
 static YERBAS_TLS int g_yerbas_aes_avx2_runtime = -1;
+static int g_yerbas_cn_hugepage_mode = 0;
+
+static uint8_t* yerbas_cn_alloc_scratchpad(void)
+{
+#if defined(__linux__)
+    void* p;
+#if defined(MAP_HUGETLB)
+    p = mmap(NULL, YERBAS_CN_MAX_PAGE_SIZE, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (p != MAP_FAILED) {
+        g_yerbas_cn_hugepage_mode = 2;
+        return (uint8_t*)p;
+    }
+#endif
+    p = mmap(NULL, YERBAS_CN_MAX_PAGE_SIZE, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) {
+#if defined(MADV_HUGEPAGE)
+        if (madvise(p, YERBAS_CN_MAX_PAGE_SIZE, MADV_HUGEPAGE) == 0)
+            g_yerbas_cn_hugepage_mode = 1;
+#endif
+        return (uint8_t*)p;
+    }
+#endif
+    return (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
+}
+
+static const char* yerbas_cn_page_mode(void)
+{
+    if (g_yerbas_cn_hugepage_mode == 2) return "explicit-2MiB";
+    if (g_yerbas_cn_hugepage_mode == 1) return "transparent-hugepage";
+    return "normal-pages";
+}
 
 static void* yerbas_tls_cn_malloc(size_t requested)
 {
     if (requested > YERBAS_CN_MAX_PAGE_SIZE) return NULL;
     if (g_yerbas_cn_scratchpad == NULL)
-        g_yerbas_cn_scratchpad = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
+        g_yerbas_cn_scratchpad = yerbas_cn_alloc_scratchpad();
     return g_yerbas_cn_scratchpad;
 }
 
@@ -181,11 +217,6 @@ static inline __m128i yerbas_cn_variant1_tweak_xmm(__m128i value)
     return _mm_xor_si128(value, _mm_set_epi64x((long long)tweak, 0));
 }
 
-/* The six Yerbas GhostRider CryptoNight flavours are fixed parameter sets.
- * Generate one scalar variant-1 AES-NI kernel per set so the dependency-heavy
- * loop contains no e2i() call, no runtime page/iteration arithmetic and no
- * generic AES/variant dispatch. A/B/C stay in XMM registers; only the two
- * data-dependent scratchpad locations touch memory each iteration. */
 #define YERBAS_DEFINE_CN_V1_KERNEL(NAME, PAGE_SIZE_CONST, ITERATIONS_CONST, OFFSET_MASK_CONST) \
 YERBAS_AES_TARGET \
 static void NAME(const char* input, char* output, uint32_t len) \
@@ -200,7 +231,7 @@ static void NAME(const char* input, char* output, uint32_t len) \
     const uint64_t offset_mask = (uint64_t)(OFFSET_MASK_CONST); \
     __m128i ax, bx; \
     if (g_yerbas_cn_scratchpad == NULL) \
-        g_yerbas_cn_scratchpad = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE); \
+        g_yerbas_cn_scratchpad = yerbas_cn_alloc_scratchpad(); \
     if (g_yerbas_cn_oaes == NULL) g_yerbas_cn_oaes = oaes_alloc(); \
     long_state = g_yerbas_cn_scratchpad; \
     aes_ctx = (oaes_ctx*)g_yerbas_cn_oaes; \
@@ -256,8 +287,6 @@ static void NAME(const char* input, char* output, uint32_t len) \
     extra_hashes[state.hs.b[0] & 3](&state, 200, output); \
 }
 
-/* offset mask is ((aes_rounds - 1) << 4), exactly equivalent to
- * e2i(x, aes_rounds) * AES_BLOCK_SIZE for power-of-two aes_rounds. */
 YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_dark_v1_aesni,       524288U,  131072U,  524272U)
 YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_darklite_v1_aesni,   524288U,  131072U,  262128U)
 YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_fast_v1_aesni,      2097152U,  262144U, 2097136U)
@@ -267,69 +296,42 @@ YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_turtlelite_v1_aesni, 262144U,   65536U,  13
 #undef YERBAS_DEFINE_CN_V1_KERNEL
 
 YERBAS_AES_TARGET
-static int yerbas_cn_dispatch_fixed_v1(const char* input,
-                                       char* output,
-                                       uint32_t len,
-                                       uint32_t page_size,
-                                       uint32_t iterations,
-                                       size_t aes_rounds)
+static int yerbas_cn_dispatch_fixed_v1(const char* input, char* output, uint32_t len,
+                                       uint32_t page_size, uint32_t iterations, size_t aes_rounds)
 {
-    if (page_size == 524288U && iterations == 131072U && aes_rounds == 32768U) {
-        yerbas_cn_dark_v1_aesni(input, output, len); return 1;
-    }
-    if (page_size == 524288U && iterations == 131072U && aes_rounds == 16384U) {
-        yerbas_cn_darklite_v1_aesni(input, output, len); return 1;
-    }
-    if (page_size == 2097152U && iterations == 262144U && aes_rounds == 131072U) {
-        yerbas_cn_fast_v1_aesni(input, output, len); return 1;
-    }
-    if (page_size == 1048576U && iterations == 262144U && aes_rounds == 65536U) {
-        yerbas_cn_lite_v1_aesni(input, output, len); return 1;
-    }
-    if (page_size == 262144U && iterations == 65536U && aes_rounds == 16384U) {
-        yerbas_cn_turtle_v1_aesni(input, output, len); return 1;
-    }
-    if (page_size == 262144U && iterations == 65536U && aes_rounds == 8192U) {
-        yerbas_cn_turtlelite_v1_aesni(input, output, len); return 1;
-    }
+    if (page_size == 524288U && iterations == 131072U && aes_rounds == 32768U) { yerbas_cn_dark_v1_aesni(input, output, len); return 1; }
+    if (page_size == 524288U && iterations == 131072U && aes_rounds == 16384U) { yerbas_cn_darklite_v1_aesni(input, output, len); return 1; }
+    if (page_size == 2097152U && iterations == 262144U && aes_rounds == 131072U) { yerbas_cn_fast_v1_aesni(input, output, len); return 1; }
+    if (page_size == 1048576U && iterations == 262144U && aes_rounds == 65536U) { yerbas_cn_lite_v1_aesni(input, output, len); return 1; }
+    if (page_size == 262144U && iterations == 65536U && aes_rounds == 16384U) { yerbas_cn_turtle_v1_aesni(input, output, len); return 1; }
+    if (page_size == 262144U && iterations == 65536U && aes_rounds == 8192U) { yerbas_cn_turtlelite_v1_aesni(input, output, len); return 1; }
     return 0;
 }
 #endif
 
 static int g_yerbas_cn_backend_reported = 0;
 
-void yerbas_cn_slow_hash_reuse(const char* input,
-                               char* output,
-                               uint32_t len,
-                               int variant,
-                               uint32_t page_size,
-                               uint32_t iterations,
-                               size_t aes_rounds)
+void yerbas_cn_slow_hash_reuse(const char* input, char* output, uint32_t len, int variant,
+                               uint32_t page_size, uint32_t iterations, size_t aes_rounds)
 {
     if (!g_yerbas_cn_backend_reported) {
-        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes | register-tweak=yes\n",
-               yerbas_cn_reuse_backend());
+        if (g_yerbas_cn_scratchpad == NULL) g_yerbas_cn_scratchpad = yerbas_cn_alloc_scratchpad();
+        printf("CPU CryptoNight backend: %s | pages=%s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes | register-tweak=yes\n",
+               yerbas_cn_reuse_backend(), yerbas_cn_page_mode());
         g_yerbas_cn_backend_reported = 1;
     }
 #if YERBAS_X86_AES_RUNTIME
     if (variant == 1 && len >= 43U && yerbas_runtime_has_aes_avx2() &&
-        yerbas_cn_dispatch_fixed_v1(input, output, len, page_size, iterations, aes_rounds))
-        return;
+        yerbas_cn_dispatch_fixed_v1(input, output, len, page_size, iterations, aes_rounds)) return;
 #endif
     yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant, page_size, iterations, aes_rounds);
 }
 
 #include "cn_2way_impl.c"
 
-int yerbas_cn_hash_pair_reference(const char* input0,
-                                  const char* input1,
-                                  char* output0,
-                                  char* output1,
-                                  uint32_t len,
-                                  int variant,
-                                  uint32_t page_size,
-                                  uint32_t iterations,
-                                  size_t aes_rounds)
+int yerbas_cn_hash_pair_reference(const char* input0, const char* input1,
+                                  char* output0, char* output1, uint32_t len, int variant,
+                                  uint32_t page_size, uint32_t iterations, size_t aes_rounds)
 {
     if (input0 == NULL || input1 == NULL || output0 == NULL || output1 == NULL) return 0;
     yerbas_cn_slow_hash_reuse(input0, output0, len, variant, page_size, iterations, aes_rounds);
