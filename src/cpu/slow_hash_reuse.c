@@ -168,10 +168,14 @@ unsigned int yerbas_cn_reuse_compile_features(void)
 #undef aesb_pseudo_round
 
 #if YERBAS_X86_AES_RUNTIME
+#include "cn_aesni_parallel.inc"
+
 /* GhostRider's six CN flavours all use CryptoNight variant-1 semantics while
  * changing scratchpad size, iteration count and address mask. Specializing
  * that invariant removes generic variant branches and AES dispatch wrappers
- * from the dependency-heavy scalar loop. */
+ * from the dependency-heavy scalar loop. Setup/final now process all eight
+ * independent AES blocks in parallel to expose AES-NI instruction-level
+ * parallelism instead of completing each 10-round block serially. */
 YERBAS_AES_TARGET
 static void yerbas_cn_slow_hash_v1_aesni(const char* input,
                                          char* output,
@@ -208,8 +212,7 @@ static void yerbas_cn_slow_hash_v1_aesni(const char* input,
     oaes_key_import_data(aes_ctx, aes_key, AES_KEY_SIZE);
 
     for (i = 0; i < init_rounds; ++i) {
-        for (j = 0; j < INIT_SIZE_BLK; ++j)
-            yerbas_aesni_pseudo_round(&text[AES_BLOCK_SIZE * j], &text[AES_BLOCK_SIZE * j], aes_ctx->key->exp_data);
+        yerbas_aesni_pseudo_round8(text, aes_ctx->key->exp_data);
         memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE);
     }
 
@@ -224,8 +227,6 @@ static void yerbas_cn_slow_hash_v1_aesni(const char* input,
         for (i = 0; i < iterations; ++i) {
             uint64_t* dst;
             uint64_t t0, t1, hi, lo;
-            const uint8_t tmp_index_mask = 0;
-            (void)tmp_index_mask;
 
             j = e2i(a, aes_rounds);
             yerbas_aesni_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
@@ -256,12 +257,11 @@ static void yerbas_cn_slow_hash_v1_aesni(const char* input,
 
     memcpy(text, state.init, INIT_SIZE_BYTE);
     oaes_key_import_data(aes_ctx, &state.hs.b[32], AES_KEY_SIZE);
-    for (i = 0; i < init_rounds; ++i) {
-        for (j = 0; j < INIT_SIZE_BLK; ++j) {
-            xor_blocks(&text[j * AES_BLOCK_SIZE], &long_state[i * INIT_SIZE_BYTE + j * AES_BLOCK_SIZE]);
-            yerbas_aesni_pseudo_round(&text[j * AES_BLOCK_SIZE], &text[j * AES_BLOCK_SIZE], aes_ctx->key->exp_data);
-        }
-    }
+    for (i = 0; i < init_rounds; ++i)
+        yerbas_aesni_xor_pseudo_round8(text,
+                                       &long_state[i * INIT_SIZE_BYTE],
+                                       aes_ctx->key->exp_data);
+
     memcpy(state.init, text, INIT_SIZE_BYTE);
     hash_permutation(&state.hs);
     extra_hashes[state.hs.b[0] & 3](&state, 200, output);
@@ -279,7 +279,7 @@ void yerbas_cn_slow_hash_reuse(const char* input,
                                size_t aes_rounds)
 {
     if (!g_yerbas_cn_backend_reported) {
-        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | scalar-v1-specialized=yes\n",
+        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | scalar-v1-specialized=yes | aes8-pipeline=yes\n",
                yerbas_cn_reuse_backend());
         g_yerbas_cn_backend_reported = 1;
     }
