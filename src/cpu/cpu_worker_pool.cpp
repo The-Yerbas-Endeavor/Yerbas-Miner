@@ -148,6 +148,7 @@ struct WorkerPool::Impl {
             std::array<std::uint8_t, 32> target{};
             std::uint32_t start = 0;
             unsigned int count = 0;
+            const std::atomic_bool* stop = nullptr;
 
             {
                 std::unique_lock<std::mutex> lock(mutex);
@@ -158,6 +159,7 @@ struct WorkerPool::Impl {
                 target = target_le;
                 start = batch_start + index * per_thread;
                 count = per_thread;
+                stop = stop_flag;
             }
 
             std::vector<Candidate> found;
@@ -165,6 +167,7 @@ struct WorkerPool::Impl {
             const auto widths = runtime_cn_widths();
 
             for (unsigned int i = 0; i < count;) {
+                if (stop != nullptr && stop->load(std::memory_order_relaxed)) break;
                 const unsigned int group = std::min(lanes, count - i);
                 if (group == 1U || lanes == 1U) {
                     const std::uint32_t nonce = start + i;
@@ -210,7 +213,8 @@ struct WorkerPool::Impl {
     std::vector<Candidate> run(const std::array<std::uint8_t, 80>& header,
                                const std::array<std::uint8_t, 32>& target,
                                std::uint32_t start,
-                               unsigned int count)
+                               unsigned int count,
+                               const std::atomic_bool* stop)
     {
         const auto perf_start = std::chrono::steady_clock::now();
         {
@@ -233,6 +237,7 @@ struct WorkerPool::Impl {
 
             batch_start = start;
             per_thread = count;
+            stop_flag = stop;
             completed = 0;
             for (auto& result : results) result.clear();
             ++generation;
@@ -249,7 +254,7 @@ struct WorkerPool::Impl {
         const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
 
-        if (!tuning_measurement_mode()) {
+        if (!tuning_measurement_mode() && !(stop != nullptr && stop->load(std::memory_order_relaxed))) {
             const std::string policy = lanes == 1U ? "standard" : (lanes == 2U ? "lane2" : "lane4");
             const auto fp = record_fingerprint_runtime(active_fingerprint,
                                                        active_cn_summary,
@@ -318,6 +323,7 @@ struct WorkerPool::Impl {
     std::array<std::uint8_t, 32> target_le{};
     std::uint32_t batch_start{0};
     unsigned int per_thread{0};
+    const std::atomic_bool* stop_flag{nullptr};
 
     std::array<std::uint8_t, 76> active_header_key{};
     std::array<std::uint8_t, 32> active_target{};
@@ -354,9 +360,10 @@ AffinityPolicy WorkerPool::affinity_policy() const noexcept
 std::vector<Candidate> WorkerPool::run(const std::array<std::uint8_t, 80>& base_header,
                                        const std::array<std::uint8_t, 32>& target_le,
                                        std::uint32_t batch_start,
-                                       unsigned int per_thread)
+                                       unsigned int per_thread,
+                                       const std::atomic_bool* stop)
 {
-    return impl_->run(base_header, target_le, batch_start, per_thread);
+    return impl_->run(base_header, target_le, batch_start, per_thread, stop);
 }
 
 } // namespace yerbas::cpu
