@@ -65,22 +65,49 @@ inline void sample_ghostrider_stages(const std::array<std::uint8_t,80>& header,
     if (summary.samples != 1U && (summary.samples % 8U) != 0U) return;
 
     std::size_t hot = 0;
-    for (std::size_t i = 1; i < summary.stage_ewma_ms.size(); ++i)
+    std::size_t hot_core = 0;
+    bool have_core = false;
+    double cn_ms = 0.0;
+    double core_ms = 0.0;
+
+    for (std::size_t i = 0; i < summary.stage_ewma_ms.size(); ++i) {
         if (summary.stage_ewma_ms[i] > summary.stage_ewma_ms[hot]) hot = i;
+        if ((schedule[i] & ghostrider::kCryptoNightStageFlag) != 0) {
+            cn_ms += summary.stage_ewma_ms[i];
+        } else {
+            core_ms += summary.stage_ewma_ms[i];
+            if (!have_core || summary.stage_ewma_ms[i] > summary.stage_ewma_ms[hot_core]) {
+                hot_core = i;
+                have_core = true;
+            }
+        }
+    }
 
     const double pct = summary.total_ewma_ms > 0.0
         ? summary.stage_ewma_ms[hot] * 100.0 / summary.total_ewma_ms
         : 0.0;
+    const double cn_pct = summary.total_ewma_ms > 0.0
+        ? cn_ms * 100.0 / summary.total_ewma_ms : 0.0;
+    const double core_pct = summary.total_ewma_ms > 0.0
+        ? core_ms * 100.0 / summary.total_ewma_ms : 0.0;
 
     std::cout << std::fixed << std::setprecision(3)
               << "[CPU stage profile] rotation=" << std::hex << std::setw(16)
               << std::setfill('0') << fingerprint << std::dec << std::setfill(' ')
               << " | samples=" << summary.samples
               << " | total=" << summary.total_ewma_ms << " ms/hash"
+              << " | CN=" << cn_ms << " ms (" << std::setprecision(1) << cn_pct << "%)"
+              << std::setprecision(3)
+              << " | cores=" << core_ms << " ms (" << std::setprecision(1) << core_pct << "%)"
+              << std::setprecision(3)
               << " | hot=" << hot << ':' << stage_profile_name(schedule[hot])
               << ' ' << summary.stage_ewma_ms[hot] << " ms"
-              << " (" << std::setprecision(1) << pct << "%)"
-              << std::defaultfloat << '\n';
+              << " (" << std::setprecision(1) << pct << "%)";
+    if (have_core)
+        std::cout << std::setprecision(3)
+                  << " | hot-core=" << hot_core << ':' << stage_profile_name(schedule[hot_core])
+                  << ' ' << summary.stage_ewma_ms[hot_core] << " ms";
+    std::cout << std::defaultfloat << '\n';
 }
 
 } // namespace yerbas::cpu
