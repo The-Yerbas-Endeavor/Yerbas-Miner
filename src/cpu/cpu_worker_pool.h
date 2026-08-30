@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cpu/cpu_topology.h"
+
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -26,10 +28,12 @@ bool tuning_measurement_mode() noexcept;
 class WorkerPool {
 public:
     // lane_width=0 inherits the process-level grouping width selected by the
-    // production tuner. Explicit 1/2/4 values are used by benchmarks/tests.
-    // Individual CryptoNight variants still use runtime_cn_widths(), allowing
-    // 1/2/4-way execution to vary by variant inside the same hash batch.
-    explicit WorkerPool(unsigned int thread_count, unsigned int lane_width = 0);
+    // production tuner. The affinity policy is captured when the pool is
+    // constructed so later tuner/global state changes cannot alter or misreport
+    // where these persistent worker threads are actually running.
+    explicit WorkerPool(unsigned int thread_count,
+                        unsigned int lane_width = 0,
+                        AffinityPolicy affinity = runtime_affinity_policy());
     ~WorkerPool();
 
     WorkerPool(const WorkerPool&) = delete;
@@ -37,6 +41,7 @@ public:
 
     unsigned int thread_count() const noexcept;
     unsigned int lane_width() const noexcept;
+    AffinityPolicy affinity_policy() const noexcept;
 
     std::vector<Candidate> run(const std::array<std::uint8_t, 80>& base_header,
                                const std::array<std::uint8_t, 32>& target_le,
