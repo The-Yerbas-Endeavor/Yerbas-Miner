@@ -18,9 +18,12 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuPolicyRevision = 4;
-constexpr double kWidthRequiredGain = 1.02;
+constexpr int kCpuPolicyRevision = 5;
+constexpr double kCnLocalRequiredGain = 1.03;
 constexpr double kWholePlanWidthRequiredGain = 1.005;
+constexpr double kAffinityRequiredGain = 1.02;
+constexpr unsigned int kCnProbePasses = 5;
+constexpr unsigned int kAffinityProbePasses = 5;
 
 bool env_enabled(const char* name)
 {
@@ -75,37 +78,6 @@ std::array<std::array<std::uint8_t, 80>, 3> representative_headers()
     return headers;
 }
 
-std::array<std::array<std::uint8_t, 80>, 6> headers_by_cn_variant()
-{
-    std::array<std::array<std::uint8_t, 80>, 6> headers{};
-    std::array<bool, 6> found{};
-    std::size_t remaining = found.size();
-
-    for (unsigned int seed = 0; seed < 512U && remaining > 0; ++seed) {
-        std::array<std::uint8_t, 80> header{};
-        header[0] = 4;
-        for (std::size_t i = 4; i < 76; ++i)
-            header[i] = static_cast<std::uint8_t>((i * (19U + seed * 2U) + 43U + seed * 29U) & 0xffU);
-        const ghostrider::Work work{header.data(), header.size()};
-        const auto schedule = ghostrider::stage_schedule_quiet(work);
-        for (const auto encoded : schedule) {
-            if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
-            const auto variant = static_cast<std::size_t>(encoded & 0x7fU);
-            if (variant >= found.size() || found[variant]) continue;
-            headers[variant] = header;
-            found[variant] = true;
-            --remaining;
-        }
-    }
-
-    if (remaining != 0) {
-        const auto fallback = representative_headers();
-        for (std::size_t i = 0; i < found.size(); ++i)
-            if (!found[i]) headers[i] = fallback[i % fallback.size()];
-    }
-    return headers;
-}
-
 struct Plan {
     unsigned int workers{1};
     unsigned int batch{16};
@@ -145,6 +117,13 @@ unsigned int max_width(const CnWidthPolicy& widths)
     return *std::max_element(widths.begin(), widths.end());
 }
 
+double median(std::vector<double> samples)
+{
+    if (samples.empty()) return 0.0;
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2U];
+}
+
 double benchmark_header(const Plan& plan,
                         const CnWidthPolicy& widths,
                         const std::array<std::uint8_t, 80>& header,
@@ -178,9 +157,22 @@ double benchmark_plan(const Plan& plan,
         const double hps = benchmark_header(plan, widths, header, stop);
         if (hps > 0.0) samples.push_back(hps);
     }
-    if (samples.empty()) return 0.0;
-    std::sort(samples.begin(), samples.end());
-    return samples[samples.size() / 2U];
+    return median(std::move(samples));
+}
+
+double benchmark_plan_repeated(const Plan& plan,
+                               const CnWidthPolicy& widths,
+                               unsigned int passes,
+                               const std::atomic_bool* stop)
+{
+    std::vector<double> samples;
+    samples.reserve(passes);
+    for (unsigned int pass = 0; pass < passes; ++pass) {
+        if (stopped(stop)) return 0.0;
+        const double hps = benchmark_plan(plan, widths, stop);
+        if (hps > 0.0) samples.push_back(hps);
+    }
+    return median(std::move(samples));
 }
 
 bool parity_width_policy(const CnWidthPolicy& widths)
@@ -208,9 +200,63 @@ bool parity_width_policy(const CnWidthPolicy& widths)
     return true;
 }
 
+struct CnProbeResult {
+    bool parity{false};
+    double scalar_hps{0.0};
+    double pair_hps{0.0};
+};
+
+CnProbeResult probe_cn_pair(std::uint8_t variant, const std::atomic_bool* stop)
+{
+    CnProbeResult out{};
+    ghostrider::Hash512 input0{};
+    ghostrider::Hash512 input1{};
+    for (std::size_t i = 0; i < input0.size(); ++i) {
+        input0[i] = static_cast<std::uint8_t>((i * 29U + variant * 47U + 11U) & 0xffU);
+        input1[i] = static_cast<std::uint8_t>((i * 53U + variant * 31U + 97U) & 0xffU);
+    }
+
+    ghostrider::Hash512 scalar0{}, scalar1{}, pair0{}, pair1{};
+    if (!ghostrider::optimized_cn_stage(input0, variant, scalar0) ||
+        !ghostrider::optimized_cn_stage(input1, variant, scalar1) ||
+        !ghostrider::optimized_cn_pair_stage(input0, input1, variant, pair0, pair1))
+        return out;
+    out.parity = scalar0 == pair0 && scalar1 == pair1;
+    if (!out.parity) return out;
+
+    std::vector<double> scalar_samples;
+    std::vector<double> pair_samples;
+    scalar_samples.reserve(kCnProbePasses);
+    pair_samples.reserve(kCnProbePasses);
+    for (unsigned int pass = 0; pass < kCnProbePasses; ++pass) {
+        if (stopped(stop)) return out;
+        ghostrider::Hash512 a{}, b{};
+        auto begin = std::chrono::steady_clock::now();
+        (void)ghostrider::optimized_cn_stage(input0, variant, a);
+        (void)ghostrider::optimized_cn_stage(input1, variant, b);
+        auto end = std::chrono::steady_clock::now();
+        const double scalar_seconds = std::chrono::duration<double>(end - begin).count();
+        if (scalar_seconds > 0.0) scalar_samples.push_back(2.0 / scalar_seconds);
+
+        begin = std::chrono::steady_clock::now();
+        (void)ghostrider::optimized_cn_pair_stage(input0, input1, variant, a, b);
+        end = std::chrono::steady_clock::now();
+        const double pair_seconds = std::chrono::duration<double>(end - begin).count();
+        if (pair_seconds > 0.0) pair_samples.push_back(2.0 / pair_seconds);
+    }
+    out.scalar_hps = median(std::move(scalar_samples));
+    out.pair_hps = median(std::move(pair_samples));
+    return out;
+}
+
 bool valid_width(unsigned int width)
 {
-    return width == 1U || width == 2U || width == 4U;
+    return width == 1U || width == 2U;
+}
+
+bool valid_affinity(unsigned int value)
+{
+    return value <= static_cast<unsigned int>(AffinityPolicy::PhysicalFirst);
 }
 
 bool load_cache(const std::filesystem::path& path, TuneResult& out)
@@ -219,15 +265,17 @@ bool load_cache(const std::filesystem::path& path, TuneResult& out)
     std::ifstream in(path);
     std::string magic;
     int revision = 0;
+    unsigned int affinity = 0;
     if (!(in >> magic >> revision >> out.threads >> out.lanes >> out.batch)) return false;
     for (auto& width : out.cn_widths)
         if (!(in >> width)) return false;
-    if (!(in >> out.throughput_hps)) return false;
+    if (!(in >> affinity >> out.throughput_hps)) return false;
     if (magic != "YERBAS_CPU_POLICY" || revision != kCpuPolicyRevision ||
-        out.threads == 0U || out.batch == 0U || !valid_width(out.lanes)) return false;
+        out.threads == 0U || out.batch == 0U || !valid_width(out.lanes) || !valid_affinity(affinity)) return false;
     for (const auto width : out.cn_widths)
         if (!valid_width(width)) return false;
     if (out.lanes != max_width(out.cn_widths)) return false;
+    out.affinity = static_cast<AffinityPolicy>(affinity);
     out.from_cache = true;
     return true;
 }
@@ -241,7 +289,8 @@ void save_cache(const std::filesystem::path& path, const TuneResult& value)
         out << "YERBAS_CPU_POLICY " << kCpuPolicyRevision << ' '
             << value.threads << ' ' << value.lanes << ' ' << value.batch;
         for (const auto width : value.cn_widths) out << ' ' << width;
-        out << ' ' << std::setprecision(12) << value.throughput_hps << '\n';
+        out << ' ' << static_cast<unsigned int>(value.affinity)
+            << ' ' << std::setprecision(12) << value.throughput_hps << '\n';
     } catch (...) {}
 }
 
@@ -252,28 +301,19 @@ bool load_compatible_cache(unsigned int hardware_threads,
                            unsigned int& source_ceiling)
 {
     if (env_enabled("YERBAS_CPU_RETUNE")) return false;
-
     bool found = false;
     TuneResult best{};
     unsigned int best_source = ceiling;
-
-    for (unsigned int candidate_ceiling = ceiling;
-         candidate_ceiling <= hardware_threads;
-         ++candidate_ceiling) {
+    for (unsigned int candidate_ceiling = ceiling; candidate_ceiling <= hardware_threads; ++candidate_ceiling) {
         TuneResult candidate{};
-        if (!load_cache(cache_path(hardware_threads, candidate_ceiling, mode), candidate))
-            continue;
-        if (candidate.threads > ceiling)
-            continue;
-        if (!parity_width_policy(candidate.cn_widths))
-            continue;
+        if (!load_cache(cache_path(hardware_threads, candidate_ceiling, mode), candidate)) continue;
+        if (candidate.threads > ceiling || !parity_width_policy(candidate.cn_widths)) continue;
         if (!found || candidate.throughput_hps > best.throughput_hps) {
             best = candidate;
             best_source = candidate_ceiling;
             found = true;
         }
     }
-
     if (!found) return false;
     out = best;
     source_ceiling = best_source;
@@ -295,29 +335,35 @@ TuneResult production_autotune(unsigned int hardware_threads,
     const unsigned int fallback_batch = configured_batch == 0U ? 16U : configured_batch;
     const CnWidthPolicy scalar_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
 
+    set_runtime_affinity_policy(AffinityPolicy::Unpinned);
     if (mode == "off" || env_enabled("YERBAS_CPU_DISABLE_AUTOTUNE"))
-        return TuneResult{ceiling, 1U, fallback_batch, scalar_widths, 0.0, false, false};
+        return TuneResult{ceiling, 1U, fallback_batch, scalar_widths, AffinityPolicy::Unpinned, 0.0, false, false};
 
     TuneResult cached{};
     const auto path = cache_path(hardware_threads, ceiling, mode);
     unsigned int source_ceiling = ceiling;
     if (load_compatible_cache(hardware_threads, ceiling, mode, cached, source_ceiling)) {
         set_runtime_cn_widths(cached.cn_widths);
-        if (source_ceiling != ceiling)
-            save_cache(path, cached);
+        set_runtime_affinity_policy(cached.affinity);
+        if (source_ceiling != ceiling) save_cache(path, cached);
         std::cout << "[CPU tune] cached | mode=" << mode
                   << " | workers=" << cached.threads
                   << " | batch=" << cached.batch
                   << " | CN widths=" << cached.cn_widths[0] << '/' << cached.cn_widths[1] << '/'
                   << cached.cn_widths[2] << '/' << cached.cn_widths[3] << '/'
                   << cached.cn_widths[4] << '/' << cached.cn_widths[5]
-                  << " | throughput=" << std::fixed << std::setprecision(2)
-                  << cached.throughput_hps << " H/s"
+                  << " | affinity=" << affinity_policy_name(cached.affinity)
+                  << " | throughput=" << std::fixed << std::setprecision(2) << cached.throughput_hps << " H/s"
                   << " | source=max" << source_ceiling
                   << (source_ceiling == ceiling ? "" : " (compatible)")
                   << std::defaultfloat << '\n';
         return cached;
     }
+
+    const auto topology = detect_cpu_topology();
+    std::cout << "[CPU topology] logical=" << topology.logical_cpus
+              << " | physical=" << topology.physical_cores
+              << " | detected=" << (topology.available ? "yes" : "no") << '\n';
 
     const auto plans = plans_for(ceiling, fallback_batch, mode);
     std::cout << "[CPU tune] GhostRider production search"
@@ -325,21 +371,17 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | hardware_threads=" << hardware_threads
               << " | ceiling=" << ceiling
               << " | baseline_candidates=" << plans.size()
-              << " | CN-width-probes=6x(1/2/4)"
+              << " | CN-probes=6x(scalar/2way)x5"
               << " | metric=end-to-end H/s\n";
 
-    TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, 0.0, false, false};
+    TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, AffinityPolicy::Unpinned, 0.0, false, false};
     std::size_t plan_index = 0;
     for (const auto& plan : plans) {
-        if (stopped(stop)) {
-            best.interrupted = true;
-            return best;
-        }
+        if (stopped(stop)) { best.interrupted = true; return best; }
         ++plan_index;
         std::cout << "[CPU tune] baseline " << plan_index << '/' << plans.size()
-                  << " | workers=" << plan.workers
-                  << " | batch=" << plan.batch
-                  << " | testing..." << std::flush;
+                  << " | workers=" << plan.workers << " | batch=" << plan.batch << " | testing..." << std::flush;
+        set_runtime_affinity_policy(AffinityPolicy::Unpinned);
         const double hps = benchmark_plan(plan, scalar_widths, stop);
         if (hps > best.throughput_hps) {
             best.threads = plan.workers;
@@ -347,116 +389,99 @@ TuneResult production_autotune(unsigned int hardware_threads,
             best.throughput_hps = hps;
         }
         std::cout << " done | " << std::fixed << std::setprecision(2) << hps
-                  << " H/s | best=" << best.throughput_hps << " H/s"
-                  << std::defaultfloat << '\n';
+                  << " H/s | best=" << best.throughput_hps << " H/s" << std::defaultfloat << '\n';
     }
 
-    if (stopped(stop)) {
-        best.interrupted = true;
-        return best;
-    }
-
-    std::cout << "[CPU tune] baseline search complete"
-              << " | workers=" << best.threads
-              << " | batch=" << best.batch
-              << " | throughput=" << std::fixed << std::setprecision(2)
-              << best.throughput_hps << " H/s" << std::defaultfloat << '\n';
+    if (stopped(stop)) { best.interrupted = true; return best; }
 
     const Plan selected_plan{best.threads, best.batch};
-    const auto variant_headers = headers_by_cn_variant();
     CnWidthPolicy widths = scalar_widths;
     double whole_plan_hps = best.throughput_hps;
 
     for (std::size_t variant = 0; variant < widths.size(); ++variant) {
-        if (stopped(stop)) {
-            best.interrupted = true;
-            return best;
-        }
-        const char* variant_name = ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant));
-        std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
-                  << " | " << variant_name << " | testing 1/2/4\n";
-        const double baseline_hps = benchmark_header(selected_plan, widths, variant_headers[variant], stop);
-        unsigned int selected_width = widths[variant];
-        double selected_hps = baseline_hps;
-        std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
-                  << " | " << variant_name << " | width=" << widths[variant] << " | "
-                  << std::fixed << std::setprecision(2) << baseline_hps << " H/s"
+        if (stopped(stop)) { best.interrupted = true; return best; }
+        const char* name = ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant));
+        const auto probe = probe_cn_pair(static_cast<std::uint8_t>(variant), stop);
+        const double local_gain = probe.scalar_hps > 0.0 ? ((probe.pair_hps / probe.scalar_hps) - 1.0) * 100.0 : 0.0;
+        const bool local_candidate = probe.parity && probe.pair_hps > probe.scalar_hps * kCnLocalRequiredGain;
+        std::cout << "[CPU CN probe] " << name
+                  << " | scalar=" << std::fixed << std::setprecision(2) << probe.scalar_hps
+                  << " H/s | 2way=" << probe.pair_hps
+                  << " H/s | gain=" << (local_gain >= 0.0 ? "+" : "") << local_gain << "%"
+                  << " | parity=" << (probe.parity ? "PASS" : "FAIL")
+                  << " | " << (local_candidate ? "candidate" : "scalar")
                   << std::defaultfloat << '\n';
-        for (const unsigned int candidate_width : {2U, 4U}) {
-            if (candidate_width == widths[variant]) continue;
-            CnWidthPolicy candidate = widths;
-            candidate[variant] = candidate_width;
-            const double hps = benchmark_header(selected_plan, candidate, variant_headers[variant], stop);
-            std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
-                      << " | " << variant_name << " | width=" << candidate_width
-                      << " | " << std::fixed << std::setprecision(2) << hps << " H/s"
-                      << std::defaultfloat << '\n';
-            if (hps > selected_hps * kWidthRequiredGain) {
-                selected_hps = hps;
-                selected_width = candidate_width;
-            }
-        }
+        if (!local_candidate) continue;
 
-        if (selected_width != widths[variant]) {
-            CnWidthPolicy candidate = widths;
-            candidate[variant] = selected_width;
-            std::cout << "[CPU tune] CN width " << (variant + 1U) << '/' << widths.size()
-                      << " | " << variant_name << " | whole-GhostRider confirmation..." << std::flush;
-            const double candidate_whole_hps = benchmark_plan(selected_plan, candidate, stop);
-            const bool parity_ok = parity_width_policy(candidate);
-            const double gain_pct = whole_plan_hps > 0.0
-                ? ((candidate_whole_hps / whole_plan_hps) - 1.0) * 100.0 : 0.0;
-            const bool promote = parity_ok && candidate_whole_hps > whole_plan_hps * kWholePlanWidthRequiredGain;
-            std::cout << " done | " << std::fixed << std::setprecision(2)
-                      << candidate_whole_hps << " H/s | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct
-                      << "% | parity=" << (parity_ok ? "PASS" : "FAIL")
-                      << " | " << (promote ? "promote" : "reject")
-                      << std::defaultfloat << '\n';
-            if (promote) {
-                widths = candidate;
-                whole_plan_hps = candidate_whole_hps;
-            } else {
-                selected_width = widths[variant];
-            }
+        CnWidthPolicy candidate = widths;
+        candidate[variant] = 2U;
+        set_runtime_affinity_policy(AffinityPolicy::Unpinned);
+        std::cout << "[CPU CN confirm] " << name << " | whole-GhostRider x3..." << std::flush;
+        const double candidate_hps = benchmark_plan_repeated(selected_plan, candidate, 3U, stop);
+        const bool parity_ok = parity_width_policy(candidate);
+        const double gain_pct = whole_plan_hps > 0.0 ? ((candidate_hps / whole_plan_hps) - 1.0) * 100.0 : 0.0;
+        const bool promote = parity_ok && candidate_hps > whole_plan_hps * kWholePlanWidthRequiredGain;
+        std::cout << " done | " << std::fixed << std::setprecision(2) << candidate_hps
+                  << " H/s | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << "%"
+                  << " | parity=" << (parity_ok ? "PASS" : "FAIL")
+                  << " | " << (promote ? "promote" : "reject") << std::defaultfloat << '\n';
+        if (promote) {
+            widths = candidate;
+            whole_plan_hps = candidate_hps;
         }
-
-        std::cout << "[CPU CN width] " << variant_name
-                  << " | selected=" << widths[variant]
-                  << " | local-best=" << std::fixed << std::setprecision(2) << selected_hps << " H/s"
-                  << " | whole-GR=" << whole_plan_hps << " H/s"
-                  << std::defaultfloat << '\n';
     }
 
-    std::cout << "[CPU tune] final validation | end-to-end throughput + parity..." << std::flush;
-    const double tuned_hps = benchmark_plan(selected_plan, widths, stop);
-    const bool parity_ok = parity_width_policy(widths);
-    std::cout << " done | throughput=" << std::fixed << std::setprecision(2) << tuned_hps
-              << " H/s | parity=" << (parity_ok ? "PASS" : "FAIL")
-              << std::defaultfloat << '\n';
+    best.cn_widths = widths;
+    best.lanes = max_width(widths);
+    best.throughput_hps = whole_plan_hps;
 
-    if (parity_ok && tuned_hps >= best.throughput_hps * 0.995) {
-        best.cn_widths = widths;
-        best.lanes = max_width(widths);
-        best.throughput_hps = std::max(best.throughput_hps, tuned_hps);
-    } else {
-        best.cn_widths = scalar_widths;
-        best.lanes = 1U;
+#if defined(__linux__)
+    if (topology.available && selected_plan.workers <= topology.logical_cpus) {
+        std::cout << "[CPU affinity] A/B unpinned vs physical-first x" << kAffinityProbePasses << "...\n";
+        set_runtime_affinity_policy(AffinityPolicy::Unpinned);
+        const double unpinned_hps = benchmark_plan_repeated(selected_plan, widths, kAffinityProbePasses, stop);
+        set_runtime_affinity_policy(AffinityPolicy::PhysicalFirst);
+        const double pinned_hps = benchmark_plan_repeated(selected_plan, widths, kAffinityProbePasses, stop);
+        const double gain_pct = unpinned_hps > 0.0 ? ((pinned_hps / unpinned_hps) - 1.0) * 100.0 : 0.0;
+        const bool promote = pinned_hps > unpinned_hps * kAffinityRequiredGain;
+        best.affinity = promote ? AffinityPolicy::PhysicalFirst : AffinityPolicy::Unpinned;
+        best.throughput_hps = promote ? pinned_hps : unpinned_hps;
+        std::cout << "[CPU affinity] unpinned=" << std::fixed << std::setprecision(2) << unpinned_hps
+                  << " H/s | physical-first=" << pinned_hps
+                  << " H/s | gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << "%"
+                  << " | selected=" << affinity_policy_name(best.affinity) << std::defaultfloat << '\n';
     }
+#endif
 
     set_runtime_cn_widths(best.cn_widths);
-    std::cout << "[CPU tune] saving calibration cache..." << std::flush;
+    set_runtime_affinity_policy(best.affinity);
+    const bool parity_ok = parity_width_policy(best.cn_widths);
+    std::cout << "[CPU tune] final validation | end-to-end + parity..." << std::flush;
+    const double tuned_hps = benchmark_plan_repeated(selected_plan, best.cn_widths, 3U, stop);
+    std::cout << " done | throughput=" << std::fixed << std::setprecision(2) << tuned_hps
+              << " H/s | parity=" << (parity_ok ? "PASS" : "FAIL") << std::defaultfloat << '\n';
+
+    if (!parity_ok) {
+        best.cn_widths = scalar_widths;
+        best.lanes = 1U;
+        best.affinity = AffinityPolicy::Unpinned;
+        set_runtime_cn_widths(best.cn_widths);
+        set_runtime_affinity_policy(best.affinity);
+    } else if (tuned_hps > 0.0) {
+        best.throughput_hps = tuned_hps;
+    }
+
     save_cache(path, best);
-    std::cout << " done\n";
     std::cout << "[CPU tune] selected"
               << " | workers=" << best.threads
               << " | batch=" << best.batch
               << " | CN widths=" << best.cn_widths[0] << '/' << best.cn_widths[1] << '/'
               << best.cn_widths[2] << '/' << best.cn_widths[3] << '/'
               << best.cn_widths[4] << '/' << best.cn_widths[5]
+              << " | affinity=" << affinity_policy_name(best.affinity)
               << " | parity=" << (parity_ok ? "PASS" : "FAIL-scalar")
-              << " | throughput=" << std::fixed << std::setprecision(2)
-              << best.throughput_hps << " H/s"
-              << " | cache=cpu-policy-v4" << std::defaultfloat << '\n';
+              << " | throughput=" << std::fixed << std::setprecision(2) << best.throughput_hps << " H/s"
+              << " | cache=cpu-policy-v5" << std::defaultfloat << '\n';
     return best;
 }
 
