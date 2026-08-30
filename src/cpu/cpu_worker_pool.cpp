@@ -1,6 +1,5 @@
 #include "cpu/cpu_worker_pool.h"
 
-#include "cpu/cpu_topology.h"
 #include "cpu/fingerprint_runtime.h"
 #include "cpu/stage_profiler.h"
 #include "ghostrider/ghostrider.h"
@@ -108,10 +107,13 @@ bool tuning_measurement_mode() noexcept
 }
 
 struct WorkerPool::Impl {
-    explicit Impl(unsigned int requested_threads, unsigned int requested_lanes)
+    explicit Impl(unsigned int requested_threads,
+                  unsigned int requested_lanes,
+                  AffinityPolicy requested_affinity)
         : threads(std::max(1u, requested_threads)),
           lanes(requested_lanes == 0U ? runtime_lane_width() : normalize_lane_width(requested_lanes)),
-          affinity_cpus(affinity_cpu_order(runtime_affinity_policy(), threads)),
+          affinity(requested_affinity),
+          affinity_cpus(affinity_cpu_order(affinity, threads)),
           results(threads)
     {
         workers.reserve(threads);
@@ -273,7 +275,7 @@ struct WorkerPool::Impl {
                           << active_fingerprint << std::dec << std::setfill(' ')
                           << " | CN=" << active_cn_summary
                           << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
-                          << " | affinity=" << affinity_policy_name(runtime_affinity_policy())
+                          << " | affinity=" << affinity_policy_name(affinity)
                           << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
                           << widths[3] << '/' << widths[4] << '/' << widths[5]
                           << " | live=" << hps << " H/s"
@@ -298,6 +300,7 @@ struct WorkerPool::Impl {
 
     const unsigned int threads;
     const unsigned int lanes;
+    const AffinityPolicy affinity;
     const std::vector<unsigned int> affinity_cpus;
     std::vector<std::thread> workers;
     std::vector<std::vector<Candidate>> results;
@@ -324,8 +327,10 @@ struct WorkerPool::Impl {
     std::string active_cn_summary;
 };
 
-WorkerPool::WorkerPool(unsigned int thread_count, unsigned int lane_width)
-    : impl_(std::make_unique<Impl>(thread_count, lane_width))
+WorkerPool::WorkerPool(unsigned int thread_count,
+                       unsigned int lane_width,
+                       AffinityPolicy affinity)
+    : impl_(std::make_unique<Impl>(thread_count, lane_width, affinity))
 {
 }
 
@@ -339,6 +344,11 @@ unsigned int WorkerPool::thread_count() const noexcept
 unsigned int WorkerPool::lane_width() const noexcept
 {
     return impl_->lanes;
+}
+
+AffinityPolicy WorkerPool::affinity_policy() const noexcept
+{
+    return impl_->affinity;
 }
 
 std::vector<Candidate> WorkerPool::run(const std::array<std::uint8_t, 80>& base_header,
