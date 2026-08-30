@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cpu/cpu_topology.h"
+#include "miner.h"
 
 #include <array>
 #include <atomic>
@@ -44,11 +45,13 @@ public:
     unsigned int lane_width() const noexcept;
     AffinityPolicy affinity_policy() const noexcept;
 
+    // Production calls inherit the process-wide Ctrl+C flag. Autotune callers
+    // may pass their own stop flag explicitly; nullptr disables interruption.
     std::vector<Candidate> run(const std::array<std::uint8_t, 80>& base_header,
                                const std::array<std::uint8_t, 32>& target_le,
                                std::uint32_t batch_start,
                                unsigned int per_thread,
-                               const std::atomic_bool* stop = nullptr);
+                               const std::atomic_bool* stop = &yerbas::g_stop_requested);
 
 private:
     struct Impl;
