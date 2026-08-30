@@ -7,9 +7,6 @@
 #include "slow-hash.h"
 #include "oaes_lib.h"
 
-/* Core's portable AES helpers are compiled from cryptonote/aesb.c into the
- * GhostRider reference library. Declare them before the runtime-dispatch
- * wrappers below so generic C11 builds never rely on implicit declarations. */
 void aesb_single_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 
@@ -24,9 +21,6 @@ void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 
 static YERBAS_TLS uint8_t* g_yerbas_cn_scratchpad = NULL;
 static YERBAS_TLS OAES_CTX* g_yerbas_cn_oaes = NULL;
-/* CPU feature bits are immutable for a running process. Cache the runtime
- * dispatch decision per worker thread so the AES hot path never repeats CPUID
- * / XGETBV (MSVC) or builtin feature checks for every CryptoNight AES round. */
 static YERBAS_TLS int g_yerbas_aes_avx2_runtime = -1;
 
 static void* yerbas_tls_cn_malloc(size_t requested)
@@ -37,15 +31,11 @@ static void* yerbas_tls_cn_malloc(size_t requested)
     return g_yerbas_cn_scratchpad;
 }
 
-static void yerbas_tls_cn_free(void* ptr)
-{
-    (void)ptr;
-}
+static void yerbas_tls_cn_free(void* ptr) { (void)ptr; }
 
 static OAES_CTX* yerbas_tls_oaes_alloc(void)
 {
-    if (g_yerbas_cn_oaes == NULL)
-        g_yerbas_cn_oaes = oaes_alloc();
+    if (g_yerbas_cn_oaes == NULL) g_yerbas_cn_oaes = oaes_alloc();
     return g_yerbas_cn_oaes;
 }
 
@@ -71,16 +61,13 @@ static int yerbas_detect_aes_avx2(void)
 {
 #if YERBAS_X86_AES_RUNTIME && (defined(__GNUC__) || defined(__clang__))
     __builtin_cpu_init();
-    return __builtin_cpu_supports("aes") &&
-           __builtin_cpu_supports("avx2") &&
-           __builtin_cpu_supports("bmi2") &&
-           __builtin_cpu_supports("sse4.2");
+    return __builtin_cpu_supports("aes") && __builtin_cpu_supports("avx2") &&
+           __builtin_cpu_supports("bmi2") && __builtin_cpu_supports("sse4.2");
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     int regs[4] = {0, 0, 0, 0};
     __cpuid(regs, 1);
     if ((regs[2] & (1 << 25)) == 0 || (regs[2] & (1 << 20)) == 0 ||
-        (regs[2] & (1 << 27)) == 0 || (regs[2] & (1 << 28)) == 0)
-        return 0;
+        (regs[2] & (1 << 27)) == 0 || (regs[2] & (1 << 28)) == 0) return 0;
     if ((_xgetbv(0) & 0x6) != 0x6) return 0;
     __cpuidex(regs, 7, 0);
     return (regs[1] & (1 << 5)) != 0 && (regs[1] & (1 << 8)) != 0;
@@ -123,8 +110,7 @@ static int yerbas_aesni_pseudo_round(const uint8_t* in, uint8_t* out, const uint
 static int yerbas_selected_single_round(const uint8_t* in, uint8_t* out, const uint8_t* expanded_key)
 {
 #if YERBAS_X86_AES_RUNTIME
-    if (yerbas_runtime_has_aes_avx2())
-        return yerbas_aesni_single_round(in, out, expanded_key);
+    if (yerbas_runtime_has_aes_avx2()) return yerbas_aesni_single_round(in, out, expanded_key);
 #endif
     aesb_single_round(in, out, (uint8_t*)expanded_key);
     return 0;
@@ -133,8 +119,7 @@ static int yerbas_selected_single_round(const uint8_t* in, uint8_t* out, const u
 static int yerbas_selected_pseudo_round(const uint8_t* in, uint8_t* out, const uint8_t* expanded_key)
 {
 #if YERBAS_X86_AES_RUNTIME
-    if (yerbas_runtime_has_aes_avx2())
-        return yerbas_aesni_pseudo_round(in, out, expanded_key);
+    if (yerbas_runtime_has_aes_avx2()) return yerbas_aesni_pseudo_round(in, out, expanded_key);
 #endif
     aesb_pseudo_round(in, out, (uint8_t*)expanded_key);
     return 0;
@@ -148,13 +133,7 @@ const char* yerbas_cn_reuse_backend(void)
 unsigned int yerbas_cn_reuse_compile_features(void)
 {
     unsigned int features = 0;
-    if (yerbas_runtime_has_aes_avx2()) {
-        features |= 1u << 0;
-        features |= 1u << 1;
-        features |= 1u << 2;
-        features |= 1u << 3;
-        features |= 1u << 4;
-    }
+    if (yerbas_runtime_has_aes_avx2()) features = 0x1fu;
     return features;
 }
 
@@ -188,6 +167,107 @@ unsigned int yerbas_cn_reuse_compile_features(void)
 #undef aesb_single_round
 #undef aesb_pseudo_round
 
+#if YERBAS_X86_AES_RUNTIME
+/* GhostRider's six CN flavours all use CryptoNight variant-1 semantics while
+ * changing scratchpad size, iteration count and address mask. Specializing
+ * that invariant removes generic variant branches and AES dispatch wrappers
+ * from the dependency-heavy scalar loop. */
+YERBAS_AES_TARGET
+static void yerbas_cn_slow_hash_v1_aesni(const char* input,
+                                         char* output,
+                                         uint32_t len,
+                                         uint32_t page_size,
+                                         uint32_t iterations,
+                                         size_t aes_rounds)
+{
+    union cn_slow_hash_state state;
+    uint8_t text[INIT_SIZE_BYTE];
+    uint8_t a[AES_BLOCK_SIZE];
+    uint8_t b[AES_BLOCK_SIZE * 2];
+    uint8_t c[AES_BLOCK_SIZE];
+    uint8_t aes_key[AES_KEY_SIZE];
+    uint8_t* long_state;
+    oaes_ctx* aes_ctx;
+    size_t i, j;
+    const size_t init_rounds = page_size / INIT_SIZE_BYTE;
+
+    if (g_yerbas_cn_scratchpad == NULL)
+        g_yerbas_cn_scratchpad = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
+    if (g_yerbas_cn_oaes == NULL)
+        g_yerbas_cn_oaes = oaes_alloc();
+    long_state = g_yerbas_cn_scratchpad;
+    aes_ctx = (oaes_ctx*)g_yerbas_cn_oaes;
+    if (long_state == NULL || aes_ctx == NULL) {
+        yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, 1, page_size, iterations, aes_rounds);
+        return;
+    }
+
+    hash_process(&state.hs, (const uint8_t*)input, (int)len);
+    memcpy(text, state.init, INIT_SIZE_BYTE);
+    memcpy(aes_key, state.hs.b, AES_KEY_SIZE);
+    oaes_key_import_data(aes_ctx, aes_key, AES_KEY_SIZE);
+
+    for (i = 0; i < init_rounds; ++i) {
+        for (j = 0; j < INIT_SIZE_BLK; ++j)
+            yerbas_aesni_pseudo_round(&text[AES_BLOCK_SIZE * j], &text[AES_BLOCK_SIZE * j], aes_ctx->key->exp_data);
+        memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE);
+    }
+
+    for (i = 0; i < 16; ++i) {
+        a[i] = state.k[i] ^ state.k[32 + i];
+        b[i] = state.k[16 + i] ^ state.k[48 + i];
+    }
+    memset(b + AES_BLOCK_SIZE, 0, AES_BLOCK_SIZE);
+
+    {
+        const uint64_t tweak1_2 = *(const uint64_t*)((const uint8_t*)input + 35) ^ state.hs.w[24];
+        for (i = 0; i < iterations; ++i) {
+            uint64_t* dst;
+            uint64_t t0, t1, hi, lo;
+            const uint8_t tmp_index_mask = 0;
+            (void)tmp_index_mask;
+
+            j = e2i(a, aes_rounds);
+            yerbas_aesni_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
+            xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);
+            {
+                uint8_t* p = &long_state[j * AES_BLOCK_SIZE];
+                const uint8_t tmp = p[11];
+                static const uint32_t table = 0x75310;
+                const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1;
+                p[11] = tmp ^ ((table >> index) & 0x30);
+            }
+
+            j = e2i(c, aes_rounds);
+            dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
+            t0 = dst[0];
+            t1 = dst[1];
+            lo = mul128(((const uint64_t*)c)[0], t0, &hi);
+            ((uint64_t*)a)[0] += hi;
+            ((uint64_t*)a)[1] += lo;
+            dst[0] = ((uint64_t*)a)[0];
+            dst[1] = ((uint64_t*)a)[1] ^ tweak1_2;
+            ((uint64_t*)a)[0] ^= t0;
+            ((uint64_t*)a)[1] ^= t1;
+            copy_block(b + AES_BLOCK_SIZE, b);
+            copy_block(b, c);
+        }
+    }
+
+    memcpy(text, state.init, INIT_SIZE_BYTE);
+    oaes_key_import_data(aes_ctx, &state.hs.b[32], AES_KEY_SIZE);
+    for (i = 0; i < init_rounds; ++i) {
+        for (j = 0; j < INIT_SIZE_BLK; ++j) {
+            xor_blocks(&text[j * AES_BLOCK_SIZE], &long_state[i * INIT_SIZE_BYTE + j * AES_BLOCK_SIZE]);
+            yerbas_aesni_pseudo_round(&text[j * AES_BLOCK_SIZE], &text[j * AES_BLOCK_SIZE], aes_ctx->key->exp_data);
+        }
+    }
+    memcpy(state.init, text, INIT_SIZE_BYTE);
+    hash_permutation(&state.hs);
+    extra_hashes[state.hs.b[0] & 3](&state, 200, output);
+}
+#endif
+
 static int g_yerbas_cn_backend_reported = 0;
 
 void yerbas_cn_slow_hash_reuse(const char* input,
@@ -199,13 +279,17 @@ void yerbas_cn_slow_hash_reuse(const char* input,
                                size_t aes_rounds)
 {
     if (!g_yerbas_cn_backend_reported) {
-        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | feature-check=thread-cache\n",
+        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | scalar-v1-specialized=yes\n",
                yerbas_cn_reuse_backend());
         g_yerbas_cn_backend_reported = 1;
     }
-
-    yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant,
-                                   page_size, iterations, aes_rounds);
+#if YERBAS_X86_AES_RUNTIME
+    if (variant == 1 && len >= 43U && page_size <= YERBAS_CN_MAX_PAGE_SIZE && yerbas_runtime_has_aes_avx2()) {
+        yerbas_cn_slow_hash_v1_aesni(input, output, len, page_size, iterations, aes_rounds);
+        return;
+    }
+#endif
+    yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant, page_size, iterations, aes_rounds);
 }
 
 #include "cn_2way_impl.c"
@@ -220,24 +304,11 @@ int yerbas_cn_hash_pair_reference(const char* input0,
                                   uint32_t iterations,
                                   size_t aes_rounds)
 {
-    if (input0 == NULL || input1 == NULL || output0 == NULL || output1 == NULL)
-        return 0;
-
-    yerbas_cn_slow_hash_reuse(input0, output0, len, variant,
-                              page_size, iterations, aes_rounds);
-    yerbas_cn_slow_hash_reuse(input1, output1, len, variant,
-                              page_size, iterations, aes_rounds);
+    if (input0 == NULL || input1 == NULL || output0 == NULL || output1 == NULL) return 0;
+    yerbas_cn_slow_hash_reuse(input0, output0, len, variant, page_size, iterations, aes_rounds);
+    yerbas_cn_slow_hash_reuse(input1, output1, len, variant, page_size, iterations, aes_rounds);
     return 1;
 }
 
-/* Production selection remains disabled until the startup parity/speed gate is
- * connected. The genuine kernel is available through yerbas_cn_hash_pair_2way(). */
-int yerbas_cn_2way_ready(void)
-{
-    return 0;
-}
-
-int yerbas_cn_4way_ready(void)
-{
-    return 0;
-}
+int yerbas_cn_2way_ready(void) { return 0; }
+int yerbas_cn_4way_ready(void) { return 0; }
