@@ -170,101 +170,125 @@ unsigned int yerbas_cn_reuse_compile_features(void)
 #if YERBAS_X86_AES_RUNTIME
 #include "cn_aesni_parallel.inc"
 
-/* GhostRider's six CN flavours all use CryptoNight variant-1 semantics while
- * changing scratchpad size, iteration count and address mask. Specializing
- * that invariant removes generic variant branches and AES dispatch wrappers
- * from the dependency-heavy scalar loop. Setup/final now process all eight
- * independent AES blocks in parallel to expose AES-NI instruction-level
- * parallelism instead of completing each 10-round block serially. */
+/* The six Yerbas GhostRider CryptoNight flavours are fixed parameter sets.
+ * Generate one scalar variant-1 AES-NI kernel per set so the dependency-heavy
+ * loop contains no e2i() call, no runtime page/iteration arithmetic and no
+ * generic AES/variant dispatch. A/B/C stay in XMM registers; only the two
+ * data-dependent scratchpad locations touch memory each iteration. */
+#define YERBAS_DEFINE_CN_V1_KERNEL(NAME, PAGE_SIZE_CONST, ITERATIONS_CONST, OFFSET_MASK_CONST) \
+YERBAS_AES_TARGET \
+static void NAME(const char* input, char* output, uint32_t len) \
+{ \
+    union cn_slow_hash_state state; \
+    uint8_t text[INIT_SIZE_BYTE]; \
+    uint8_t aes_key[AES_KEY_SIZE]; \
+    uint8_t* long_state; \
+    oaes_ctx* aes_ctx; \
+    size_t i; \
+    const size_t init_rounds = (PAGE_SIZE_CONST) / INIT_SIZE_BYTE; \
+    const uint64_t offset_mask = (uint64_t)(OFFSET_MASK_CONST); \
+    __m128i ax, bx; \
+    if (g_yerbas_cn_scratchpad == NULL) \
+        g_yerbas_cn_scratchpad = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE); \
+    if (g_yerbas_cn_oaes == NULL) g_yerbas_cn_oaes = oaes_alloc(); \
+    long_state = g_yerbas_cn_scratchpad; \
+    aes_ctx = (oaes_ctx*)g_yerbas_cn_oaes; \
+    if (long_state == NULL || aes_ctx == NULL) { \
+        yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, 1, \
+            (PAGE_SIZE_CONST), (ITERATIONS_CONST), ((OFFSET_MASK_CONST) >> 4) + 1U); \
+        return; \
+    } \
+    hash_process(&state.hs, (const uint8_t*)input, (int)len); \
+    memcpy(text, state.init, INIT_SIZE_BYTE); \
+    memcpy(aes_key, state.hs.b, AES_KEY_SIZE); \
+    oaes_key_import_data(aes_ctx, aes_key, AES_KEY_SIZE); \
+    for (i = 0; i < init_rounds; ++i) { \
+        yerbas_aesni_pseudo_round8(text, aes_ctx->key->exp_data); \
+        memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE); \
+    } \
+    ax = _mm_set_epi64x((long long)(state.hs.w[1] ^ state.hs.w[5]), \
+                        (long long)(state.hs.w[0] ^ state.hs.w[4])); \
+    bx = _mm_set_epi64x((long long)(state.hs.w[3] ^ state.hs.w[7]), \
+                        (long long)(state.hs.w[2] ^ state.hs.w[6])); \
+    { \
+        const uint64_t tweak = *(const uint64_t*)((const uint8_t*)input + 35) ^ state.hs.w[24]; \
+        for (i = 0; i < (ITERATIONS_CONST); ++i) { \
+            const uint64_t off0 = ((uint64_t)_mm_cvtsi128_si64(ax)) & offset_mask; \
+            __m128i* p0 = (__m128i*)(long_state + off0); \
+            const __m128i cx = _mm_aesenc_si128(_mm_load_si128(p0), ax); \
+            __m128i wr = _mm_xor_si128(bx, cx); \
+            _mm_store_si128(p0, wr); \
+            { \
+                uint8_t* q = (uint8_t*)p0; \
+                const uint8_t tmp = q[11]; \
+                static const uint32_t table = 0x75310; \
+                const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1; \
+                q[11] = tmp ^ ((table >> index) & 0x30); \
+            } \
+            { \
+                const uint64_t off1 = ((uint64_t)_mm_cvtsi128_si64(cx)) & offset_mask; \
+                uint64_t* dst = (uint64_t*)(long_state + off1); \
+                const uint64_t t0 = dst[0]; \
+                const uint64_t t1 = dst[1]; \
+                uint64_t hi; \
+                const uint64_t lo = mul128((uint64_t)_mm_cvtsi128_si64(cx), t0, &hi); \
+                uint64_t a0 = (uint64_t)_mm_cvtsi128_si64(ax) + hi; \
+                uint64_t a1 = (uint64_t)_mm_extract_epi64(ax, 1) + lo; \
+                dst[0] = a0; \
+                dst[1] = a1 ^ tweak; \
+                a0 ^= t0; \
+                a1 ^= t1; \
+                ax = _mm_set_epi64x((long long)a1, (long long)a0); \
+            } \
+            bx = cx; \
+        } \
+    } \
+    memcpy(text, state.init, INIT_SIZE_BYTE); \
+    oaes_key_import_data(aes_ctx, &state.hs.b[32], AES_KEY_SIZE); \
+    for (i = 0; i < init_rounds; ++i) \
+        yerbas_aesni_xor_pseudo_round8(text, &long_state[i * INIT_SIZE_BYTE], aes_ctx->key->exp_data); \
+    memcpy(state.init, text, INIT_SIZE_BYTE); \
+    hash_permutation(&state.hs); \
+    extra_hashes[state.hs.b[0] & 3](&state, 200, output); \
+}
+
+/* offset mask is ((aes_rounds - 1) << 4), exactly equivalent to
+ * e2i(x, aes_rounds) * AES_BLOCK_SIZE for power-of-two aes_rounds. */
+YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_dark_v1_aesni,       524288U,  131072U,  524272U)
+YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_darklite_v1_aesni,   524288U,  131072U,  262128U)
+YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_fast_v1_aesni,      2097152U,  262144U, 2097136U)
+YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_lite_v1_aesni,      1048576U,  262144U, 1048560U)
+YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_turtle_v1_aesni,     262144U,   65536U,  262128U)
+YERBAS_DEFINE_CN_V1_KERNEL(yerbas_cn_turtlelite_v1_aesni, 262144U,   65536U,  131056U)
+#undef YERBAS_DEFINE_CN_V1_KERNEL
+
 YERBAS_AES_TARGET
-static void yerbas_cn_slow_hash_v1_aesni(const char* input,
-                                         char* output,
-                                         uint32_t len,
-                                         uint32_t page_size,
-                                         uint32_t iterations,
-                                         size_t aes_rounds)
+static int yerbas_cn_dispatch_fixed_v1(const char* input,
+                                       char* output,
+                                       uint32_t len,
+                                       uint32_t page_size,
+                                       uint32_t iterations,
+                                       size_t aes_rounds)
 {
-    union cn_slow_hash_state state;
-    uint8_t text[INIT_SIZE_BYTE];
-    uint8_t a[AES_BLOCK_SIZE];
-    uint8_t b[AES_BLOCK_SIZE * 2];
-    uint8_t c[AES_BLOCK_SIZE];
-    uint8_t aes_key[AES_KEY_SIZE];
-    uint8_t* long_state;
-    oaes_ctx* aes_ctx;
-    size_t i, j;
-    const size_t init_rounds = page_size / INIT_SIZE_BYTE;
-
-    if (g_yerbas_cn_scratchpad == NULL)
-        g_yerbas_cn_scratchpad = (uint8_t*)malloc(YERBAS_CN_MAX_PAGE_SIZE);
-    if (g_yerbas_cn_oaes == NULL)
-        g_yerbas_cn_oaes = oaes_alloc();
-    long_state = g_yerbas_cn_scratchpad;
-    aes_ctx = (oaes_ctx*)g_yerbas_cn_oaes;
-    if (long_state == NULL || aes_ctx == NULL) {
-        yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, 1, page_size, iterations, aes_rounds);
-        return;
+    if (page_size == 524288U && iterations == 131072U && aes_rounds == 32768U) {
+        yerbas_cn_dark_v1_aesni(input, output, len); return 1;
     }
-
-    hash_process(&state.hs, (const uint8_t*)input, (int)len);
-    memcpy(text, state.init, INIT_SIZE_BYTE);
-    memcpy(aes_key, state.hs.b, AES_KEY_SIZE);
-    oaes_key_import_data(aes_ctx, aes_key, AES_KEY_SIZE);
-
-    for (i = 0; i < init_rounds; ++i) {
-        yerbas_aesni_pseudo_round8(text, aes_ctx->key->exp_data);
-        memcpy(&long_state[i * INIT_SIZE_BYTE], text, INIT_SIZE_BYTE);
+    if (page_size == 524288U && iterations == 131072U && aes_rounds == 16384U) {
+        yerbas_cn_darklite_v1_aesni(input, output, len); return 1;
     }
-
-    for (i = 0; i < 16; ++i) {
-        a[i] = state.k[i] ^ state.k[32 + i];
-        b[i] = state.k[16 + i] ^ state.k[48 + i];
+    if (page_size == 2097152U && iterations == 262144U && aes_rounds == 131072U) {
+        yerbas_cn_fast_v1_aesni(input, output, len); return 1;
     }
-    memset(b + AES_BLOCK_SIZE, 0, AES_BLOCK_SIZE);
-
-    {
-        const uint64_t tweak1_2 = *(const uint64_t*)((const uint8_t*)input + 35) ^ state.hs.w[24];
-        for (i = 0; i < iterations; ++i) {
-            uint64_t* dst;
-            uint64_t t0, t1, hi, lo;
-
-            j = e2i(a, aes_rounds);
-            yerbas_aesni_single_round(&long_state[j * AES_BLOCK_SIZE], c, a);
-            xor_blocks_dst(c, b, &long_state[j * AES_BLOCK_SIZE]);
-            {
-                uint8_t* p = &long_state[j * AES_BLOCK_SIZE];
-                const uint8_t tmp = p[11];
-                static const uint32_t table = 0x75310;
-                const uint8_t index = (((tmp >> 3) & 6) | (tmp & 1)) << 1;
-                p[11] = tmp ^ ((table >> index) & 0x30);
-            }
-
-            j = e2i(c, aes_rounds);
-            dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
-            t0 = dst[0];
-            t1 = dst[1];
-            lo = mul128(((const uint64_t*)c)[0], t0, &hi);
-            ((uint64_t*)a)[0] += hi;
-            ((uint64_t*)a)[1] += lo;
-            dst[0] = ((uint64_t*)a)[0];
-            dst[1] = ((uint64_t*)a)[1] ^ tweak1_2;
-            ((uint64_t*)a)[0] ^= t0;
-            ((uint64_t*)a)[1] ^= t1;
-            copy_block(b + AES_BLOCK_SIZE, b);
-            copy_block(b, c);
-        }
+    if (page_size == 1048576U && iterations == 262144U && aes_rounds == 65536U) {
+        yerbas_cn_lite_v1_aesni(input, output, len); return 1;
     }
-
-    memcpy(text, state.init, INIT_SIZE_BYTE);
-    oaes_key_import_data(aes_ctx, &state.hs.b[32], AES_KEY_SIZE);
-    for (i = 0; i < init_rounds; ++i)
-        yerbas_aesni_xor_pseudo_round8(text,
-                                       &long_state[i * INIT_SIZE_BYTE],
-                                       aes_ctx->key->exp_data);
-
-    memcpy(state.init, text, INIT_SIZE_BYTE);
-    hash_permutation(&state.hs);
-    extra_hashes[state.hs.b[0] & 3](&state, 200, output);
+    if (page_size == 262144U && iterations == 65536U && aes_rounds == 16384U) {
+        yerbas_cn_turtle_v1_aesni(input, output, len); return 1;
+    }
+    if (page_size == 262144U && iterations == 65536U && aes_rounds == 8192U) {
+        yerbas_cn_turtlelite_v1_aesni(input, output, len); return 1;
+    }
+    return 0;
 }
 #endif
 
@@ -279,15 +303,14 @@ void yerbas_cn_slow_hash_reuse(const char* input,
                                size_t aes_rounds)
 {
     if (!g_yerbas_cn_backend_reported) {
-        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | scalar-v1-specialized=yes | aes8-pipeline=yes\n",
+        printf("CPU CryptoNight backend: %s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes\n",
                yerbas_cn_reuse_backend());
         g_yerbas_cn_backend_reported = 1;
     }
 #if YERBAS_X86_AES_RUNTIME
-    if (variant == 1 && len >= 43U && page_size <= YERBAS_CN_MAX_PAGE_SIZE && yerbas_runtime_has_aes_avx2()) {
-        yerbas_cn_slow_hash_v1_aesni(input, output, len, page_size, iterations, aes_rounds);
+    if (variant == 1 && len >= 43U && yerbas_runtime_has_aes_avx2() &&
+        yerbas_cn_dispatch_fixed_v1(input, output, len, page_size, iterations, aes_rounds))
         return;
-    }
 #endif
     yerbas_cn_slow_hash_reuse_impl(input, output, (int)len, variant, page_size, iterations, aes_rounds);
 }
