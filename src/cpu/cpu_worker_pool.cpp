@@ -18,6 +18,7 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace yerbas::cpu {
 namespace {
@@ -25,6 +26,9 @@ namespace {
 std::atomic_uint g_runtime_lane_width{1U};
 std::array<std::atomic_uint, 6> g_runtime_cn_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
 std::atomic_bool g_tuning_measurement_mode{false};
+
+constexpr std::uint64_t kRotationWorkerProbeSamples = 3U;
+constexpr double kRotationWorkerRequiredGain = 1.01;
 
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
 {
@@ -68,6 +72,79 @@ std::string cn_summary(const ghostrider::StageSchedule& schedule)
         first = false;
     }
     return out.str();
+}
+
+std::vector<unsigned int> rotation_worker_candidates(unsigned int configured_threads)
+{
+    std::vector<unsigned int> out;
+    const auto add = [&](unsigned int value) mutable {
+        value = std::max(1U, std::min(configured_threads, value));
+        if (std::find(out.begin(), out.end(), value) == out.end()) out.push_back(value);
+    };
+
+    add(configured_threads);
+    static const CpuTopology topology = detect_cpu_topology();
+    if (topology.physical_cores > 0U) add(topology.physical_cores);
+    if (configured_threads > 1U) add(configured_threads - 1U);
+    add(std::max(1U, configured_threads / 2U));
+    return out;
+}
+
+struct RotationWorkerChoice {
+    unsigned int workers{1U};
+    bool probing{false};
+    double selected_hps{0.0};
+    double full_hps{0.0};
+};
+
+RotationWorkerChoice choose_rotation_workers(std::uint64_t fingerprint,
+                                             unsigned int configured_threads,
+                                             unsigned int lanes,
+                                             unsigned int batch)
+{
+    const auto candidates = rotation_worker_candidates(configured_threads);
+    const auto summaries = fingerprint_policy_summaries(fingerprint);
+
+    struct Measurement {
+        unsigned int workers{1U};
+        std::uint64_t samples{0U};
+        double ewma_hps{0.0};
+    };
+    std::vector<Measurement> measured;
+    measured.reserve(candidates.size());
+
+    for (const unsigned int candidate : candidates) {
+        Measurement m{candidate, 0U, 0.0};
+        for (const auto& summary : summaries) {
+            if (summary.policy != "rotation" || summary.threads != candidate ||
+                summary.lanes != lanes || summary.batch != batch)
+                continue;
+            if (summary.samples > m.samples) {
+                m.samples = summary.samples;
+                m.ewma_hps = summary.ewma_hps;
+            }
+        }
+        measured.push_back(m);
+    }
+
+    auto probe = std::min_element(measured.begin(), measured.end(), [](const Measurement& a, const Measurement& b) {
+        if (a.samples != b.samples) return a.samples < b.samples;
+        return a.workers > b.workers;
+    });
+    if (probe != measured.end() && probe->samples < kRotationWorkerProbeSamples)
+        return {probe->workers, true, probe->ewma_hps, 0.0};
+
+    const Measurement* full = nullptr;
+    const Measurement* best = nullptr;
+    for (const auto& m : measured) {
+        if (m.workers == configured_threads) full = &m;
+        if (best == nullptr || m.ewma_hps > best->ewma_hps) best = &m;
+    }
+    if (full == nullptr || best == nullptr) return {configured_threads, false, 0.0, 0.0};
+
+    if (best->workers != configured_threads && best->ewma_hps < full->ewma_hps * kRotationWorkerRequiredGain)
+        best = full;
+    return {best->workers, false, best->ewma_hps, full->ewma_hps};
 }
 
 } // namespace
@@ -114,7 +191,9 @@ struct WorkerPool::Impl {
           lanes(requested_lanes == 0U ? runtime_lane_width() : normalize_lane_width(requested_lanes)),
           affinity(requested_affinity),
           affinity_cpus(affinity_cpu_order(affinity, threads)),
-          results(threads)
+          results(threads),
+          assigned_starts(threads),
+          assigned_counts(threads)
     {
         workers.reserve(threads);
         for (unsigned int index = 0; index < threads; ++index)
@@ -157,8 +236,8 @@ struct WorkerPool::Impl {
                 seen_generation = generation;
                 header = base_header;
                 target = target_le;
-                start = batch_start + index * per_thread;
-                count = per_thread;
+                start = assigned_starts[index];
+                count = assigned_counts[index];
                 stop = stop_flag;
             }
 
@@ -217,6 +296,7 @@ struct WorkerPool::Impl {
                                const std::atomic_bool* stop)
     {
         const auto perf_start = std::chrono::steady_clock::now();
+        RotationWorkerChoice worker_choice{threads, false, 0.0, 0.0};
         {
             std::lock_guard<std::mutex> lock(mutex);
             base_header = header;
@@ -234,6 +314,26 @@ struct WorkerPool::Impl {
                 active_cn_summary = cn_summary(active_schedule);
             }
             target_le = active_target;
+
+            if (!tuning_measurement_mode())
+                worker_choice = choose_rotation_workers(active_fingerprint, threads, lanes, count);
+            active_workers = std::max(1U, std::min(threads, worker_choice.workers));
+
+            const std::uint64_t total_hashes = static_cast<std::uint64_t>(threads) * count;
+            const std::uint64_t base = total_hashes / active_workers;
+            const std::uint64_t remainder = total_hashes % active_workers;
+            std::uint64_t offset = 0;
+            for (unsigned int index = 0; index < threads; ++index) {
+                if (index < active_workers) {
+                    const std::uint64_t assigned = base + (index < remainder ? 1U : 0U);
+                    assigned_starts[index] = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + offset);
+                    assigned_counts[index] = static_cast<unsigned int>(assigned);
+                    offset += assigned;
+                } else {
+                    assigned_starts[index] = start;
+                    assigned_counts[index] = 0U;
+                }
+            }
 
             batch_start = start;
             per_thread = count;
@@ -255,11 +355,10 @@ struct WorkerPool::Impl {
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
 
         if (!tuning_measurement_mode() && !(stop != nullptr && stop->load(std::memory_order_relaxed))) {
-            const std::string policy = lanes == 1U ? "standard" : (lanes == 2U ? "lane2" : "lane4");
             const auto fp = record_fingerprint_runtime(active_fingerprint,
                                                        active_cn_summary,
-                                                       policy,
-                                                       threads,
+                                                       "rotation",
+                                                       active_workers,
                                                        lanes,
                                                        count,
                                                        hps);
@@ -271,26 +370,29 @@ struct WorkerPool::Impl {
             }
 
             const bool new_rotation = active_fingerprint != last_logged_fingerprint;
+            const bool worker_plan_changed = active_workers != last_logged_active_workers;
             const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
-            if (new_rotation || periodic_diagnostic) {
-                const auto recommendation = recommended_fingerprint_policy(active_fingerprint);
+            if (new_rotation || worker_plan_changed || periodic_diagnostic) {
                 const auto widths = runtime_cn_widths();
                 std::cout << std::fixed << std::setprecision(2)
                           << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                           << active_fingerprint << std::dec << std::setfill(' ')
                           << " | CN=" << active_cn_summary
-                          << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
+                          << " | policy=rotation workers=" << active_workers << '/' << threads
+                          << " lanes=" << lanes << " batch=" << count
+                          << " | phase=" << (worker_choice.probing ? "probe" : "selected")
                           << " | affinity=" << affinity_policy_name(affinity)
                           << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
                           << widths[3] << '/' << widths[4] << '/' << widths[5]
                           << " | live=" << hps << " H/s"
                           << " | learned=" << fp.ewma_hps << " H/s"
                           << " | samples=" << fp.samples;
-                if (recommendation)
-                    std::cout << " | learned-best=" << recommendation->policy
-                              << "@" << recommendation->ewma_hps << " H/s";
+                if (!worker_choice.probing && worker_choice.full_hps > 0.0)
+                    std::cout << " | full=" << worker_choice.full_hps << " H/s"
+                              << " | selected=" << worker_choice.selected_hps << " H/s";
                 std::cout << std::defaultfloat << '\n';
                 last_logged_fingerprint = active_fingerprint;
+                last_logged_active_workers = active_workers;
             }
         }
 
@@ -309,6 +411,8 @@ struct WorkerPool::Impl {
     const std::vector<unsigned int> affinity_cpus;
     std::vector<std::thread> workers;
     std::vector<std::vector<Candidate>> results;
+    std::vector<std::uint32_t> assigned_starts;
+    std::vector<unsigned int> assigned_counts;
 
     std::mutex mutex;
     std::condition_variable work_ready;
@@ -316,8 +420,10 @@ struct WorkerPool::Impl {
     bool stopping{false};
     std::uint64_t generation{0};
     unsigned int completed{0};
+    unsigned int active_workers{1U};
     std::uint64_t run_count{0};
     std::uint64_t last_logged_fingerprint{0};
+    unsigned int last_logged_active_workers{0U};
 
     std::array<std::uint8_t, 80> base_header{};
     std::array<std::uint8_t, 32> target_le{};
