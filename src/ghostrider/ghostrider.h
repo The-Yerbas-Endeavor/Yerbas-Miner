@@ -29,9 +29,9 @@ bool hash_optimized_batch(const Work* works,
                           std::size_t count,
                           const std::array<unsigned int, 6>& cn_widths);
 
-// Stage-level primitives used by the cooperative CPU scheduler and tuner.
-// These preserve exact GhostRider stage semantics and are parity/performance
-// gated before production use.
+// Stage-level primitives used by the cooperative CPU scheduler. Core stages
+// remain fully independent across workers; CryptoNight stages may rendezvous
+// into qualified multiway groups through the production batch path.
 bool optimized_core_stage(const Work& input,
                           std::uint8_t algorithm,
                           Hash512& output) noexcept;
@@ -43,15 +43,6 @@ bool optimized_cn_pair_stage(const Hash512& input0,
                              std::uint8_t variant,
                              Hash512& output0,
                              Hash512& output1) noexcept;
-bool optimized_cn_quad_stage(const Hash512& input0,
-                             const Hash512& input1,
-                             const Hash512& input2,
-                             const Hash512& input3,
-                             std::uint8_t variant,
-                             Hash512& output0,
-                             Hash512& output1,
-                             Hash512& output2,
-                             Hash512& output3) noexcept;
 
 Hash256 hash_staged_reference(const Work& work);
 Hash512 core_hash_reference(const Work& work, int algorithm);
