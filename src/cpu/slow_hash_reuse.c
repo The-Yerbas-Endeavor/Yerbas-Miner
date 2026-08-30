@@ -233,7 +233,7 @@ static void NAME(const char* input, char* output, uint32_t len) \
                 uint64_t hi; \
                 const uint64_t lo = mul128((uint64_t)_mm_cvtsi128_si64(cx), t0, &hi); \
                 uint64_t a0 = (uint64_t)_mm_cvtsi128_si64(ax) + hi; \
-                uint64_t a1 = (uint64_t)_mm_extract_epi64(ax, 1) + lo; \
+                uint64_t a1 = (uint64_t)_mm_cvtsi128_si64(_mm_srli_si128(ax, 8)) + lo; \
                 dst[0] = a0; \
                 dst[1] = a1 ^ tweak; \
                 a0 ^= t0; \
