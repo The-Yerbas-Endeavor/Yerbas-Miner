@@ -1,5 +1,6 @@
 #include "cpu/cpu_worker_pool.h"
 
+#include "cpu/cpu_topology.h"
 #include "cpu/fingerprint_runtime.h"
 #include "cpu/stage_profiler.h"
 #include "ghostrider/ghostrider.h"
@@ -110,6 +111,7 @@ struct WorkerPool::Impl {
     explicit Impl(unsigned int requested_threads, unsigned int requested_lanes)
         : threads(std::max(1u, requested_threads)),
           lanes(requested_lanes == 0U ? runtime_lane_width() : normalize_lane_width(requested_lanes)),
+          affinity_cpus(affinity_cpu_order(runtime_affinity_policy(), threads)),
           results(threads)
     {
         workers.reserve(threads);
@@ -135,6 +137,9 @@ struct WorkerPool::Impl {
 
     void worker_loop(unsigned int index)
     {
+        if (index < affinity_cpus.size())
+            (void)pin_current_thread_to_cpu(affinity_cpus[index]);
+
         std::uint64_t seen_generation = 0;
         for (;;) {
             std::array<std::uint8_t, 80> header{};
@@ -268,6 +273,7 @@ struct WorkerPool::Impl {
                           << active_fingerprint << std::dec << std::setfill(' ')
                           << " | CN=" << active_cn_summary
                           << " | policy=" << policy << ' ' << threads << 'x' << lanes << " batch=" << count
+                          << " | affinity=" << affinity_policy_name(runtime_affinity_policy())
                           << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
                           << widths[3] << '/' << widths[4] << '/' << widths[5]
                           << " | live=" << hps << " H/s"
@@ -292,6 +298,7 @@ struct WorkerPool::Impl {
 
     const unsigned int threads;
     const unsigned int lanes;
+    const std::vector<unsigned int> affinity_cpus;
     std::vector<std::thread> workers;
     std::vector<std::vector<Candidate>> results;
 
