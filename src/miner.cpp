@@ -1,5 +1,6 @@
 #include "miner.h"
 #include "cpu/cpu_autotune.h"
+#include "cpu/cpu_features.h"
 #include "cpu/cpu_worker_pool.h"
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
@@ -28,29 +29,31 @@ void handle_signal(int)
 
 void print_cpu_capabilities()
 {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
-    __builtin_cpu_init();
-    std::cout << "CPU features:"
-              << " AES=" << (__builtin_cpu_supports("aes") ? "yes" : "no")
-              << " AVX=" << (__builtin_cpu_supports("avx") ? "yes" : "no")
-              << " AVX2=" << (__builtin_cpu_supports("avx2") ? "yes" : "no")
-              << " BMI2=" << (__builtin_cpu_supports("bmi2") ? "yes" : "no")
-              << " SSE4.2=" << (__builtin_cpu_supports("sse4.2") ? "yes" : "no")
+    const auto features = cpu::detect_x86_features();
+    if (features.available) {
+        std::cout << "CPU features:"
+                  << " AES=" << cpu::yes_no(features.aes)
+                  << " AVX=" << cpu::yes_no(features.avx)
+                  << " AVX2=" << cpu::yes_no(features.avx2)
+                  << " BMI2=" << cpu::yes_no(features.bmi2)
+                  << " SSE4.2=" << cpu::yes_no(features.sse42)
+                  << " OSXSAVE=" << cpu::yes_no(features.osxsave)
+                  << " YMM=" << cpu::yes_no(features.ymm_state)
 #ifdef YERBAS_NATIVE_CPU_BUILD
-              << " | build=native"
+                  << " | build=native"
 #else
-              << " | build=portable"
+                  << " | build=portable+runtime-dispatch"
 #endif
-              << '\n';
-#else
-    std::cout << "CPU features: runtime x86 feature reporting unavailable"
+                  << '\n';
+    } else {
+        std::cout << "CPU features: non-x86 runtime probe unavailable"
 #ifdef YERBAS_NATIVE_CPU_BUILD
-              << " | build=native"
+                  << " | build=native"
 #else
-              << " | build=portable"
+                  << " | build=portable"
 #endif
-              << '\n';
-#endif
+                  << '\n';
+    }
 }
 
 #ifdef _WIN32
