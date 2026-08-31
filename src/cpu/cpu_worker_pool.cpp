@@ -77,7 +77,7 @@ std::string cn_summary(const ghostrider::StageSchedule& schedule)
 std::vector<unsigned int> rotation_worker_candidates(unsigned int configured_threads)
 {
     std::vector<unsigned int> out;
-    const auto add = [&](unsigned int value) mutable {
+    auto add = [&](unsigned int value) {
         value = std::max(1U, std::min(configured_threads, value));
         if (std::find(out.begin(), out.end(), value) == out.end()) out.push_back(value);
     };
@@ -396,41 +396,35 @@ struct WorkerPool::Impl {
             }
         }
 
-        std::size_t total_candidates = 0;
-        for (const auto& result : results) total_candidates += result.size();
-        std::vector<Candidate> combined;
-        combined.reserve(total_candidates);
+        std::vector<Candidate> merged;
         for (auto& result : results)
-            combined.insert(combined.end(), result.begin(), result.end());
-        return combined;
+            merged.insert(merged.end(), result.begin(), result.end());
+        return merged;
     }
 
-    const unsigned int threads;
-    const unsigned int lanes;
-    const AffinityPolicy affinity;
-    const std::vector<unsigned int> affinity_cpus;
+    unsigned int threads;
+    unsigned int lanes;
+    AffinityPolicy affinity{AffinityPolicy::Unpinned};
+    std::vector<unsigned int> affinity_cpus;
     std::vector<std::thread> workers;
-    std::vector<std::vector<Candidate>> results;
-    std::vector<std::uint32_t> assigned_starts;
-    std::vector<unsigned int> assigned_counts;
-
     std::mutex mutex;
     std::condition_variable work_ready;
     std::condition_variable all_done;
     bool stopping{false};
     std::uint64_t generation{0};
     unsigned int completed{0};
-    unsigned int active_workers{1U};
-    std::uint64_t run_count{0};
-    std::uint64_t last_logged_fingerprint{0};
-    unsigned int last_logged_active_workers{0U};
-
     std::array<std::uint8_t, 80> base_header{};
     std::array<std::uint8_t, 32> target_le{};
     std::uint32_t batch_start{0};
     unsigned int per_thread{0};
     const std::atomic_bool* stop_flag{nullptr};
-
+    std::vector<std::vector<Candidate>> results;
+    std::vector<std::uint32_t> assigned_starts;
+    std::vector<unsigned int> assigned_counts;
+    unsigned int active_workers{1U};
+    std::uint64_t run_count{0};
+    std::uint64_t last_logged_fingerprint{0};
+    unsigned int last_logged_active_workers{0U};
     std::array<std::uint8_t, 76> active_header_key{};
     std::array<std::uint8_t, 32> active_target{};
     bool active_target_valid{false};
@@ -439,37 +433,20 @@ struct WorkerPool::Impl {
     std::string active_cn_summary;
 };
 
-WorkerPool::WorkerPool(unsigned int thread_count,
-                       unsigned int lane_width,
-                       AffinityPolicy affinity)
-    : impl_(std::make_unique<Impl>(thread_count, lane_width, affinity))
-{
-}
+WorkerPool::WorkerPool(unsigned int threads, unsigned int lanes, AffinityPolicy affinity)
+    : impl_(std::make_unique<Impl>(threads, lanes, affinity)) {}
 
 WorkerPool::~WorkerPool() = default;
-
-unsigned int WorkerPool::thread_count() const noexcept
-{
-    return impl_->threads;
-}
-
-unsigned int WorkerPool::lane_width() const noexcept
-{
-    return impl_->lanes;
-}
-
-AffinityPolicy WorkerPool::affinity_policy() const noexcept
-{
-    return impl_->affinity;
-}
+WorkerPool::WorkerPool(WorkerPool&&) noexcept = default;
+WorkerPool& WorkerPool::operator=(WorkerPool&&) noexcept = default;
 
 std::vector<Candidate> WorkerPool::run(const std::array<std::uint8_t, 80>& base_header,
                                        const std::array<std::uint8_t, 32>& target_le,
                                        std::uint32_t batch_start,
                                        unsigned int per_thread,
-                                       const std::atomic_bool* stop)
+                                       const std::atomic_bool* stop_flag)
 {
-    return impl_->run(base_header, target_le, batch_start, per_thread, stop);
+    return impl_->run(base_header, target_le, batch_start, per_thread, stop_flag);
 }
 
 } // namespace yerbas::cpu
