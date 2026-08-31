@@ -168,6 +168,20 @@ public:
         return out;
     }
 
+    std::vector<FingerprintPolicySummary> exact_policies(std::uint64_t fingerprint) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<FingerprintPolicySummary> out;
+        for (const auto& pair : entries_) {
+            const auto& e = pair.second;
+            if (e.fingerprint != fingerprint) continue;
+            out.push_back(FingerprintPolicySummary{e.policy, e.threads, e.lanes,
+                                                   e.batch, e.samples,
+                                                   e.ewma_hps, e.best_hps});
+        }
+        return out;
+    }
+
     std::optional<FingerprintPolicySummary> recommended(std::uint64_t fingerprint,
                                                         std::uint64_t minimum_samples,
                                                         double minimum_gain) const
@@ -286,6 +300,11 @@ inline FingerprintRuntimeSummary record_fingerprint_runtime(std::uint64_t finger
 inline std::vector<FingerprintPolicySummary> fingerprint_policy_summaries(std::uint64_t fingerprint)
 {
     return fingerprint_detail::store().policies(fingerprint);
+}
+
+inline std::vector<FingerprintPolicySummary> exact_fingerprint_policy_summaries(std::uint64_t fingerprint)
+{
+    return fingerprint_detail::store().exact_policies(fingerprint);
 }
 
 inline std::optional<FingerprintPolicySummary> recommended_fingerprint_policy(
