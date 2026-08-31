@@ -40,6 +40,8 @@ public:
 
     WorkerPool(const WorkerPool&) = delete;
     WorkerPool& operator=(const WorkerPool&) = delete;
+    WorkerPool(WorkerPool&&) noexcept;
+    WorkerPool& operator=(WorkerPool&&) noexcept;
 
     unsigned int thread_count() const noexcept;
     unsigned int lane_width() const noexcept;
