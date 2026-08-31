@@ -29,6 +29,8 @@ std::atomic_bool g_tuning_measurement_mode{false};
 
 constexpr std::uint64_t kRotationWorkerProbeSamples = 3U;
 constexpr double kRotationWorkerRequiredGain = 1.03;
+constexpr std::uint64_t kRotationWidthProbeSamples = 3U;
+constexpr double kRotationWidthRequiredGain = 1.02;
 
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
 {
@@ -72,6 +74,68 @@ std::string cn_summary(const ghostrider::StageSchedule& schedule)
         first = false;
     }
     return out.str();
+}
+
+std::string width_policy_name(const CnWidthPolicy& widths)
+{
+    std::ostringstream out;
+    out << "rotation-width:";
+    for (std::size_t i = 0; i < widths.size(); ++i) {
+        if (i != 0) out << '/';
+        out << widths[i];
+    }
+    return out.str();
+}
+
+std::array<bool, 6> active_cn_variants(const ghostrider::StageSchedule& schedule)
+{
+    std::array<bool, 6> active{};
+    for (const std::uint8_t stage : schedule) {
+        if ((stage & ghostrider::kCryptoNightStageFlag) == 0) continue;
+        const auto variant = static_cast<std::size_t>(stage & 0x7fU);
+        if (variant < active.size()) active[variant] = true;
+    }
+    return active;
+}
+
+std::vector<CnWidthPolicy> rotation_width_candidates(const ghostrider::StageSchedule& schedule,
+                                                     const CnWidthPolicy& baseline)
+{
+    std::vector<CnWidthPolicy> out;
+    const auto add = [&](const CnWidthPolicy& widths) {
+        if (std::find(out.begin(), out.end(), widths) == out.end()) out.push_back(widths);
+    };
+    add(baseline);
+    const auto active = active_cn_variants(schedule);
+    constexpr std::array<unsigned int, 3> widths{{1U, 2U, 4U}};
+    for (std::size_t variant = 0; variant < active.size(); ++variant) {
+        if (!active[variant]) continue;
+        for (const unsigned int width : widths) {
+            CnWidthPolicy candidate = baseline;
+            candidate[variant] = width;
+            add(candidate);
+        }
+    }
+    return out;
+}
+
+bool width_plan_parity(const std::array<std::uint8_t, 80>& base_header,
+                       const CnWidthPolicy& widths)
+{
+    std::array<std::array<std::uint8_t, 80>, 4> headers{};
+    std::array<ghostrider::Work, 4> works{};
+    std::array<ghostrider::Hash256, 4> optimized{};
+    for (std::size_t i = 0; i < headers.size(); ++i) {
+        headers[i] = base_header;
+        write_nonce(headers[i], static_cast<std::uint32_t>(0xa5a50000U + i));
+        works[i] = ghostrider::Work{headers[i].data(), headers[i].size()};
+    }
+    if (!ghostrider::hash_optimized_batch(works.data(), optimized.data(), works.size(), widths))
+        return false;
+    for (std::size_t i = 0; i < works.size(); ++i) {
+        if (optimized[i] != ghostrider::hash_reference(works[i])) return false;
+    }
+    return true;
 }
 
 std::vector<unsigned int> rotation_worker_candidates(unsigned int configured_threads)
@@ -147,6 +211,66 @@ RotationWorkerChoice choose_rotation_workers(std::uint64_t fingerprint,
     return {best->workers, false, best->ewma_hps, full->ewma_hps};
 }
 
+struct RotationWidthChoice {
+    CnWidthPolicy widths{{1U, 1U, 1U, 1U, 1U, 1U}};
+    bool probing{false};
+    double selected_hps{0.0};
+    double baseline_hps{0.0};
+};
+
+RotationWidthChoice choose_rotation_widths(std::uint64_t fingerprint,
+                                           unsigned int workers,
+                                           unsigned int lanes,
+                                           unsigned int batch,
+                                           const ghostrider::StageSchedule& schedule,
+                                           const CnWidthPolicy& baseline,
+                                           const std::vector<std::string>& rejected)
+{
+    const auto candidates = rotation_width_candidates(schedule, baseline);
+    const auto summaries = exact_fingerprint_policy_summaries(fingerprint);
+
+    struct Measurement {
+        CnWidthPolicy widths{{1U, 1U, 1U, 1U, 1U, 1U}};
+        std::uint64_t samples{0U};
+        double ewma_hps{0.0};
+    };
+    std::vector<Measurement> measured;
+    measured.reserve(candidates.size());
+
+    for (const auto& candidate : candidates) {
+        const std::string policy = width_policy_name(candidate);
+        if (std::find(rejected.begin(), rejected.end(), policy) != rejected.end()) continue;
+        Measurement m{candidate, 0U, 0.0};
+        for (const auto& summary : summaries) {
+            if (summary.policy != policy || summary.threads != workers ||
+                summary.lanes != lanes || summary.batch != batch)
+                continue;
+            m.samples = summary.samples;
+            m.ewma_hps = summary.ewma_hps;
+            break;
+        }
+        measured.push_back(m);
+    }
+
+    if (measured.empty()) return {baseline, false, 0.0, 0.0};
+    auto probe = std::min_element(measured.begin(), measured.end(), [](const Measurement& a, const Measurement& b) {
+        return a.samples < b.samples;
+    });
+    if (probe != measured.end() && probe->samples < kRotationWidthProbeSamples)
+        return {probe->widths, true, probe->ewma_hps, 0.0};
+
+    const Measurement* base = nullptr;
+    const Measurement* best = nullptr;
+    for (const auto& m : measured) {
+        if (m.widths == baseline) base = &m;
+        if (best == nullptr || m.ewma_hps > best->ewma_hps) best = &m;
+    }
+    if (base == nullptr || best == nullptr) return {baseline, false, 0.0, 0.0};
+    if (best->widths != baseline && best->ewma_hps < base->ewma_hps * kRotationWidthRequiredGain)
+        best = base;
+    return {best->widths, false, best->ewma_hps, base->ewma_hps};
+}
+
 } // namespace
 
 void set_runtime_lane_width(unsigned int lane_width) noexcept
@@ -191,6 +315,9 @@ struct WorkerPool::Impl {
           lanes(requested_lanes == 0U ? runtime_lane_width() : normalize_lane_width(requested_lanes)),
           affinity(requested_affinity),
           affinity_cpus(affinity_cpu_order(affinity, threads)),
+          base_cn_widths(runtime_cn_widths()),
+          active_widths(base_cn_widths),
+          locked_widths(base_cn_widths),
           results(threads),
           assigned_starts(threads),
           assigned_counts(threads)
@@ -210,6 +337,7 @@ struct WorkerPool::Impl {
         work_ready.notify_all();
         for (auto& worker : workers)
             if (worker.joinable()) worker.join();
+        set_runtime_cn_widths(base_cn_widths);
         if (!tuning_measurement_mode()) {
             flush_fingerprint_runtime();
             flush_stage_profiles();
@@ -297,7 +425,9 @@ struct WorkerPool::Impl {
     {
         const auto perf_start = std::chrono::steady_clock::now();
         RotationWorkerChoice worker_choice{threads, false, 0.0, 0.0};
+        RotationWidthChoice width_choice{base_cn_widths, false, 0.0, 0.0};
         bool worker_plan_locked = false;
+        bool width_plan_locked_now = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             base_header = header;
@@ -320,6 +450,13 @@ struct WorkerPool::Impl {
                     locked_selected_hps = 0.0;
                     locked_full_hps = 0.0;
                     rotation_plan_locked = false;
+                    locked_widths = base_cn_widths;
+                    active_widths = base_cn_widths;
+                    locked_width_selected_hps = 0.0;
+                    locked_width_baseline_hps = 0.0;
+                    width_plan_locked = false;
+                    rejected_width_policies.clear();
+                    set_runtime_cn_widths(base_cn_widths);
                 }
             }
             target_le = active_target;
@@ -342,6 +479,44 @@ struct WorkerPool::Impl {
                 }
             }
             active_workers = std::max(1U, std::min(threads, worker_choice.workers));
+
+            active_widths = base_cn_widths;
+            if (!tuning_measurement_mode() && worker_plan_locked) {
+                if (width_plan_locked && locked_fingerprint == active_fingerprint) {
+                    width_choice = {locked_widths, false, locked_width_selected_hps, locked_width_baseline_hps};
+                    active_widths = locked_widths;
+                    width_plan_locked_now = true;
+                } else {
+                    for (;;) {
+                        width_choice = choose_rotation_widths(active_fingerprint, active_workers, lanes, count,
+                                                              active_schedule, base_cn_widths,
+                                                              rejected_width_policies);
+                        const std::string policy = width_policy_name(width_choice.widths);
+                        if (std::find(validated_width_policies.begin(), validated_width_policies.end(), policy) !=
+                            validated_width_policies.end())
+                            break;
+                        if (width_plan_parity(header, width_choice.widths)) {
+                            validated_width_policies.push_back(policy);
+                            break;
+                        }
+                        rejected_width_policies.push_back(policy);
+                        std::cout << "[CPU width] rotation=" << std::hex << active_fingerprint << std::dec
+                                  << " | parity=FAIL | widths="
+                                  << width_choice.widths[0] << '/' << width_choice.widths[1] << '/'
+                                  << width_choice.widths[2] << '/' << width_choice.widths[3] << '/'
+                                  << width_choice.widths[4] << '/' << width_choice.widths[5] << '\n';
+                    }
+                    active_widths = width_choice.widths;
+                    if (!width_choice.probing) {
+                        locked_widths = width_choice.widths;
+                        locked_width_selected_hps = width_choice.selected_hps;
+                        locked_width_baseline_hps = width_choice.baseline_hps;
+                        width_plan_locked = true;
+                        width_plan_locked_now = true;
+                    }
+                }
+            }
+            set_runtime_cn_widths(active_widths);
 
             const std::uint64_t total_hashes = static_cast<std::uint64_t>(threads) * count;
             const std::uint64_t base = total_hashes / active_workers;
@@ -379,13 +554,27 @@ struct WorkerPool::Impl {
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
 
         if (!tuning_measurement_mode() && !(stop != nullptr && stop->load(std::memory_order_relaxed))) {
-            const auto fp = record_fingerprint_runtime(active_fingerprint,
-                                                       active_cn_summary,
-                                                       "rotation",
-                                                       active_workers,
-                                                       lanes,
-                                                       count,
-                                                       hps);
+            FingerprintRuntimeSummary fp{};
+            if (active_widths == base_cn_widths) {
+                fp = record_fingerprint_runtime(active_fingerprint,
+                                                active_cn_summary,
+                                                "rotation",
+                                                active_workers,
+                                                lanes,
+                                                count,
+                                                hps);
+            }
+
+            FingerprintRuntimeSummary width_fp{};
+            if (worker_plan_locked) {
+                width_fp = record_fingerprint_runtime(active_fingerprint,
+                                                      active_cn_summary,
+                                                      width_policy_name(active_widths),
+                                                      active_workers,
+                                                      lanes,
+                                                      count,
+                                                      hps);
+            }
 
             if ((run_count % 64U) == 0U) {
                 auto sample_header = header;
@@ -395,9 +584,10 @@ struct WorkerPool::Impl {
 
             const bool new_rotation = active_fingerprint != last_logged_fingerprint;
             const bool worker_plan_changed = active_workers != last_logged_active_workers;
+            const bool width_plan_changed = active_widths != last_logged_widths;
             const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
-            if (new_rotation || worker_plan_changed || periodic_diagnostic) {
-                const auto widths = runtime_cn_widths();
+            if (new_rotation || worker_plan_changed || width_plan_changed || periodic_diagnostic) {
+                const auto learned = worker_plan_locked ? width_fp : fp;
                 std::cout << std::fixed << std::setprecision(2)
                           << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                           << active_fingerprint << std::dec << std::setfill(' ')
@@ -405,18 +595,23 @@ struct WorkerPool::Impl {
                           << " | policy=rotation workers=" << active_workers << '/' << threads
                           << " lanes=" << lanes << " batch=" << count
                           << " | phase=" << (worker_choice.probing ? "probe" : (worker_plan_locked ? "locked" : "selected"))
+                          << " | width-phase=" << (!worker_plan_locked ? "waiting" : (width_choice.probing ? "probe" : (width_plan_locked_now ? "locked" : "selected")))
                           << " | affinity=" << affinity_policy_name(affinity)
-                          << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
-                          << widths[3] << '/' << widths[4] << '/' << widths[5]
+                          << " | widths=" << active_widths[0] << '/' << active_widths[1] << '/' << active_widths[2] << '/'
+                          << active_widths[3] << '/' << active_widths[4] << '/' << active_widths[5]
                           << " | live=" << hps << " H/s"
-                          << " | learned=" << fp.ewma_hps << " H/s"
-                          << " | samples=" << fp.samples;
+                          << " | learned=" << learned.ewma_hps << " H/s"
+                          << " | samples=" << learned.samples;
                 if (!worker_choice.probing && worker_choice.full_hps > 0.0)
                     std::cout << " | full=" << worker_choice.full_hps << " H/s"
                               << " | selected=" << worker_choice.selected_hps << " H/s";
+                if (worker_plan_locked && !width_choice.probing && width_choice.baseline_hps > 0.0)
+                    std::cout << " | width-base=" << width_choice.baseline_hps << " H/s"
+                              << " | width-selected=" << width_choice.selected_hps << " H/s";
                 std::cout << std::defaultfloat << '\n';
                 last_logged_fingerprint = active_fingerprint;
                 last_logged_active_workers = active_workers;
+                last_logged_widths = active_widths;
             }
         }
 
@@ -430,6 +625,9 @@ struct WorkerPool::Impl {
     unsigned int lanes;
     AffinityPolicy affinity{AffinityPolicy::Unpinned};
     std::vector<unsigned int> affinity_cpus;
+    CnWidthPolicy base_cn_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
+    CnWidthPolicy active_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
+    CnWidthPolicy locked_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
     std::vector<std::thread> workers;
     std::mutex mutex;
     std::condition_variable work_ready;
@@ -449,6 +647,7 @@ struct WorkerPool::Impl {
     std::uint64_t run_count{0};
     std::uint64_t last_logged_fingerprint{0};
     unsigned int last_logged_active_workers{0U};
+    CnWidthPolicy last_logged_widths{{0U, 0U, 0U, 0U, 0U, 0U}};
     std::array<std::uint8_t, 76> active_header_key{};
     std::array<std::uint8_t, 32> active_target{};
     bool active_target_valid{false};
@@ -460,6 +659,11 @@ struct WorkerPool::Impl {
     double locked_selected_hps{0.0};
     double locked_full_hps{0.0};
     bool rotation_plan_locked{false};
+    double locked_width_selected_hps{0.0};
+    double locked_width_baseline_hps{0.0};
+    bool width_plan_locked{false};
+    std::vector<std::string> validated_width_policies;
+    std::vector<std::string> rejected_width_policies;
 };
 
 WorkerPool::WorkerPool(unsigned int threads, unsigned int lanes, AffinityPolicy affinity)
