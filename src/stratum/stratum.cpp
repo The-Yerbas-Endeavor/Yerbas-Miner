@@ -626,8 +626,19 @@ void Client::update_rotation_epoch()
     rotation_started_ = std::chrono::steady_clock::now();
     rotation_hashes_done_ = 0;
     rotation_cpu_hashes_done_ = 0;
+
+    // Status hashrates are rotation-relative. Reset the report cadence and
+    // interval baselines with the rotation so a report that was already due
+    // cannot divide the first completed batch by only a few milliseconds and
+    // emit an impossible transient kH/s value.
+    last_report_ = rotation_started_;
+    hashes_at_last_report_ = hashes_done_;
+    cpu_hashes_at_last_report_ = cpu_hashes_done_;
 #ifdef YERBAS_HAS_CUDA
-    for (auto& worker : gpu_workers_) worker.rotation_hashes_done = 0;
+    for (auto& worker : gpu_workers_) {
+        worker.rotation_hashes_done = 0;
+        worker.hashes_at_last_report = worker.hashes_done;
+    }
 #endif
 }
 
