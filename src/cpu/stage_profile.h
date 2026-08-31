@@ -125,8 +125,12 @@ private:
 
 inline Store& store()
 {
-    static Store instance;
-    return instance;
+    // The persistent WorkerPool is intentionally destroyed during process
+    // teardown. Keep the cache object alive until the OS reclaims process memory
+    // so WorkerPool::~Impl() can safely flush it regardless of cross-TU static
+    // destruction order.
+    static Store* instance = new Store();
+    return *instance;
 }
 
 } // namespace stage_profile_detail
