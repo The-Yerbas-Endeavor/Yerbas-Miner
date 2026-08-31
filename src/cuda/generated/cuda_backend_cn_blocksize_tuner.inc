@@ -135,7 +135,7 @@ int cn_tune_selected_block_size(cudaStream_t stream,
         add(threads);
 
     int best_threads = baseline_threads;
-    float best_ms = std::numeric_limits<float>::max();
+    float best_ms = 1.0e30F;
     for (const int threads : candidates) {
         // Warm-up once, then use a median of three identical-state measurements.
         reset();
