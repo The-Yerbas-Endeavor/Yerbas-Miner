@@ -19,7 +19,6 @@ static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_l
 static std::array<std::array<double, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_final_ms{};
 static std::array<std::array<std::uint64_t, 6>, kCnPhaseProfileMaxDevices> g_cn_phase_samples{};
 static std::array<cudaStream_t, kCnPhaseProfileMaxDevices> g_cn_overlap_streams{};
-// 0=unknown, 1=single, 33=33/67, 50=50/50.
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_overlap_mode{};
 static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_overlap_reported{};
 
@@ -104,10 +103,14 @@ void launch_cn_partition(cudaStream_t stream,
         check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
     }
 
+    // Route overlap partitions through the same production loop selector used by
+    // the single-stream path. This keeps block-size tuning active even after the
+    // overlap scheduler has warmed and prevents cached overlap mode from silently
+    // bypassing a newer phase-2 launch policy.
     if (use_ttable)
-        launch_cn_loop_hardened<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_block_tuned<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
     else
-        launch_cn_loop_hardened<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_block_tuned<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
 
     if (use_ttable) {
         launch_cn_final_selected<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
@@ -219,7 +222,6 @@ void save_cn_overlap_cache(int device_id, const cudaDeviceProp& props, std::size
         if (out) out << "YERBAS_CN_OVERLAP " << kCnOverlapSchedulerRevision << ' '
                      << g_cn_overlap_mode[device_id][VariantIndex] << '\n';
     } catch (...) {
-        // Scheduler cache is optional; mining remains available without it.
     }
 }
 
@@ -263,8 +265,6 @@ bool launch_cn_scheduled_if_ready(cudaStream_t stream,
 
     int& mode = g_cn_overlap_mode[device_id][VariantIndex];
     if (mode == 0 && !load_cn_overlap_cache<VariantIndex>(device_id, props, count)) {
-        // Only state must be preserved. Setup completely reconstructs scratchpad
-        // and split context on every candidate execution.
         std::uint8_t* saved_states = nullptr;
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&saved_states), count * kStateBytes),
                    "cudaMalloc CN overlap saved states failed");
@@ -345,7 +345,6 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase profile failed");
     const bool use_ttable = geometry.aes_backend == 1;
 
-    // First encounter remains single-stream while lazy parity/timing selectors warm.
     if (launch_cn_scheduled_if_ready<VariantIndex>(stream, device_id, count,
                                                    states, scratchpads, contexts,
                                                    geometry, props)) return;
@@ -383,9 +382,9 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     if (sample) check_cuda(cudaEventRecord(e1, stream), "cudaEventRecord CN phase setup stop failed");
 
     if (use_ttable)
-        launch_cn_loop_hardened<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_block_tuned<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
     else
-        launch_cn_loop_hardened<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
+        launch_cn_loop_block_tuned<VariantIndex, false>(stream, states, count, scratchpads, contexts, geometry);
     if (sample) check_cuda(cudaEventRecord(e2, stream), "cudaEventRecord CN phase loop stop failed");
 
     if (use_ttable) {
@@ -457,5 +456,3 @@ void launch_split_cryptonight_phase_profiled(cudaStream_t stream,
     default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
     }
 }
-
-} // anonymous namespace
