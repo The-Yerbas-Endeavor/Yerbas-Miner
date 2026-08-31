@@ -105,7 +105,6 @@ public:
             e.ewma_hps = hps;
             e.best_hps = hps;
         } else {
-            // Slow enough to reject one-off spikes while still adapting across runs.
             constexpr double alpha = 0.20;
             e.ewma_hps = e.ewma_hps * (1.0 - alpha) + hps * alpha;
             e.best_hps = std::max(e.best_hps, hps);
@@ -118,14 +117,6 @@ public:
     std::vector<FingerprintPolicySummary> policies(std::uint64_t fingerprint) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-
-        // Worker-count tuning depends primarily on the ordered CryptoNight
-        // triplet and cache pressure, not the conventional core-hash ordering.
-        // Once this fingerprint has identified its CN triplet, pool runtime
-        // measurements from every fingerprint carrying the same triplet. This
-        // reduces the learning space from hundreds of schedule fingerprints to
-        // the small set of GhostRider CN rotations while retaining the original
-        // fingerprint in diagnostics and stage profiling.
         std::string cn;
         for (const auto& pair : entries_) {
             const auto& e = pair.second;
@@ -271,8 +262,11 @@ private:
 
 inline Store& store()
 {
-    static Store instance;
-    return instance;
+    // WorkerPool can be a function-static object in Stratum. Keep this cache
+    // alive through process teardown so its destructor can safely flush without
+    // depending on cross-translation-unit static destruction order.
+    static Store* instance = new Store();
+    return *instance;
 }
 
 } // namespace fingerprint_detail
