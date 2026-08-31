@@ -28,7 +28,7 @@ std::array<std::atomic_uint, 6> g_runtime_cn_widths{{1U, 1U, 1U, 1U, 1U, 1U}};
 std::atomic_bool g_tuning_measurement_mode{false};
 
 constexpr std::uint64_t kRotationWorkerProbeSamples = 3U;
-constexpr double kRotationWorkerRequiredGain = 1.01;
+constexpr double kRotationWorkerRequiredGain = 1.03;
 
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
 {
