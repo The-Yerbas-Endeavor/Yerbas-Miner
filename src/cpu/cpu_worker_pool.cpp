@@ -297,6 +297,7 @@ struct WorkerPool::Impl {
     {
         const auto perf_start = std::chrono::steady_clock::now();
         RotationWorkerChoice worker_choice{threads, false, 0.0, 0.0};
+        bool worker_plan_locked = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             base_header = header;
@@ -312,11 +313,34 @@ struct WorkerPool::Impl {
                 active_schedule = ghostrider::stage_schedule_quiet(work);
                 active_fingerprint = ghostrider::schedule_fingerprint(active_schedule);
                 active_cn_summary = cn_summary(active_schedule);
+
+                if (active_fingerprint != locked_fingerprint) {
+                    locked_fingerprint = active_fingerprint;
+                    locked_workers = threads;
+                    locked_selected_hps = 0.0;
+                    locked_full_hps = 0.0;
+                    rotation_plan_locked = false;
+                }
             }
             target_le = active_target;
 
-            if (!tuning_measurement_mode())
-                worker_choice = choose_rotation_workers(active_fingerprint, threads, lanes, count);
+            if (!tuning_measurement_mode()) {
+                if (rotation_plan_locked && locked_fingerprint == active_fingerprint) {
+                    worker_choice = {locked_workers, false, locked_selected_hps, locked_full_hps};
+                    worker_plan_locked = true;
+                } else {
+                    worker_choice = choose_rotation_workers(active_fingerprint, threads, lanes, count);
+                    if (!worker_choice.probing) {
+                        locked_fingerprint = active_fingerprint;
+                        locked_workers = std::max(1U, std::min(threads, worker_choice.workers));
+                        locked_selected_hps = worker_choice.selected_hps;
+                        locked_full_hps = worker_choice.full_hps;
+                        rotation_plan_locked = true;
+                        worker_plan_locked = true;
+                        worker_choice.workers = locked_workers;
+                    }
+                }
+            }
             active_workers = std::max(1U, std::min(threads, worker_choice.workers));
 
             const std::uint64_t total_hashes = static_cast<std::uint64_t>(threads) * count;
@@ -380,7 +404,7 @@ struct WorkerPool::Impl {
                           << " | CN=" << active_cn_summary
                           << " | policy=rotation workers=" << active_workers << '/' << threads
                           << " lanes=" << lanes << " batch=" << count
-                          << " | phase=" << (worker_choice.probing ? "probe" : "selected")
+                          << " | phase=" << (worker_choice.probing ? "probe" : (worker_plan_locked ? "locked" : "selected"))
                           << " | affinity=" << affinity_policy_name(affinity)
                           << " | widths=" << widths[0] << '/' << widths[1] << '/' << widths[2] << '/'
                           << widths[3] << '/' << widths[4] << '/' << widths[5]
@@ -431,6 +455,11 @@ struct WorkerPool::Impl {
     ghostrider::StageSchedule active_schedule{};
     std::uint64_t active_fingerprint{0};
     std::string active_cn_summary;
+    std::uint64_t locked_fingerprint{0};
+    unsigned int locked_workers{1U};
+    double locked_selected_hps{0.0};
+    double locked_full_hps{0.0};
+    bool rotation_plan_locked{false};
 };
 
 WorkerPool::WorkerPool(unsigned int threads, unsigned int lanes, AffinityPolicy affinity)
