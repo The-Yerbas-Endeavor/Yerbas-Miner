@@ -118,12 +118,61 @@ public:
     std::vector<FingerprintPolicySummary> policies(std::uint64_t fingerprint) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<FingerprintPolicySummary> out;
+
+        // Worker-count tuning depends primarily on the ordered CryptoNight
+        // triplet and cache pressure, not the conventional core-hash ordering.
+        // Once this fingerprint has identified its CN triplet, pool runtime
+        // measurements from every fingerprint carrying the same triplet. This
+        // reduces the learning space from hundreds of schedule fingerprints to
+        // the small set of GhostRider CN rotations while retaining the original
+        // fingerprint in diagnostics and stage profiling.
+        std::string cn;
         for (const auto& pair : entries_) {
             const auto& e = pair.second;
-            if (e.fingerprint != fingerprint) continue;
-            out.push_back({e.policy, e.threads, e.lanes, e.batch,
-                           e.samples, e.ewma_hps, e.best_hps});
+            if (e.fingerprint == fingerprint && !e.cn.empty()) {
+                cn = e.cn;
+                break;
+            }
+        }
+
+        struct Aggregate {
+            FingerprintPolicySummary summary;
+            long double weighted_hps{0.0};
+        };
+        std::map<std::string, Aggregate> aggregates;
+
+        for (const auto& pair : entries_) {
+            const auto& e = pair.second;
+            if (cn.empty()) {
+                if (e.fingerprint != fingerprint) continue;
+            } else if (e.cn != cn) {
+                continue;
+            }
+
+            std::ostringstream aggregate_key;
+            aggregate_key << e.policy << ':' << e.threads << ':' << e.lanes << ':' << e.batch;
+            auto& a = aggregates[aggregate_key.str()];
+            if (a.summary.samples == 0) {
+                a.summary.policy = e.policy;
+                a.summary.threads = e.threads;
+                a.summary.lanes = e.lanes;
+                a.summary.batch = e.batch;
+            }
+            a.summary.samples += e.samples;
+            a.summary.best_hps = std::max(a.summary.best_hps, e.best_hps);
+            a.weighted_hps += static_cast<long double>(e.ewma_hps) *
+                              static_cast<long double>(e.samples);
+        }
+
+        std::vector<FingerprintPolicySummary> out;
+        out.reserve(aggregates.size());
+        for (auto& pair : aggregates) {
+            auto& a = pair.second;
+            if (a.summary.samples > 0) {
+                a.summary.ewma_hps = static_cast<double>(
+                    a.weighted_hps / static_cast<long double>(a.summary.samples));
+            }
+            out.push_back(a.summary);
         }
         return out;
     }
