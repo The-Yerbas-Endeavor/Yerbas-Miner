@@ -103,10 +103,6 @@ void launch_cn_partition(cudaStream_t stream,
         check_cuda(cudaGetLastError(), "GhostRider CUDA CryptoNight cooperative8 setup launch failed");
     }
 
-    // Route overlap partitions through the same production loop selector used by
-    // the single-stream path. This keeps block-size tuning active even after the
-    // overlap scheduler has warmed and prevents cached overlap mode from silently
-    // bypassing a newer phase-2 launch policy.
     if (use_ttable)
         launch_cn_loop_block_tuned<VariantIndex, true>(stream, states, count, scratchpads, contexts, geometry);
     else
@@ -221,8 +217,7 @@ void save_cn_overlap_cache(int device_id, const cudaDeviceProp& props, std::size
         std::ofstream out(path, std::ios::trunc);
         if (out) out << "YERBAS_CN_OVERLAP " << kCnOverlapSchedulerRevision << ' '
                      << g_cn_overlap_mode[device_id][VariantIndex] << '\n';
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 template <std::uint8_t VariantIndex>
@@ -456,3 +451,5 @@ void launch_split_cryptonight_phase_profiled(cudaStream_t stream,
     default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
     }
 }
+
+} // anonymous namespace
