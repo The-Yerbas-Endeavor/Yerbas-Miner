@@ -30,9 +30,7 @@
 
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
-#define launch_cn_loop_hardened launch_cn_loop_block_tuned
 #include "cuda/generated/cuda_backend_cn_phase_profile.inc"
-#undef launch_cn_loop_hardened
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
 
