@@ -30,6 +30,7 @@ std::atomic_bool g_tuning_measurement_mode{false};
 constexpr std::uint64_t kRotationWorkerProbeSamples = 3U;
 constexpr double kRotationWorkerRequiredGain = 1.03;
 constexpr std::uint64_t kRotationWidthProbeSamples = 3U;
+constexpr std::uint64_t kRotationWidthFinalSamples = 5U;
 constexpr double kRotationWidthRequiredGain = 1.02;
 
 unsigned int normalize_lane_width(unsigned int lane_width) noexcept
@@ -85,6 +86,15 @@ std::string width_policy_name(const CnWidthPolicy& widths)
         out << widths[i];
     }
     return out.str();
+}
+
+std::size_t width_change_count(const CnWidthPolicy& widths,
+                               const CnWidthPolicy& baseline) noexcept
+{
+    std::size_t changed = 0;
+    for (std::size_t i = 0; i < widths.size(); ++i)
+        if (widths[i] != baseline[i]) ++changed;
+    return changed;
 }
 
 std::array<bool, 6> active_cn_variants(const ghostrider::StageSchedule& schedule)
@@ -226,7 +236,6 @@ RotationWidthChoice choose_rotation_widths(std::uint64_t fingerprint,
                                            const CnWidthPolicy& baseline,
                                            const std::vector<std::string>& rejected)
 {
-    const auto candidates = rotation_width_candidates(schedule, baseline);
     const auto summaries = exact_fingerprint_policy_summaries(fingerprint);
 
     struct Measurement {
@@ -234,13 +243,10 @@ RotationWidthChoice choose_rotation_widths(std::uint64_t fingerprint,
         std::uint64_t samples{0U};
         double ewma_hps{0.0};
     };
-    std::vector<Measurement> measured;
-    measured.reserve(candidates.size());
 
-    for (const auto& candidate : candidates) {
-        const std::string policy = width_policy_name(candidate);
-        if (std::find(rejected.begin(), rejected.end(), policy) != rejected.end()) continue;
+    const auto measurement_for = [&](const CnWidthPolicy& candidate) {
         Measurement m{candidate, 0U, 0.0};
+        const std::string policy = width_policy_name(candidate);
         for (const auto& summary : summaries) {
             if (summary.policy != policy || summary.threads != workers ||
                 summary.lanes != lanes || summary.batch != batch)
@@ -249,23 +255,97 @@ RotationWidthChoice choose_rotation_widths(std::uint64_t fingerprint,
             m.ewma_hps = summary.ewma_hps;
             break;
         }
+        return m;
+    };
+
+    std::vector<Measurement> measured;
+    const auto singles = rotation_width_candidates(schedule, baseline);
+    measured.reserve(singles.size() + 4U);
+    for (const auto& candidate : singles) {
+        const std::string policy = width_policy_name(candidate);
+        if (std::find(rejected.begin(), rejected.end(), policy) != rejected.end()) continue;
+        measured.push_back(measurement_for(candidate));
+    }
+    if (measured.empty()) return {baseline, false, 0.0, 0.0};
+
+    // Stage 1: cheaply screen the baseline and every one-variant alternative.
+    auto single_probe = std::min_element(measured.begin(), measured.end(), [](const Measurement& a, const Measurement& b) {
+        return a.samples < b.samples;
+    });
+    if (single_probe != measured.end() && single_probe->samples < kRotationWidthProbeSamples)
+        return {single_probe->widths, true, single_probe->ewma_hps, 0.0};
+
+    const Measurement* base = nullptr;
+    for (const auto& m : measured)
+        if (m.widths == baseline) { base = &m; break; }
+    if (base == nullptr) return {baseline, false, 0.0, 0.0};
+
+    // Keep only the individually proven winner for each active CN variant.
+    // A variant must clear the same 2% whole-GhostRider gain gate before it is
+    // allowed to participate in a combinational candidate.
+    const auto active = active_cn_variants(schedule);
+    std::array<unsigned int, 6> promising_width{};
+    std::array<bool, 6> promising{};
+    for (std::size_t variant = 0; variant < active.size(); ++variant) {
+        if (!active[variant]) continue;
+        const Measurement* best_variant = nullptr;
+        for (const auto& m : measured) {
+            if (width_change_count(m.widths, baseline) != 1U || m.widths[variant] == baseline[variant]) continue;
+            bool this_variant_only = true;
+            for (std::size_t i = 0; i < baseline.size(); ++i) {
+                if (i != variant && m.widths[i] != baseline[i]) { this_variant_only = false; break; }
+            }
+            if (!this_variant_only) continue;
+            if (best_variant == nullptr || m.ewma_hps > best_variant->ewma_hps) best_variant = &m;
+        }
+        if (best_variant != nullptr && best_variant->ewma_hps >= base->ewma_hps * kRotationWidthRequiredGain) {
+            promising[variant] = true;
+            promising_width[variant] = best_variant->widths[variant];
+        }
+    }
+
+    // Stage 2: generate only combinations of individually proven winners.
+    // GhostRider has three CN stages, so this normally means at most three
+    // pair candidates plus one all-promising candidate rather than 27 tuples.
+    std::vector<std::size_t> promising_variants;
+    for (std::size_t i = 0; i < promising.size(); ++i)
+        if (promising[i]) promising_variants.push_back(i);
+
+    std::vector<CnWidthPolicy> combinations;
+    const auto add_combination = [&](const CnWidthPolicy& widths) {
+        if (width_change_count(widths, baseline) < 2U) return;
+        if (std::find(combinations.begin(), combinations.end(), widths) == combinations.end())
+            combinations.push_back(widths);
+    };
+
+    for (std::size_t a = 0; a < promising_variants.size(); ++a) {
+        for (std::size_t b = a + 1; b < promising_variants.size(); ++b) {
+            CnWidthPolicy candidate = baseline;
+            candidate[promising_variants[a]] = promising_width[promising_variants[a]];
+            candidate[promising_variants[b]] = promising_width[promising_variants[b]];
+            add_combination(candidate);
+        }
+    }
+    if (promising_variants.size() >= 3U) {
+        CnWidthPolicy candidate = baseline;
+        for (const auto variant : promising_variants)
+            candidate[variant] = promising_width[variant];
+        add_combination(candidate);
+    }
+
+    for (const auto& candidate : combinations) {
+        const std::string policy = width_policy_name(candidate);
+        if (std::find(rejected.begin(), rejected.end(), policy) != rejected.end()) continue;
+        Measurement m = measurement_for(candidate);
+        if (m.samples < kRotationWidthFinalSamples)
+            return {m.widths, true, m.ewma_hps, base->ewma_hps};
         measured.push_back(m);
     }
 
-    if (measured.empty()) return {baseline, false, 0.0, 0.0};
-    auto probe = std::min_element(measured.begin(), measured.end(), [](const Measurement& a, const Measurement& b) {
-        return a.samples < b.samples;
-    });
-    if (probe != measured.end() && probe->samples < kRotationWidthProbeSamples)
-        return {probe->widths, true, probe->ewma_hps, 0.0};
+    const Measurement* best = base;
+    for (const auto& m : measured)
+        if (m.ewma_hps > best->ewma_hps) best = &m;
 
-    const Measurement* base = nullptr;
-    const Measurement* best = nullptr;
-    for (const auto& m : measured) {
-        if (m.widths == baseline) base = &m;
-        if (best == nullptr || m.ewma_hps > best->ewma_hps) best = &m;
-    }
-    if (base == nullptr || best == nullptr) return {baseline, false, 0.0, 0.0};
     if (best->widths != baseline && best->ewma_hps < base->ewma_hps * kRotationWidthRequiredGain)
         best = base;
     return {best->widths, false, best->ewma_hps, base->ewma_hps};
@@ -588,6 +668,7 @@ struct WorkerPool::Impl {
             const bool periodic_diagnostic = diagnostics_enabled() && (run_count % 64U) == 0U;
             if (new_rotation || worker_plan_changed || width_plan_changed || periodic_diagnostic) {
                 const auto learned = worker_plan_locked ? width_fp : fp;
+                const char* width_kind = width_change_count(active_widths, base_cn_widths) > 1U ? "combined" : "single";
                 std::cout << std::fixed << std::setprecision(2)
                           << "[CPU fingerprint] rotation=" << std::hex << std::setw(16) << std::setfill('0')
                           << active_fingerprint << std::dec << std::setfill(' ')
@@ -596,6 +677,7 @@ struct WorkerPool::Impl {
                           << " lanes=" << lanes << " batch=" << count
                           << " | phase=" << (worker_choice.probing ? "probe" : (worker_plan_locked ? "locked" : "selected"))
                           << " | width-phase=" << (!worker_plan_locked ? "waiting" : (width_choice.probing ? "probe" : (width_plan_locked_now ? "locked" : "selected")))
+                          << " | width-kind=" << width_kind
                           << " | affinity=" << affinity_policy_name(affinity)
                           << " | widths=" << active_widths[0] << '/' << active_widths[1] << '/' << active_widths[2] << '/'
                           << active_widths[3] << '/' << active_widths[4] << '/' << active_widths[5]
