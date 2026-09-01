@@ -30,7 +30,16 @@
 
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
+// Retain the previous profiler/scheduler as the safe fallback, but rename its
+// public dispatch points so the staggered scheduler can own production routing.
+#define launch_cn_scheduled_if_ready launch_cn_scheduled_if_ready_legacy
+#define launch_split_cryptonight_variant_phase_profiled launch_split_cryptonight_variant_phase_profiled_legacy
+#define launch_split_cryptonight_phase_profiled launch_split_cryptonight_phase_profiled_legacy
 #include "cuda/generated/cuda_backend_cn_phase_profile.inc"
+#undef launch_split_cryptonight_phase_profiled
+#undef launch_split_cryptonight_variant_phase_profiled
+#undef launch_cn_scheduled_if_ready
+#include "cuda/generated/cuda_backend_cn_staggered_overlap.inc"
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
 
