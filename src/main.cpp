@@ -26,21 +26,6 @@ void write_startup_log(const std::string& message)
     if (log) log << message << '\n';
 }
 
-void enable_production_gpu_profiler()
-{
-    // Reuse the CUDA stage-event profiler while optimization is active. Respect
-    // an explicit user choice when YERBAS_DIAGNOSTICS is already set.
-    if (std::getenv("YERBAS_DIAGNOSTICS") != nullptr) return;
-#ifdef _WIN32
-    _putenv_s("YERBAS_DIAGNOSTICS", "1");
-#else
-    setenv("YERBAS_DIAGNOSTICS", "1", 0);
-#endif
-    std::cout << "[GPU profiler] production stage sampling enabled"
-              << " | CUDA stage events=1/4 scans"
-              << " | set YERBAS_DIAGNOSTICS=0 to disable\n";
-}
-
 struct StreamBufferRestore {
     std::streambuf* cout_buf{nullptr};
     std::streambuf* cerr_buf{nullptr};
@@ -134,7 +119,6 @@ int main(int argc, char** argv)
     try {
         auto config = yerbas::load_config(argc, argv);
         yerbas::first_run::apply(config);
-        enable_production_gpu_profiler();
         if (!config.logging.perf_csv.empty()) {
             yerbas::console::set_perf_csv_path(config.logging.perf_csv);
             std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
