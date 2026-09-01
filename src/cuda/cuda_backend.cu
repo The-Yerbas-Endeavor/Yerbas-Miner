@@ -39,7 +39,23 @@
 #undef launch_split_cryptonight_phase_profiled
 #undef launch_split_cryptonight_variant_phase_profiled
 #undef launch_cn_scheduled_if_ready
+
+// The staggered scheduler's setup/loop/final launchers are selector-aware and
+// lazily initialize their own parity-tested production choices. Requiring those
+// selectors to be initialized before entering the staggered path creates a
+// circular gate: the code that initializes them can never run. Keep the legacy
+// scheduler's conservative readiness check unchanged, but let staggered dispatch
+// enter whenever the device index is valid; its normal launchers still own all
+// parity and tuning decisions before any candidate is promoted.
+template <std::uint8_t VariantIndex>
+bool cn_stagger_selectors_ready(int device_id, bool)
+{
+    static_assert(VariantIndex < 6, "invalid CryptoNight variant");
+    return device_id >= 0 && device_id < kCnPhaseProfileMaxDevices;
+}
+#define cn_overlap_selectors_ready cn_stagger_selectors_ready
 #include "cuda/generated/cuda_backend_cn_staggered_overlap.inc"
+#undef cn_overlap_selectors_ready
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
 
