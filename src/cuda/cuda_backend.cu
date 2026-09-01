@@ -53,8 +53,18 @@ bool cn_stagger_selectors_ready(int device_id, bool)
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     return device_id >= 0 && device_id < kCnPhaseProfileMaxDevices;
 }
+
+// The staggered implementation historically created/destroyed CUDA events on
+// every launch. Route those calls through a tiny per-device persistent pool while
+// this include is compiled. The legacy scheduler and the rest of the backend keep
+// their existing CUDA event behavior unchanged.
+#include "cuda/generated/cuda_backend_cn_stagger_event_pool.inc"
 #define cn_overlap_selectors_ready cn_stagger_selectors_ready
+#define cudaEventCreateWithFlags cn_stagger_event_create_with_flags
+#define cudaEventDestroy cn_stagger_event_release
 #include "cuda/generated/cuda_backend_cn_staggered_overlap.inc"
+#undef cudaEventDestroy
+#undef cudaEventCreateWithFlags
 #undef cn_overlap_selectors_ready
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
