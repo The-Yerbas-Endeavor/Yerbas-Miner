@@ -627,18 +627,12 @@ void Client::update_rotation_epoch()
     rotation_hashes_done_ = 0;
     rotation_cpu_hashes_done_ = 0;
 
-    // Status hashrates are rotation-relative. Reset the report cadence and
-    // interval baselines with the rotation so a report that was already due
-    // cannot divide the first completed batch by only a few milliseconds and
-    // emit an impossible transient kH/s value.
-    last_report_ = rotation_started_;
-    hashes_at_last_report_ = hashes_done_;
-    cpu_hashes_at_last_report_ = cpu_hashes_done_;
+    // Rotation-local counters remain useful diagnostics, but status reporting
+    // uses a fixed report window. A GhostRider rotation must not reset that
+    // window or its baselines, otherwise short rotations can create impossible
+    // transient hashrates.
 #ifdef YERBAS_HAS_CUDA
-    for (auto& worker : gpu_workers_) {
-        worker.rotation_hashes_done = 0;
-        worker.hashes_at_last_report = worker.hashes_done;
-    }
+    for (auto& worker : gpu_workers_) worker.rotation_hashes_done = 0;
 #endif
 }
 
@@ -915,11 +909,12 @@ void Client::report_stats(bool force)
     const double since_report = std::chrono::duration<double>(now - last_report_).count();
     if (!force && since_report < kStatusIntervalSeconds) return;
 
-    const double rotation_seconds = rotation_started_.time_since_epoch().count() == 0
-        ? 0.0
-        : std::chrono::duration<double>(now - rotation_started_).count();
-    const double total_hps = rotation_seconds > 0.0 ? static_cast<double>(rotation_hashes_done_) / rotation_seconds : 0.0;
-    const double cpu_hps = rotation_seconds > 0.0 ? static_cast<double>(rotation_cpu_hashes_done_) / rotation_seconds : 0.0;
+    const std::uint64_t window_hashes = hashes_done_ >= hashes_at_last_report_
+        ? hashes_done_ - hashes_at_last_report_ : 0;
+    const std::uint64_t cpu_window_hashes = cpu_hashes_done_ >= cpu_hashes_at_last_report_
+        ? cpu_hashes_done_ - cpu_hashes_at_last_report_ : 0;
+    const double total_hps = since_report > 0.0 ? static_cast<double>(window_hashes) / since_report : 0.0;
+    const double cpu_hps = since_report > 0.0 ? static_cast<double>(cpu_window_hashes) / since_report : 0.0;
     const double uptime = std::chrono::duration<double>(now - mining_started_).count();
     const double average_hps = uptime > 0.0 ? static_cast<double>(hashes_done_) / uptime : 0.0;
     const double expected_hashes = difficulty_ > 0.0 ? difficulty_ * kStratumDiffOneHashes : 0.0;
@@ -935,17 +930,19 @@ void Client::report_stats(bool force)
 
     if (config_.miner.cpu_enabled) {
         std::cout << kCpuColor << std::left << std::setw(14) << "CPU" << std::setw(18) << format_rate(cpu_hps)
-                  << std::setw(17) << rotation_cpu_hashes_done_ << std::setw(12) << "-" << g_source_accepted["CPU"] << kColorReset << '\n';
+                  << std::setw(17) << cpu_window_hashes << std::setw(12) << "-" << g_source_accepted["CPU"] << kColorReset << '\n';
     }
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled && !gpu_workers_.empty()) {
         for (auto& worker : gpu_workers_) {
-            const double gpu_hps = rotation_seconds > 0.0 ? static_cast<double>(worker.rotation_hashes_done) / rotation_seconds : 0.0;
+            const std::uint64_t gpu_window_hashes = worker.hashes_done >= worker.hashes_at_last_report
+                ? worker.hashes_done - worker.hashes_at_last_report : 0;
+            const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_window_hashes) / since_report : 0.0;
             std::ostringstream label; label << "GPU " << worker.device_id;
             const std::string source = label.str();
             std::cout << gpu_color(worker.device_id) << std::left << std::setw(14) << source
                       << std::setw(18) << (gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle")
-                      << std::setw(17) << worker.rotation_hashes_done << std::setw(12) << worker.engine->batch_size()
+                      << std::setw(17) << gpu_window_hashes << std::setw(12) << worker.engine->batch_size()
                       << g_source_accepted[source] << kColorReset << '\n';
         }
     }
