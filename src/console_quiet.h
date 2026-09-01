@@ -192,6 +192,39 @@ inline void capture_perf_line(const std::string& raw_line)
         return;
     }
 
+    if (line.find("[CUDA CN stagger tuner] GPU ") != std::string::npos) {
+        const auto gpu_pos = line.find("GPU ");
+        const auto gpu_end = line.find(" |", gpu_pos);
+        const std::string source = gpu_pos == std::string::npos ? "GPU" : line.substr(gpu_pos, gpu_end - gpu_pos);
+        std::string cn;
+        if (gpu_end != std::string::npos) {
+            const auto cn_start = gpu_end + 3U;
+            const auto cn_end = line.find(" |", cn_start);
+            if (cn_end != std::string::npos) cn = line.substr(cn_start, cn_end - cn_start);
+        }
+        append_perf_row("cuda_cn_stagger_tuner", current_rotation(), cn, source, "",
+                        field_after(line, "single=", " ms"),
+                        field_after(line, "production=", " | "),
+                        field_after(line, "stagger33=", " ms"),
+                        field_after(line, "stagger50=", " ms"), line);
+        return;
+    }
+
+    if (line.find("[CUDA CN stagger] GPU ") != std::string::npos) {
+        const auto gpu_pos = line.find("GPU ");
+        const auto gpu_end = line.find(" |", gpu_pos);
+        const std::string source = gpu_pos == std::string::npos ? "GPU" : line.substr(gpu_pos, gpu_end - gpu_pos);
+        std::string cn;
+        if (gpu_end != std::string::npos) {
+            const auto cn_start = gpu_end + 3U;
+            const auto cn_end = line.find(" |", cn_start);
+            if (cn_end != std::string::npos) cn = line.substr(cn_start, cn_end - cn_start);
+        }
+        append_perf_row("cuda_cn_stagger", current_rotation(), cn, source, "", "",
+                        field_after(line, "mode=", " | "), "", "", line);
+        return;
+    }
+
     if (line.find("[CUDA CN phase] GPU ") != std::string::npos) {
         const auto gpu_pos = line.find("GPU ");
         const auto gpu_end = line.find(" |", gpu_pos);
