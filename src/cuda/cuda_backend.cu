@@ -56,6 +56,15 @@ bool cn_stagger_selectors_ready(int device_id, bool)
     return device_id >= 0 && device_id < kCnPhaseProfileMaxDevices;
 }
 
+// Capture the CUDA runtime entry point before temporarily overriding the public
+// cudaGetDeviceProperties macro below. Newer CUDA headers define that name as a
+// versioned macro alias, so restoring it through another temporary macro leaves a
+// dangling token once the helper macro is undefined.
+cudaError_t yerbas_cuda_get_device_properties(cudaDeviceProp* props, int device_id)
+{
+    return cudaGetDeviceProperties(props, device_id);
+}
+
 // cudaDeviceProp is immutable for the lifetime of the process, but the stagger
 // wrapper previously queried it for every CryptoNight stage. Cache one copy per
 // device and preserve the CUDA error contract expected by check_cuda().
@@ -63,14 +72,14 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 {
     if (props == nullptr) return cudaErrorInvalidValue;
     if (device_id < 0 || device_id >= kCnPhaseProfileMaxDevices)
-        return cudaGetDeviceProperties(props, device_id);
+        return yerbas_cuda_get_device_properties(props, device_id);
 
     static std::array<std::once_flag, kCnPhaseProfileMaxDevices> once{};
     static std::array<cudaDeviceProp, kCnPhaseProfileMaxDevices> cached{};
     static std::array<cudaError_t, kCnPhaseProfileMaxDevices> result{};
 
     std::call_once(once[device_id], [device_id]() {
-        result[device_id] = cudaGetDeviceProperties(&cached[device_id], device_id);
+        result[device_id] = yerbas_cuda_get_device_properties(&cached[device_id], device_id);
     });
     if (result[device_id] != cudaSuccess) return result[device_id];
     *props = cached[device_id];
@@ -84,7 +93,6 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 #include "cuda/generated/cuda_backend_cn_stagger_event_pool.inc"
 #define cn_overlap_selectors_ready cn_stagger_selectors_ready
 #ifdef cudaGetDeviceProperties
-#define YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS cudaGetDeviceProperties
 #undef cudaGetDeviceProperties
 #endif
 #define cudaGetDeviceProperties cn_stagger_cached_device_properties
@@ -94,10 +102,7 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 #undef cudaEventDestroy
 #undef cudaEventCreateWithFlags
 #undef cudaGetDeviceProperties
-#ifdef YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS
-#define cudaGetDeviceProperties YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS
-#undef YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS
-#endif
+#define cudaGetDeviceProperties yerbas_cuda_get_device_properties
 #undef cn_overlap_selectors_ready
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
@@ -111,3 +116,4 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
 #undef launch_split_cryptonight
+#undef cudaGetDeviceProperties
