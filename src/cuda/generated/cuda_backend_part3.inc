@@ -15,6 +15,8 @@ struct BatchEngine::Impl {
     cryptonight::SplitContext* d_cn_contexts{nullptr};
     DeviceCandidate* d_candidates{nullptr};
     unsigned int* d_candidate_count{nullptr};
+    DeviceCandidate* h_candidates{nullptr};
+    unsigned int* h_candidate_count{nullptr};
     JobDescriptor host_job{};
     std::vector<std::uint8_t> host_states;
     std::array<CnGeometry, 6> cn_geometries{};
@@ -58,6 +60,8 @@ struct BatchEngine::Impl {
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_cn_contexts), batch_capacity * sizeof(cryptonight::SplitContext)), "cudaMalloc CryptoNight split contexts failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMalloc candidate buffer failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_candidate_count), sizeof(unsigned int)), "cudaMalloc candidate counter failed");
+        check_cuda(cudaMallocHost(reinterpret_cast<void**>(&h_candidates), kMaxCandidates * sizeof(DeviceCandidate)), "cudaMallocHost candidate buffer failed");
+        check_cuda(cudaMallocHost(reinterpret_cast<void**>(&h_candidate_count), sizeof(unsigned int)), "cudaMallocHost candidate counter failed");
 
         const auto policy = build_gpu_tune_policy(device_id, base_batch_size, batch_capacity, stream,
                                                   d_states, d_cn_scratchpads, d_cn_contexts);
@@ -85,6 +89,8 @@ struct BatchEngine::Impl {
     ~Impl()
     {
         cudaSetDevice(device_id);
+        if (h_candidate_count) cudaFreeHost(h_candidate_count);
+        if (h_candidates) cudaFreeHost(h_candidates);
         if (d_candidate_count) cudaFree(d_candidate_count);
         if (d_candidates) cudaFree(d_candidates);
         if (d_cn_contexts) cudaFree(d_cn_contexts);
@@ -204,9 +210,19 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     collect_candidates<<<utility_blocks, utility_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
                                                                                impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
     check_cuda(cudaGetLastError(), "collect_candidates launch failed");
-    unsigned int count = 0;
-    check_cuda(cudaMemcpyAsync(&count, impl_->d_candidate_count, sizeof(count), cudaMemcpyDeviceToHost, impl_->stream),
+
+    // Queue both tiny result readbacks before the one scan synchronization. The
+    // pinned host buffers make the D2H copies truly asynchronous, and copying the
+    // fixed 64-entry candidate buffer (~2.3 KiB) avoids a second synchronous
+    // cudaMemcpy on candidate-bearing scans. This is deliberately lightweight:
+    // it does not duplicate the memory-heavy CryptoNight scratchpad/state arena.
+    check_cuda(cudaMemcpyAsync(impl_->h_candidate_count, impl_->d_candidate_count, sizeof(unsigned int),
+                               cudaMemcpyDeviceToHost, impl_->stream),
                "cudaMemcpyAsync candidate count failed");
+    check_cuda(cudaMemcpyAsync(impl_->h_candidates, impl_->d_candidates,
+                               kMaxCandidates * sizeof(DeviceCandidate),
+                               cudaMemcpyDeviceToHost, impl_->stream),
+               "cudaMemcpyAsync candidate buffer failed");
     check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize scan failed");
 
     if (profile_this_scan) {
@@ -281,14 +297,13 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         }
     }
 
-    count = std::min<unsigned int>(count, static_cast<unsigned int>(kMaxCandidates));
+    const unsigned int count = std::min<unsigned int>(*impl_->h_candidate_count,
+                                                        static_cast<unsigned int>(kMaxCandidates));
     if (count == 0) return {};
-    std::vector<DeviceCandidate> raw(count);
-    check_cuda(cudaMemcpy(raw.data(), impl_->d_candidates, count * sizeof(DeviceCandidate), cudaMemcpyDeviceToHost),
-               "cudaMemcpy candidates failed");
     std::vector<Candidate> out;
     out.reserve(count);
-    for (const auto& item : raw) {
+    for (unsigned int i = 0; i < count; ++i) {
+        const auto& item = impl_->h_candidates[i];
         Candidate candidate;
         candidate.nonce = item.nonce;
         std::copy(std::begin(item.hash), std::end(item.hash), candidate.hash.begin());
