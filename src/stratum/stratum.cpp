@@ -12,7 +12,6 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -346,6 +345,13 @@ Client::Client(const AppConfig& config) : config_(config)
     if (!config_.pool.url.empty()) endpoint_ = parse_endpoint(config_.pool.url);
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled) initialize_gpu_engines();
+#endif
+}
+
+Client::~Client()
+{
+#ifdef YERBAS_HAS_CUDA
+    stop_gpu_workers();
 #endif
 }
 
@@ -730,6 +736,107 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
 }
 
 #ifdef YERBAS_HAS_CUDA
+void Client::start_gpu_worker(GpuWorker& worker)
+{
+    if (!worker.scan_state) worker.scan_state = std::make_unique<GpuScanState>();
+    auto* state = worker.scan_state.get();
+    auto* engine = worker.engine.get();
+    state->thread = std::thread([state, engine]() {
+        for (;;) {
+            std::uint32_t start_nonce = 0;
+            {
+                std::unique_lock<std::mutex> lock(state->mutex);
+                state->cv.wait(lock, [state]() { return state->stop || state->work_pending; });
+                if (state->stop && !state->work_pending) break;
+                start_nonce = state->start_nonce;
+                state->work_pending = false;
+                state->busy = true;
+            }
+
+            std::vector<cuda::Candidate> candidates;
+            std::exception_ptr error;
+            try {
+                candidates = engine->scan(start_nonce);
+            } catch (...) {
+                error = std::current_exception();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->candidates = std::move(candidates);
+                state->error = error;
+                state->busy = false;
+                state->result_ready = true;
+            }
+            state->cv.notify_all();
+        }
+    });
+}
+
+void Client::stop_gpu_workers() noexcept
+{
+    for (auto& worker : gpu_workers_) {
+        if (!worker.scan_state) continue;
+        {
+            std::lock_guard<std::mutex> lock(worker.scan_state->mutex);
+            worker.scan_state->stop = true;
+        }
+        worker.scan_state->cv.notify_all();
+    }
+    for (auto& worker : gpu_workers_) {
+        if (worker.scan_state && worker.scan_state->thread.joinable()) worker.scan_state->thread.join();
+    }
+}
+
+void Client::dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce)
+{
+    auto& state = *worker.scan_state;
+    std::unique_lock<std::mutex> lock(state.mutex);
+    state.cv.wait(lock, [&state]() { return !state.busy && !state.work_pending && !state.result_ready; });
+    state.start_nonce = start_nonce;
+    state.error = nullptr;
+    state.work_pending = true;
+    lock.unlock();
+    state.cv.notify_one();
+}
+
+bool Client::gpu_scan_ready(GpuWorker& worker)
+{
+    auto& state = *worker.scan_state;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.result_ready;
+}
+
+std::vector<cuda::Candidate> Client::take_gpu_scan_result(GpuWorker& worker)
+{
+    auto& state = *worker.scan_state;
+    std::unique_lock<std::mutex> lock(state.mutex);
+    state.cv.wait(lock, [&state]() { return state.result_ready; });
+    auto candidates = std::move(state.candidates);
+    const std::exception_ptr error = state.error;
+    state.error = nullptr;
+    state.result_ready = false;
+    lock.unlock();
+    state.cv.notify_all();
+    if (error) std::rethrow_exception(error);
+    return candidates;
+}
+
+void Client::drain_gpu_scans() noexcept
+{
+    for (auto& worker : gpu_workers_) {
+        if (!worker.scan_state) continue;
+        auto& state = *worker.scan_state;
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.cv.wait(lock, [&state]() { return state.result_ready || (!state.busy && !state.work_pending); });
+        state.candidates.clear();
+        state.error = nullptr;
+        state.result_ready = false;
+        lock.unlock();
+        state.cv.notify_all();
+    }
+}
+
 void Client::initialize_gpu_engines()
 {
     const auto available = cuda::enumerate_devices();
@@ -748,11 +855,24 @@ void Client::initialize_gpu_engines()
     }
     gpu_pipeline_ready_ = !gpu_workers_.empty();
     for (const auto& worker : gpu_workers_) gpu_pipeline_ready_ = gpu_pipeline_ready_ && worker.engine->hash_pipeline_ready();
+    if (gpu_pipeline_ready_) {
+        try {
+            for (auto& worker : gpu_workers_) start_gpu_worker(worker);
+            std::cout << "[GPU] persistent host scan workers initialized | count=" << gpu_workers_.size() << '\n';
+        } catch (...) {
+            stop_gpu_workers();
+            throw;
+        }
+    }
 }
 
 void Client::upload_gpu_job()
 {
     if (gpu_workers_.empty() || !gpu_pipeline_ready_) return;
+    // Keep BatchEngine mutation serialized with scans. A mining.notify can make
+    // the old result stale while CUDA is still executing, but upload_job must
+    // never race the active engine scan.
+    drain_gpu_scans();
     std::array<std::uint8_t, 80> header{}; std::string extranonce2;
     if (!build_header(header, extranonce2, 0)) throw std::runtime_error("Unable to build CUDA job header");
     cuda::JobDescriptor descriptor;
@@ -776,41 +896,42 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
     const std::uint64_t work_generation = MiningJob::generation();
     const std::string work_job_id = job_.job_id;
     const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
-    struct PendingGpu { GpuWorker* worker; std::uint32_t start; std::future<std::vector<cuda::Candidate>> future; };
+    struct PendingGpu { GpuWorker* worker; std::uint64_t count; };
     std::vector<PendingGpu> pending; pending.reserve(gpu_workers_.size());
     for (auto& worker : gpu_workers_) {
         const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
         if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) worker.next_nonce = worker.region_start;
-        const std::uint32_t start = worker.next_nonce; worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count); auto* engine = worker.engine.get();
-        pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        dispatch_gpu_scan(worker, start);
+        pending.push_back(PendingGpu{&worker, count});
     }
     bool all_ready = false;
     do {
-        if (!pump_socket_messages(socket_value, 0)) return false;
+        if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
         all_ready = true;
-        for (auto& task : pending) if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { all_ready = false; break; }
+        for (auto& task : pending) if (!gpu_scan_ready(*task.worker)) { all_ready = false; break; }
         if (!all_ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (!all_ready);
-    if (!pump_socket_messages(socket_value, 0)) return false;
+    if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
 
     bool stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id;
     std::size_t stale_candidates = 0;
     for (auto& task : pending) {
-        const auto candidates = task.future.get();
-        const auto count = task.worker->engine->batch_size();
-        task.worker->hashes_done += count;
-        hashes_done_ += count;
+        const auto candidates = take_gpu_scan_result(*task.worker);
+        task.worker->hashes_done += task.count;
+        hashes_done_ += task.count;
         if (stale) { stale_candidates += candidates.size(); continue; }
-        task.worker->rotation_hashes_done += count;
-        rotation_hashes_done_ += count;
+        task.worker->rotation_hashes_done += task.count;
+        rotation_hashes_done_ += task.count;
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (std::size_t index = 0; index < candidates.size(); ++index) {
-            if (!pump_socket_messages(socket_value, 0)) return false;
+            if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
             stale = MiningJob::generation() != work_generation || job_.job_id != work_job_id;
             if (stale) { stale_candidates += candidates.size() - index; break; }
             const auto& candidate = candidates[index];
             std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
+            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
         }
     }
     if (stale) std::cout << timestamp() << "[GPU] stale candidates suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << " | candidates=" << stale_candidates << '\n';
@@ -823,48 +944,49 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
     const std::uint64_t work_generation = MiningJob::generation();
     const std::string work_job_id = job_.job_id;
     const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
-    struct PendingGpu { GpuWorker* worker; std::uint32_t start; std::future<std::vector<cuda::Candidate>> future; };
+    struct PendingGpu { GpuWorker* worker; std::uint64_t count; };
     std::vector<PendingGpu> pending; pending.reserve(gpu_workers_.size());
     for (auto& worker : gpu_workers_) {
         const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
         if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) worker.next_nonce = worker.region_start;
-        const std::uint32_t start = worker.next_nonce; worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count); auto* engine = worker.engine.get();
-        pending.push_back(PendingGpu{&worker, start, std::async(std::launch::async, [engine, start]() { return engine->scan(start); })});
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        dispatch_gpu_scan(worker, start);
+        pending.push_back(PendingGpu{&worker, count});
     }
     bool all_ready = false;
     bool stale = false;
     do {
-        if (!pump_socket_messages(socket_value, 0)) return false;
+        if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
         stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
         if (!stale) {
-            if (!mine_cpu_batch(socket_value)) return false;
-            if (!pump_socket_messages(socket_value, 0)) return false;
+            if (!mine_cpu_batch(socket_value)) { drain_gpu_scans(); return false; }
+            if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
             stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
         }
         all_ready = true;
-        for (auto& task : pending) if (task.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { all_ready = false; break; }
+        for (auto& task : pending) if (!gpu_scan_ready(*task.worker)) { all_ready = false; break; }
         if (!all_ready && stale) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (!all_ready);
-    if (!pump_socket_messages(socket_value, 0)) return false;
+    if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
     stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
 
     std::size_t stale_candidates = 0;
     for (auto& task : pending) {
-        const auto candidates = task.future.get();
-        const auto count = task.worker->engine->batch_size();
-        task.worker->hashes_done += count;
-        hashes_done_ += count;
+        const auto candidates = take_gpu_scan_result(*task.worker);
+        task.worker->hashes_done += task.count;
+        hashes_done_ += task.count;
         if (stale) { stale_candidates += candidates.size(); continue; }
-        task.worker->rotation_hashes_done += count;
-        rotation_hashes_done_ += count;
+        task.worker->rotation_hashes_done += task.count;
+        rotation_hashes_done_ += task.count;
         const std::string source = "GPU " + std::to_string(task.worker->device_id);
         for (std::size_t index = 0; index < candidates.size(); ++index) {
-            if (!pump_socket_messages(socket_value, 0)) return false;
+            if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
             stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
             if (stale) { stale_candidates += candidates.size() - index; break; }
             const auto& candidate = candidates[index];
             std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
+            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
         }
     }
     if (stale) std::cout << timestamp() << "[hybrid] stale candidates suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << " | GPU candidates=" << stale_candidates << '\n';

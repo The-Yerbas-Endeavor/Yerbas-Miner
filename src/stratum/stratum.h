@@ -3,9 +3,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -111,6 +115,7 @@ Endpoint parse_endpoint(const std::string& url);
 class Client {
 public:
     explicit Client(const AppConfig& config);
+    ~Client();
 
     void print_connection_plan() const;
     bool ready() const noexcept;
@@ -182,9 +187,23 @@ private:
     std::uint64_t rotation_cpu_hashes_done_{0};
 
 #ifdef YERBAS_HAS_CUDA
+    struct GpuScanState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::thread thread;
+        bool stop{false};
+        bool work_pending{false};
+        bool busy{false};
+        bool result_ready{false};
+        std::uint32_t start_nonce{0};
+        std::vector<cuda::Candidate> candidates;
+        std::exception_ptr error;
+    };
+
     struct GpuWorker {
         int device_id{-1};
         std::unique_ptr<cuda::BatchEngine> engine;
+        std::unique_ptr<GpuScanState> scan_state;
         std::uint32_t region_start{0};
         std::uint32_t region_end{0};
         std::uint32_t next_nonce{0};
@@ -192,6 +211,14 @@ private:
         std::uint64_t hashes_at_last_report{0};
         std::uint64_t rotation_hashes_done{0};
     };
+
+    void start_gpu_worker(GpuWorker& worker);
+    void stop_gpu_workers() noexcept;
+    void dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce);
+    bool gpu_scan_ready(GpuWorker& worker);
+    std::vector<cuda::Candidate> take_gpu_scan_result(GpuWorker& worker);
+    void drain_gpu_scans() noexcept;
+
     std::vector<GpuWorker> gpu_workers_;
     JobLoadedFlag gpu_job_loaded_{};
     bool gpu_pipeline_ready_{false};
