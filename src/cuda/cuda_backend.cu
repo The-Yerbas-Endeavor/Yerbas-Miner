@@ -83,6 +83,10 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 // their existing CUDA event behavior unchanged.
 #include "cuda/generated/cuda_backend_cn_stagger_event_pool.inc"
 #define cn_overlap_selectors_ready cn_stagger_selectors_ready
+#ifdef cudaGetDeviceProperties
+#define YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS cudaGetDeviceProperties
+#undef cudaGetDeviceProperties
+#endif
 #define cudaGetDeviceProperties cn_stagger_cached_device_properties
 #define cudaEventCreateWithFlags cn_stagger_event_create_with_flags
 #define cudaEventDestroy cn_stagger_event_release
@@ -90,6 +94,10 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 #undef cudaEventDestroy
 #undef cudaEventCreateWithFlags
 #undef cudaGetDeviceProperties
+#ifdef YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS
+#define cudaGetDeviceProperties YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS
+#undef YERBAS_CUDA_GET_DEVICE_PROPERTIES_ALIAS
+#endif
 #undef cn_overlap_selectors_ready
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
