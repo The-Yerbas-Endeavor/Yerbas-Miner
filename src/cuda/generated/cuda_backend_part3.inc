@@ -149,7 +149,9 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
     check_cuda(cudaMemcpyAsync(impl_->d_job, &device_job, sizeof(device_job), cudaMemcpyHostToDevice, impl_->stream),
                "cudaMemcpyAsync job failed");
-    check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize job failed");
+    // upload_gpu_job() drains any active scan before mutating the engine. The
+    // descriptor copy and every subsequent scan launch use this same stream, so
+    // CUDA stream ordering guarantees the job copy completes before kernels read it.
     impl_->job_loaded = true;
 }
 
