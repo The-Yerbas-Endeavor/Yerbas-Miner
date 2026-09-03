@@ -25,6 +25,7 @@ struct BatchEngine::Impl {
     std::uint64_t stage_profile_samples{0};
     std::array<double, 256> rolling_stage_ms{};
     std::array<std::uint64_t, 256> rolling_stage_count{};
+    bool diagnostics_enabled{false};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -34,6 +35,9 @@ struct BatchEngine::Impl {
           fallback_threads(std::max(1u, requested_fallback_threads))
     {
         if (base_batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
+
+        const char* diagnostics_env = std::getenv("YERBAS_DIAGNOSTICS");
+        diagnostics_enabled = diagnostics_env && *diagnostics_env && std::string(diagnostics_env) != "0";
 
         // Keep a fixed scratchpad byte budget based on the conservative heavy-CN
         // baseline. Lightweight nonce/state/context slots are allocated up to the
@@ -165,7 +169,17 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
 {
     if (!impl_->job_loaded) throw std::runtime_error("CUDA batch scan requested before upload_job");
     if (!hash_pipeline_ready()) throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
-    check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
+
+    // Persistent GPU workers repeatedly call scan() from the same host thread.
+    // Bind that thread to its CUDA device once instead of paying a runtime
+    // cudaSetDevice call on every batch. This remains generic for any GPU count
+    // or model and still rebinds correctly if a thread is ever reused.
+    static thread_local int bound_device = -1;
+    if (bound_device != impl_->device_id) {
+        check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
+        bound_device = impl_->device_id;
+    }
+
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream), "cudaMemsetAsync candidate counter failed");
     constexpr int utility_threads = 256;
     const int utility_blocks = static_cast<int>((impl_->batch_size + utility_threads - 1) / utility_threads);
@@ -173,9 +187,7 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
     ++impl_->scan_count;
-    const char* diagnostics_env = std::getenv("YERBAS_DIAGNOSTICS");
-    const bool diagnostics_enabled = diagnostics_env && *diagnostics_env && std::string(diagnostics_env) != "0";
-    const bool profile_this_scan = diagnostics_enabled && (impl_->scan_count % 4U) == 0U;
+    const bool profile_this_scan = impl_->diagnostics_enabled && (impl_->scan_count % 4U) == 0U;
     std::array<cudaEvent_t, 19> stage_boundaries{};
     if (profile_this_scan) {
         for (auto& event : stage_boundaries)
