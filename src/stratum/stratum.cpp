@@ -279,7 +279,7 @@ std::array<std::uint8_t, 32> compact_target_le(const std::string& nbits_hex)
     const cpp_int max_target = (cpp_int(1) << 256) - 1;
     if (target > max_target) target = max_target;
     std::array<std::uint8_t, 32> target_le{};
-    for (std::size_t i = 0; i < target_le.size(); ++i) { target_le[i] = static_cast<std::uint8_t>(target & 0xff); target >>= 8; }
+    for (std::size_t i = 0; i < 32; ++i) { target_le[i] = static_cast<std::uint8_t>(target & 0xff); target >>= 8; }
     return target_le;
 }
 
@@ -633,10 +633,6 @@ void Client::update_rotation_epoch()
     rotation_hashes_done_ = 0;
     rotation_cpu_hashes_done_ = 0;
 
-    // Rotation-local counters remain useful diagnostics, but status reporting
-    // uses a fixed report window. A GhostRider rotation must not reset that
-    // window or its baselines, otherwise short rotations can create impossible
-    // transient hashrates.
 #ifdef YERBAS_HAS_CUDA
     for (auto& worker : gpu_workers_) worker.rotation_hashes_done = 0;
 #endif
@@ -869,9 +865,6 @@ void Client::initialize_gpu_engines()
 void Client::upload_gpu_job()
 {
     if (gpu_workers_.empty() || !gpu_pipeline_ready_) return;
-    // Keep BatchEngine mutation serialized with scans. A mining.notify can make
-    // the old result stale while CUDA is still executing, but upload_job must
-    // never race the active engine scan.
     drain_gpu_scans();
     std::array<std::uint8_t, 80> header{}; std::string extranonce2;
     if (!build_header(header, extranonce2, 0)) throw std::runtime_error("Unable to build CUDA job header");
@@ -944,52 +937,100 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
     const std::uint64_t work_generation = MiningJob::generation();
     const std::string work_job_id = job_.job_id;
     const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
-    struct PendingGpu { GpuWorker* worker; std::uint64_t count; };
-    std::vector<PendingGpu> pending; pending.reserve(gpu_workers_.size());
-    for (auto& worker : gpu_workers_) {
+
+    struct PendingGpu {
+        GpuWorker* worker;
+        std::uint64_t count;
+        bool completed{false};
+    };
+
+    auto scan_active = [](GpuWorker& worker) {
+        auto& state = *worker.scan_state;
+        std::lock_guard<std::mutex> lock(state.mutex);
+        return state.busy || state.work_pending || state.result_ready;
+    };
+
+    auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
         const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
-        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end) worker.next_nonce = worker.region_start;
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end)
+            worker.next_nonce = worker.region_start;
         const std::uint32_t start = worker.next_nonce;
         worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
         dispatch_gpu_scan(worker, start);
-        pending.push_back(PendingGpu{&worker, count});
+        return count;
+    };
+
+    std::vector<PendingGpu> pending;
+    pending.reserve(gpu_workers_.size());
+    for (auto& worker : gpu_workers_) {
+        std::uint64_t count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (!scan_active(worker)) count = launch_next_scan(worker);
+        pending.push_back(PendingGpu{&worker, count, false});
     }
-    bool all_ready = false;
+
+    std::size_t remaining = pending.size();
     bool stale = false;
-    do {
+    std::size_t stale_candidates = 0;
+
+    while (remaining != 0U) {
         if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
         stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+
         if (!stale) {
             if (!mine_cpu_batch(socket_value)) { drain_gpu_scans(); return false; }
             if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
             stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
         }
-        all_ready = true;
-        for (auto& task : pending) if (!gpu_scan_ready(*task.worker)) { all_ready = false; break; }
-        if (!all_ready && stale) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    } while (!all_ready);
-    if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
-    stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
 
-    std::size_t stale_candidates = 0;
-    for (auto& task : pending) {
-        const auto candidates = take_gpu_scan_result(*task.worker);
-        task.worker->hashes_done += task.count;
-        hashes_done_ += task.count;
-        if (stale) { stale_candidates += candidates.size(); continue; }
-        task.worker->rotation_hashes_done += task.count;
-        rotation_hashes_done_ += task.count;
-        const std::string source = "GPU " + std::to_string(task.worker->device_id);
-        for (std::size_t index = 0; index < candidates.size(); ++index) {
-            if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
-            stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
-            if (stale) { stale_candidates += candidates.size() - index; break; }
-            const auto& candidate = candidates[index];
-            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-            if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
+        bool consumed_result = false;
+        for (auto& task : pending) {
+            if (task.completed || !gpu_scan_ready(*task.worker)) continue;
+
+            auto candidates = take_gpu_scan_result(*task.worker);
+            task.worker->hashes_done += task.count;
+            hashes_done_ += task.count;
+            task.completed = true;
+            --remaining;
+            consumed_result = true;
+
+            if (stale) {
+                stale_candidates += candidates.size();
+                continue;
+            }
+
+            task.worker->rotation_hashes_done += task.count;
+            rotation_hashes_done_ += task.count;
+
+            // Refill this GPU immediately. The scan state is free as soon as its
+            // result is consumed, so the next nonce batch can run while the host
+            // validates/submits candidates and while slower GPUs finish. Only one
+            // CUDA scan remains in flight per device, so the CryptoNight arena is
+            // still single-buffered and VRAM usage does not increase.
+            if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
+                (void)launch_next_scan(*task.worker);
+            else
+                stale = true;
+
+            const std::string source = "GPU " + std::to_string(task.worker->device_id);
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+                stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+                if (stale) {
+                    stale_candidates += candidates.size() - index;
+                    break;
+                }
+                const auto& candidate = candidates[index];
+                std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+                if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
+            }
         }
+
+        if (remaining != 0U && stale && !consumed_result)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (stale) std::cout << timestamp() << "[hybrid] stale candidates suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << " | GPU candidates=" << stale_candidates << '\n';
+
+    if (stale)
+        std::cout << timestamp() << "[hybrid] stale candidates suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << " | GPU candidates=" << stale_candidates << '\n';
     return true;
 }
 #endif
