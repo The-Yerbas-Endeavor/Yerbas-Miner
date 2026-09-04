@@ -1,3 +1,54 @@
+namespace {
+
+constexpr int kGrBatchTuneCandidates = 5;
+constexpr int kGrBatchTuneSamples = 3;
+constexpr double kGrBatchPromotionRatio = 1.02;
+constexpr std::array<int, kGrBatchTuneCandidates> kGrBatchFractions16{{16, 14, 12, 10, 8}};
+
+struct GrBatchTuneEntry {
+    bool valid{false};
+    bool selected{false};
+    std::uint64_t fingerprint{0};
+    std::size_t baseline{0};
+    std::size_t selected_batch{0};
+    std::array<std::size_t, kGrBatchTuneCandidates> candidates{};
+    int candidate_count{0};
+    int candidate_index{0};
+    int sample_index{0};
+    std::array<std::array<double, kGrBatchTuneSamples>, kGrBatchTuneCandidates> hps{};
+};
+
+std::uint64_t gr_batch_fingerprint(const JobDescriptor& job)
+{
+    std::uint64_t fingerprint = 14695981039346656037ULL;
+    for (const std::uint8_t stage : job.stages) {
+        fingerprint ^= stage;
+        fingerprint *= 1099511628211ULL;
+    }
+    return fingerprint;
+}
+
+double gr_batch_median(std::array<double, kGrBatchTuneSamples> values)
+{
+    std::sort(values.begin(), values.end());
+    return values[kGrBatchTuneSamples / 2];
+}
+
+bool gr_batch_dependencies_ready(int device_id, const JobDescriptor& job)
+{
+    if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return false;
+    for (const std::uint8_t encoded : job.stages) {
+        if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
+        const std::uint8_t variant = static_cast<std::uint8_t>(encoded & 0x7fU);
+        if (variant >= 6U) return false;
+        if (!g_cn_production_selector[device_id][variant].selected) return false;
+        if (g_cn_block_tuned_threads[device_id][variant] <= 0) return false;
+    }
+    return true;
+}
+
+} // anonymous namespace
+
 struct BatchEngine::Impl {
     int device_id{-1};
     std::size_t batch_size{0};
@@ -5,9 +56,12 @@ struct BatchEngine::Impl {
     std::size_t batch_capacity{0};
     std::size_t scratchpad_budget_bytes{0};
     std::size_t batch_quantum{1};
+    std::size_t batch_warp{1};
     std::array<std::size_t, kGpuBatchClassCount> class_batches{};
     unsigned int fallback_threads{1};
     cudaStream_t stream{};
+    cudaEvent_t gr_scan_start{};
+    cudaEvent_t gr_scan_stop{};
     DeviceJob* d_job{nullptr};
     std::uint32_t* d_nonces{nullptr};
     std::uint8_t* d_states{nullptr};
@@ -21,6 +75,8 @@ struct BatchEngine::Impl {
     std::vector<std::uint8_t> host_states;
     std::array<CnGeometry, 6> cn_geometries{};
     std::array<int, kCoreAlgorithmCount> core_threads{};
+    std::array<GrBatchTuneEntry, 32> gr_batch_tune{};
+    GrBatchTuneEntry* active_gr_tune{nullptr};
     std::uint64_t scan_count{0};
     std::uint64_t stage_profile_samples{0};
     std::array<double, 256> rolling_stage_ms{};
@@ -39,10 +95,6 @@ struct BatchEngine::Impl {
         const char* diagnostics_env = std::getenv("YERBAS_DIAGNOSTICS");
         diagnostics_enabled = diagnostics_env && *diagnostics_env && std::string(diagnostics_env) != "0";
 
-        // Keep a fixed scratchpad byte budget based on the conservative heavy-CN
-        // baseline. Lightweight nonce/state/context slots are allocated up to the
-        // smallest CN footprint so per-class calibration can choose among all
-        // memory-safe 2MiB/1MiB/512KiB/256KiB batch sizes without reallocating.
         constexpr std::size_t min_cn_scratchpad = 262144U;
         scratchpad_budget_bytes = base_batch_size * kCnScratchpadStride;
         const std::size_t slot_limit = scratchpad_budget_bytes / min_cn_scratchpad;
@@ -53,10 +105,13 @@ struct BatchEngine::Impl {
         check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties adaptive batch failed");
         const std::size_t warp = static_cast<std::size_t>(std::max(1, props.warpSize));
         const std::size_t sms = static_cast<std::size_t>(std::max(1, props.multiProcessorCount));
+        batch_warp = warp;
         batch_quantum = std::max<std::size_t>(warp, warp * sms);
 
         host_states.resize(batch_capacity * kStateBytes);
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
+        check_cuda(cudaEventCreateWithFlags(&gr_scan_start, cudaEventDefault), "cudaEventCreate GR batch start failed");
+        check_cuda(cudaEventCreateWithFlags(&gr_scan_stop, cudaEventDefault), "cudaEventCreate GR batch stop failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_capacity * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_capacity * kStateBytes), "cudaMalloc 512-bit state batch failed");
@@ -102,6 +157,8 @@ struct BatchEngine::Impl {
         if (d_states) cudaFree(d_states);
         if (d_nonces) cudaFree(d_nonces);
         if (d_job) cudaFree(d_job);
+        if (gr_scan_stop) cudaEventDestroy(gr_scan_stop);
+        if (gr_scan_start) cudaEventDestroy(gr_scan_start);
         if (stream) cudaStreamDestroy(stream);
     }
 };
@@ -133,14 +190,47 @@ void BatchEngine::upload_job(const JobDescriptor& job)
             impl_->base_batch_size, impl_->batch_capacity, max_page_size, impl_->batch_quantum);
     }
 
-    // Final byte-budget guard. A corrupted/stale cache can never select more CN
-    // scratchpad bytes than were allocated for this engine.
     const std::size_t memory_safe_batch = std::max<std::size_t>(1U,
         std::min(impl_->batch_capacity, impl_->scratchpad_budget_bytes / max_page_size));
     adaptive_batch = std::min(adaptive_batch, memory_safe_batch);
     if (adaptive_batch >= impl_->batch_quantum)
         adaptive_batch = (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
     adaptive_batch = std::max<std::size_t>(1U, adaptive_batch);
+
+    const std::uint64_t fingerprint = gr_batch_fingerprint(job);
+    auto& tune = impl_->gr_batch_tune[fingerprint % impl_->gr_batch_tune.size()];
+    if (!tune.valid || tune.fingerprint != fingerprint || tune.baseline != adaptive_batch) {
+        tune = GrBatchTuneEntry{};
+        tune.valid = true;
+        tune.fingerprint = fingerprint;
+        tune.baseline = adaptive_batch;
+        for (const int numerator : kGrBatchFractions16) {
+            std::size_t candidate = std::max<std::size_t>(1U,
+                (adaptive_batch * static_cast<std::size_t>(numerator)) / 16U);
+            if (candidate >= impl_->batch_warp)
+                candidate = (candidate / impl_->batch_warp) * impl_->batch_warp;
+            candidate = std::max<std::size_t>(1U, candidate);
+            bool duplicate = false;
+            for (int i = 0; i < tune.candidate_count; ++i)
+                duplicate = duplicate || tune.candidates[i] == candidate;
+            if (!duplicate && tune.candidate_count < kGrBatchTuneCandidates)
+                tune.candidates[tune.candidate_count++] = candidate;
+        }
+        std::cout << "[CUDA GR batch tuner] GPU " << impl_->device_id
+                  << " | fingerprint=" << std::hex << fingerprint << std::dec
+                  << " | baseline=" << adaptive_batch << " | candidates=";
+        for (int i = 0; i < tune.candidate_count; ++i) {
+            if (i) std::cout << '/';
+            std::cout << tune.candidates[i];
+        }
+        std::cout << " | samples=" << kGrBatchTuneSamples
+                  << " | metric=whole-scan-H/s | waits-for=CN-selectors\n";
+    }
+    impl_->active_gr_tune = &tune;
+    if (tune.selected)
+        adaptive_batch = tune.selected_batch;
+    else if (gr_batch_dependencies_ready(impl_->device_id, job) && tune.candidate_count > 0)
+        adaptive_batch = tune.candidates[tune.candidate_index];
 
     if (adaptive_batch != impl_->batch_size) {
         std::cout << "[GPU " << impl_->device_id << "] rotation-adaptive batch"
@@ -159,9 +249,6 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
     check_cuda(cudaMemcpyAsync(impl_->d_job, &device_job, sizeof(device_job), cudaMemcpyHostToDevice, impl_->stream),
                "cudaMemcpyAsync job failed");
-    // upload_gpu_job() drains any active scan before mutating the engine. The
-    // descriptor copy and every subsequent scan launch use this same stream, so
-    // CUDA stream ordering guarantees the job copy completes before kernels read it.
     impl_->job_loaded = true;
 }
 
@@ -170,20 +257,30 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
     if (!impl_->job_loaded) throw std::runtime_error("CUDA batch scan requested before upload_job");
     if (!hash_pipeline_ready()) throw std::runtime_error("CUDA GhostRider scan requested before full native CUDA coverage is available");
 
-    // Persistent GPU workers repeatedly call scan() from the same host thread.
-    // Bind that thread to its CUDA device once instead of paying a runtime
-    // cudaSetDevice call on every batch. This remains generic for any GPU count
-    // or model and still rebinds correctly if a thread is ever reused.
     static thread_local int bound_device = -1;
     if (bound_device != impl_->device_id) {
         check_cuda(cudaSetDevice(impl_->device_id), "cudaSetDevice failed");
         bound_device = impl_->device_id;
     }
 
+    if (impl_->active_gr_tune && !impl_->active_gr_tune->selected &&
+        gr_batch_dependencies_ready(impl_->device_id, impl_->host_job) &&
+        impl_->active_gr_tune->candidate_count > 0) {
+        impl_->batch_size = impl_->active_gr_tune->candidates[impl_->active_gr_tune->candidate_index];
+    }
+
+    const std::size_t scan_batch = impl_->batch_size;
+    const bool tune_this_scan = impl_->active_gr_tune && !impl_->active_gr_tune->selected &&
+        gr_batch_dependencies_ready(impl_->device_id, impl_->host_job) &&
+        impl_->active_gr_tune->candidate_index < impl_->active_gr_tune->candidate_count &&
+        scan_batch == impl_->active_gr_tune->candidates[impl_->active_gr_tune->candidate_index];
+    if (tune_this_scan)
+        check_cuda(cudaEventRecord(impl_->gr_scan_start, impl_->stream), "cudaEventRecord GR batch start failed");
+
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream), "cudaMemsetAsync candidate counter failed");
     constexpr int utility_threads = 256;
-    const int utility_blocks = static_cast<int>((impl_->batch_size + utility_threads - 1) / utility_threads);
-    initialize_nonce_batch<<<utility_blocks, utility_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, impl_->batch_size);
+    const int utility_blocks = static_cast<int>((scan_batch + utility_threads - 1) / utility_threads);
+    initialize_nonce_batch<<<utility_blocks, utility_threads, 0, impl_->stream>>>(start_nonce, impl_->d_nonces, scan_batch);
     check_cuda(cudaGetLastError(), "initialize_nonce_batch launch failed");
 
     ++impl_->scan_count;
@@ -201,17 +298,16 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
         if (is_cn) {
             if (algorithm >= cryptonight::kVariantConfigs.size()) throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
-            launch_split_cryptonight(impl_->stream, impl_->d_states, impl_->batch_size, algorithm,
+            launch_split_cryptonight(impl_->stream, impl_->d_states, scan_batch, algorithm,
                                      impl_->d_cn_scratchpads, impl_->d_cn_contexts, impl_->cn_geometries[algorithm]);
         } else {
             if (!core::core512_implemented(algorithm)) throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
             int stage_threads = kCoreDefaultThreads;
-            if (algorithm < impl_->core_threads.size())
-                stage_threads = impl_->core_threads[algorithm];
-            const int stage_blocks = static_cast<int>((impl_->batch_size + static_cast<std::size_t>(stage_threads) - 1U) /
+            if (algorithm < impl_->core_threads.size()) stage_threads = impl_->core_threads[algorithm];
+            const int stage_blocks = static_cast<int>((scan_batch + static_cast<std::size_t>(stage_threads) - 1U) /
                                                       static_cast<std::size_t>(stage_threads));
             core512_stage<<<stage_blocks, stage_threads, 0, impl_->stream>>>(impl_->d_job, impl_->d_nonces,
-                                                                             impl_->d_states, impl_->batch_size,
+                                                                             impl_->d_states, scan_batch,
                                                                              stage_index, algorithm);
             check_cuda(cudaGetLastError(), "GhostRider CUDA core stage launch failed");
         }
@@ -219,15 +315,10 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
             check_cuda(cudaEventRecord(stage_boundaries[static_cast<std::size_t>(stage_index) + 1U], impl_->stream),
                        "cudaEventRecord rolling stage profile boundary failed");
     }
-    collect_candidates<<<utility_blocks, utility_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, impl_->batch_size,
+    collect_candidates<<<utility_blocks, utility_threads, 0, impl_->stream>>>(impl_->d_nonces, impl_->d_states, scan_batch,
                                                                                impl_->d_job, impl_->d_candidates, impl_->d_candidate_count);
     check_cuda(cudaGetLastError(), "collect_candidates launch failed");
 
-    // Queue both tiny result readbacks before the one scan synchronization. The
-    // pinned host buffers make the D2H copies truly asynchronous, and copying the
-    // fixed 64-entry candidate buffer (~2.3 KiB) avoids a second synchronous
-    // cudaMemcpy on candidate-bearing scans. This is deliberately lightweight:
-    // it does not duplicate the memory-heavy CryptoNight scratchpad/state arena.
     check_cuda(cudaMemcpyAsync(impl_->h_candidate_count, impl_->d_candidate_count, sizeof(unsigned int),
                                cudaMemcpyDeviceToHost, impl_->stream),
                "cudaMemcpyAsync candidate count failed");
@@ -235,6 +326,8 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                kMaxCandidates * sizeof(DeviceCandidate),
                                cudaMemcpyDeviceToHost, impl_->stream),
                "cudaMemcpyAsync candidate buffer failed");
+    if (tune_this_scan)
+        check_cuda(cudaEventRecord(impl_->gr_scan_stop, impl_->stream), "cudaEventRecord GR batch stop failed");
     check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize scan failed");
 
     if (profile_this_scan) {
@@ -251,15 +344,9 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         }
         for (auto& event : stage_boundaries) cudaEventDestroy(event);
 
-        std::uint64_t fingerprint = 14695981039346656037ULL;
-        for (const std::uint8_t stage : impl_->host_job.stages) {
-            fingerprint ^= stage;
-            fingerprint *= 1099511628211ULL;
-        }
-
+        const std::uint64_t fingerprint = gr_batch_fingerprint(impl_->host_job);
         const double gr_hps = sample_total_ms > 0.0F
-            ? (static_cast<double>(impl_->batch_size) * 1000.0 / static_cast<double>(sample_total_ms))
-            : 0.0;
+            ? (static_cast<double>(scan_batch) * 1000.0 / static_cast<double>(sample_total_ms)) : 0.0;
         std::ostringstream cn_names;
         bool first_cn = true;
         for (const std::uint8_t encoded : impl_->host_job.stages) {
@@ -275,7 +362,7 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                   << " | fingerprint=" << std::hex << std::setw(16) << std::setfill('0') << fingerprint
                   << std::dec << std::setfill(' ')
                   << " | CN=" << cn_names.str()
-                  << " | batch=" << impl_->batch_size
+                  << " | batch=" << scan_batch
                   << " | stages=" << sample_total_ms << " ms"
                   << " | throughput=" << gr_hps << " H/s"
                   << std::defaultfloat << '\n';
@@ -295,17 +382,62 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                     impl_->rolling_stage_ms[encoded] / static_cast<double>(impl_->rolling_stage_count[encoded]);
                 const float pct = sample_total_ms > 0.0F ? (100.0F * sample_ms[i] / sample_total_ms) : 0.0F;
                 std::cout << "[CUDA stage] " << std::setw(2) << i << " ";
-                if (is_cn && algorithm < cryptonight::kVariantConfigs.size()) {
+                if (is_cn && algorithm < cryptonight::kVariantConfigs.size())
                     std::cout << cryptonight::kVariantConfigs[algorithm].name;
-                } else {
-                    std::cout << (algorithm < kCoreAlgorithmNames.size() ?
-                                  kCoreAlgorithmNames[algorithm] : "UNKNOWN");
-                }
+                else
+                    std::cout << (algorithm < kCoreAlgorithmNames.size() ? kCoreAlgorithmNames[algorithm] : "UNKNOWN");
                 std::cout << " | sample=" << sample_ms[i] << " ms"
                           << " | sample=" << std::setprecision(1) << pct << "%"
                           << std::setprecision(3) << " | rolling-avg=" << avg_ms << " ms\n";
             }
             std::cout << std::defaultfloat;
+        }
+    }
+
+    if (tune_this_scan && impl_->active_gr_tune) {
+        float elapsed_ms = 0.0F;
+        check_cuda(cudaEventElapsedTime(&elapsed_ms, impl_->gr_scan_start, impl_->gr_scan_stop),
+                   "cudaEventElapsedTime GR batch failed");
+        auto& tune = *impl_->active_gr_tune;
+        if (elapsed_ms > 0.0F && tune.candidate_index < tune.candidate_count &&
+            scan_batch == tune.candidates[tune.candidate_index]) {
+            const double hps = static_cast<double>(scan_batch) * 1000.0 / static_cast<double>(elapsed_ms);
+            tune.hps[tune.candidate_index][tune.sample_index++] = hps;
+            if (tune.sample_index >= kGrBatchTuneSamples) {
+                tune.sample_index = 0;
+                ++tune.candidate_index;
+                if (tune.candidate_index >= tune.candidate_count) {
+                    const double baseline_hps = gr_batch_median(tune.hps[0]);
+                    double best_hps = baseline_hps;
+                    int best_index = 0;
+                    for (int i = 1; i < tune.candidate_count; ++i) {
+                        const double candidate_hps = gr_batch_median(tune.hps[i]);
+                        if (candidate_hps > best_hps) {
+                            best_hps = candidate_hps;
+                            best_index = i;
+                        }
+                    }
+                    if (best_index != 0 && best_hps < baseline_hps * kGrBatchPromotionRatio)
+                        best_index = 0;
+                    tune.selected = true;
+                    tune.selected_batch = tune.candidates[best_index];
+                    impl_->batch_size = tune.selected_batch;
+                    std::cout << std::fixed << std::setprecision(2)
+                              << "[CUDA GR batch tuner] GPU " << impl_->device_id
+                              << " | fingerprint=" << std::hex << tune.fingerprint << std::dec
+                              << " | results=";
+                    for (int i = 0; i < tune.candidate_count; ++i) {
+                        if (i) std::cout << '/';
+                        std::cout << tune.candidates[i] << ':' << gr_batch_median(tune.hps[i]);
+                    }
+                    const double selected_hps = gr_batch_median(tune.hps[best_index]);
+                    std::cout << " H/s | selected=" << tune.selected_batch
+                              << " | gain=" << ((selected_hps / baseline_hps) - 1.0) * 100.0
+                              << "%" << std::defaultfloat << '\n';
+                } else {
+                    impl_->batch_size = tune.candidates[tune.candidate_index];
+                }
+            }
         }
     }
 
