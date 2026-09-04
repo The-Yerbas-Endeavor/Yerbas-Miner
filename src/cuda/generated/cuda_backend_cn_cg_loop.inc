@@ -1,34 +1,21 @@
-// Cache-global CryptoNight phase-2 candidate.
+// Cooperative-multiply CryptoNight phase-2 candidate.
 //
-// This is deliberately architecture-generic: every supported CUDA target builds
-// both the ordinary global-memory T-table kernel and this cache-global variant.
-// The production selector decides per GPU/variant from exact parity plus measured
-// timing; there are no GPU model or compute-capability promotion rules.
+// Keep the historical mode-444 kernel symbol so the existing hardened selector
+// can parity-test and benchmark this candidate without changing production
+// routing or cache formats.  The old .cg scratchpad experiment is replaced here
+// with ordinary coalesced global accesses plus a four-lane 32x32 partial-product
+// implementation of the dependency-heavy 64x64->128 multiply.
 //
-// PTX .cg accesses cache global scratchpad traffic at L2 rather than allocating
-// the random CryptoNight working set in L1. Context/state traffic remains normal.
+// Each lane computes one 32x32->64 partial product concurrently:
+//   lane 0: c.lo * t.lo
+//   lane 1: c.lo * t.hi
+//   lane 2: c.hi * t.lo
+//   lane 3: c.hi * t.hi
+// Lane 0 reconstructs the exact 128-bit product from shuffled 32-bit limbs.
+// The existing selector requires exact full-scratchpad parity and a measured
+// production-batch win before this kernel can be promoted.
 
 namespace {
-
-__device__ __forceinline__ std::uint32_t cn_global_cg_load32(const std::uint32_t* ptr)
-{
-    std::uint32_t value;
-#if defined(__CUDA_ARCH__)
-    asm volatile("ld.global.cg.u32 %0, [%1];" : "=r"(value) : "l"(ptr));
-#else
-    value = *ptr;
-#endif
-    return value;
-}
-
-__device__ __forceinline__ void cn_global_cg_store32(std::uint32_t* ptr, std::uint32_t value)
-{
-#if defined(__CUDA_ARCH__)
-    asm volatile("st.global.cg.u32 [%0], %1;" :: "l"(ptr), "r"(value) : "memory");
-#else
-    *ptr = value;
-#endif
-}
 
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable4_cg(std::size_t count,
@@ -72,10 +59,7 @@ __global__ void cryptonight_loop_stage_ttable4_cg(std::size_t count,
         std::uint8_t* slot = scratch + static_cast<std::size_t>(index) * 16U;
         auto* slot_words = reinterpret_cast<std::uint32_t*>(slot);
 
-        // Four lanes issue one contiguous 32-bit load each. The cache-global
-        // modifier prevents the random scratchpad stream from displacing useful
-        // L1 data while retaining the proven coalesced + shuffle AES layout.
-        const std::uint32_t own = cn_global_cg_load32(slot_words + lane);
+        const std::uint32_t own = slot_words[lane];
         const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
         const std::uint32_t w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
         const std::uint32_t w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
@@ -85,7 +69,7 @@ __global__ void cryptonight_loop_stage_ttable4_cg(std::size_t count,
         const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
         const std::uint32_t cw = table0[x0] ^ table1[x1] ^ table2[x2] ^ table3[x3] ^ aw;
 
-        cn_global_cg_store32(slot_words + lane, cw ^ bw);
+        slot_words[lane] = cw ^ bw;
         __syncwarp(mask);
         if (lane == 0U) cryptonight::variant1_mutate(slot);
         __syncwarp(mask);
@@ -98,18 +82,44 @@ __global__ void cryptonight_loop_stage_ttable4_cg(std::size_t count,
         std::uint8_t* slot2 = scratch + static_cast<std::size_t>(j) * 16U;
         auto* slot2_words = reinterpret_cast<std::uint32_t*>(slot2);
 
-        const std::uint32_t t_word = cn_global_cg_load32(slot2_words + lane);
+        const std::uint32_t t_word = slot2_words[lane];
         const std::uint32_t t0_lo = __shfl_sync(mask, t_word, base);
         const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
-        const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
-                                  (static_cast<std::uint64_t>(t0_hi) << 32U);
         const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
         const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
 
+        // Four 32x32 products replace the serialized lane-0 64x64 multiply.
+        const std::uint32_t mul_a = lane < 2U ? c0 : c1;
+        const std::uint32_t mul_b = (lane & 1U) == 0U ? t0_lo : t0_hi;
+        const std::uint64_t partial = static_cast<std::uint64_t>(mul_a) *
+                                      static_cast<std::uint64_t>(mul_b);
+        const std::uint32_t partial_lo = static_cast<std::uint32_t>(partial);
+        const std::uint32_t partial_hi = static_cast<std::uint32_t>(partial >> 32U);
+
+        const std::uint32_t p00_lo = __shfl_sync(mask, partial_lo, base);
+        const std::uint32_t p00_hi = __shfl_sync(mask, partial_hi, base);
+        const std::uint32_t p01_lo = __shfl_sync(mask, partial_lo, base + 1U);
+        const std::uint32_t p01_hi = __shfl_sync(mask, partial_hi, base + 1U);
+        const std::uint32_t p10_lo = __shfl_sync(mask, partial_lo, base + 2U);
+        const std::uint32_t p10_hi = __shfl_sync(mask, partial_hi, base + 2U);
+        const std::uint32_t p11_lo = __shfl_sync(mask, partial_lo, base + 3U);
+        const std::uint32_t p11_hi = __shfl_sync(mask, partial_hi, base + 3U);
+
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
-            const std::uint64_t lo = c_low * t0v;
-            const std::uint64_t hi = __umul64hi(c_low, t0v);
+            // Exact unsigned 64x64->128 reconstruction from four 32-bit limbs.
+            const std::uint64_t middle = static_cast<std::uint64_t>(p00_hi) +
+                                         static_cast<std::uint64_t>(p01_lo) +
+                                         static_cast<std::uint64_t>(p10_lo);
+            const std::uint64_t lo = static_cast<std::uint64_t>(p00_lo) |
+                                     (static_cast<std::uint64_t>(static_cast<std::uint32_t>(middle)) << 32U);
+            const std::uint64_t p11 = static_cast<std::uint64_t>(p11_lo) |
+                                      (static_cast<std::uint64_t>(p11_hi) << 32U);
+            const std::uint64_t hi = p11 +
+                                     static_cast<std::uint64_t>(p01_hi) +
+                                     static_cast<std::uint64_t>(p10_hi) +
+                                     (middle >> 32U);
+
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
                                         (static_cast<std::uint64_t>(aw1) << 32U);
             const std::uint64_t olda1 = static_cast<std::uint64_t>(old_a2) |
@@ -129,7 +139,7 @@ __global__ void cryptonight_loop_stage_ttable4_cg(std::size_t count,
         const std::uint32_t store_word = lane == 0U ? na0_lo :
                                          lane == 1U ? na0_hi :
                                          lane == 2U ? (na1_lo ^ tweak_lo) : (na1_hi ^ tweak_hi);
-        cn_global_cg_store32(slot2_words + lane, store_word);
+        slot2_words[lane] = store_word;
 
         const std::uint32_t na_word = lane == 0U ? na0_lo :
                                       lane == 1U ? na0_hi :
