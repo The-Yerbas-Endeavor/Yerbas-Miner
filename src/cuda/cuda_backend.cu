@@ -29,6 +29,7 @@
 #include "cuda/generated/cuda_backend_cn_residency.inc"
 #include "cuda/generated/cuda_backend_cn_selector_hardened.inc"
 #include "cuda/generated/cuda_backend_cn_blocksize_tuner.inc"
+#include "cuda/generated/cuda_backend_core_fusion.inc"
 
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
@@ -112,8 +113,13 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 #undef build_gpu_tune_policy
 #include "cuda/generated/cuda_backend_gpu_calibration_safe.inc"
 
+// Production scan uses the self-fusing conventional core runner. The profiled
+// diagnostic scan in part4 deliberately retains the historical one-stage kernel,
+// giving us an internal fallback/reference path without changing diagnostics.
+#define core512_stage core512_stage_fused
 #define launch_split_cryptonight launch_split_cryptonight_phase_profiled
 #include "cuda/generated/cuda_backend_part3.inc"
+#undef core512_stage
 #include "cuda/generated/cuda_backend_part4.inc"
 #undef launch_split_cryptonight
 #undef cudaGetDeviceProperties
