@@ -23,23 +23,23 @@ namespace yerbas::cuda::core {
 
 // Keep the runtime selector tiny. Each conventional hash now has a separate
 // noinline device entry point so nvcc does not have to inline all 15 algorithms
-// into one giant GhostRider stage body. This lets each algorithm carry its own
-// register/local-memory footprint while preserving the exact existing hash code.
-__device__ __noinline__ void core512_blake(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { blake512(input, length, out); }
-__device__ __noinline__ void core512_bmw(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { bmw512(input, length, out); }
-__device__ __noinline__ void core512_groestl(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { groestl512(input, length, out); }
-__device__ __noinline__ void core512_jh(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { jh512(input, length, out); }
-__device__ __noinline__ void core512_keccak(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { keccak512(input, length, out); }
-__device__ __noinline__ void core512_skein(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { skein512(input, length, out); }
-__device__ __noinline__ void core512_luffa(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { luffa512(input, length, out); }
-__device__ __noinline__ void core512_cubehash(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { cubehash512(input, length, out); }
-__device__ __noinline__ void core512_shavite(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { shavite512(input, length, out); }
-__device__ __noinline__ void core512_simd(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { simd512(input, length, out); }
-__device__ __noinline__ void core512_echo(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { echo512(input, length, out); }
-__device__ __noinline__ void core512_hamsi(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { hamsi512(input, length, out); }
-__device__ __noinline__ void core512_fugue(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { fugue512(input, length, out); }
-__device__ __noinline__ void core512_shabal(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { shabal512(input, length, out); }
-__device__ __noinline__ void core512_whirlpool(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { whirlpool512(input, length, out); }
+// into one giant GhostRider stage body. Internal linkage keeps this header safe
+// when it is included by multiple CUDA translation units.
+static __device__ __noinline__ void core512_blake(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { blake512(input, length, out); }
+static __device__ __noinline__ void core512_bmw(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { bmw512(input, length, out); }
+static __device__ __noinline__ void core512_groestl(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { groestl512(input, length, out); }
+static __device__ __noinline__ void core512_jh(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { jh512(input, length, out); }
+static __device__ __noinline__ void core512_keccak(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { keccak512(input, length, out); }
+static __device__ __noinline__ void core512_skein(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { skein512(input, length, out); }
+static __device__ __noinline__ void core512_luffa(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { luffa512(input, length, out); }
+static __device__ __noinline__ void core512_cubehash(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { cubehash512(input, length, out); }
+static __device__ __noinline__ void core512_shavite(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { shavite512(input, length, out); }
+static __device__ __noinline__ void core512_simd(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { simd512(input, length, out); }
+static __device__ __noinline__ void core512_echo(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { echo512(input, length, out); }
+static __device__ __noinline__ void core512_hamsi(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { hamsi512(input, length, out); }
+static __device__ __noinline__ void core512_fugue(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { fugue512(input, length, out); }
+static __device__ __noinline__ void core512_shabal(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { shabal512(input, length, out); }
+static __device__ __noinline__ void core512_whirlpool(const std::uint8_t* input, std::size_t length, std::uint8_t out[64]) { whirlpool512(input, length, out); }
 
 // GhostRider core indexes match Yerbas Core HashSelection/coreHash ordering.
 // Every true case here is GPU-only; CPU hash fallback is intentionally absent.
