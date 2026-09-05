@@ -9,7 +9,7 @@ namespace {
 
 constexpr int kCnBlockTuneRevision = 1;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 1;
+constexpr int kCnProductionSelectorRevision = 2;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
@@ -229,14 +229,20 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 444, 32, scratchpads, contexts);
     state.initialized = true;
 
+    // The older hardened selector may already have populated a production mode.
+    // Clear it while this real-batch selector is collecting samples so overlap/
+    // stagger scheduling cannot take over and starve the 3/3/3 trial sequence.
+    g_cn_hardened_mode[device_id][VariantIndex] = 0;
+
     std::cout << "[CUDA CN production selector] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
               << " | passes=" << kCnProductionSelectorPasses
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
-              << " | cg-parity=" << (state.cg_ok ? "PASS" : "FAIL")
-              << " | sampling=real-production-batch\n";
+              << " | mul32-parity=" << (state.cg_ok ? "PASS" : "FAIL")
+              << " | sampling=real-production-batch"
+              << " | stagger=held-until-selected\n";
 }
 
 inline int cn_production_trial_mode(const CnProductionSelectorState& state)
@@ -262,12 +268,31 @@ void record_cn_production_sample(int device_id,
                                  float elapsed_ms)
 {
     auto& state = g_cn_production_selector[device_id][VariantIndex];
-    if (mode == 44 && state.baseline_samples < kCnProductionSelectorPasses)
+    const char* candidate = "baseline";
+    int sample = 0;
+    if (mode == 44 && state.baseline_samples < kCnProductionSelectorPasses) {
         state.baseline_ms[state.baseline_samples++] = elapsed_ms;
-    else if (mode == 222 && state.tile_samples < kCnProductionSelectorPasses)
+        candidate = "baseline";
+        sample = state.baseline_samples;
+    } else if (mode == 222 && state.tile_samples < kCnProductionSelectorPasses) {
         state.tile_ms[state.tile_samples++] = elapsed_ms;
-    else if (mode == 444 && state.cg_samples < kCnProductionSelectorPasses)
+        candidate = "tile64";
+        sample = state.tile_samples;
+    } else if (mode == 444 && state.cg_samples < kCnProductionSelectorPasses) {
         state.cg_ms[state.cg_samples++] = elapsed_ms;
+        candidate = "mul32";
+        sample = state.cg_samples;
+    }
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "[CUDA CN production sample] GPU " << device_id
+              << " | " << cryptonight::config_value(VariantIndex).name
+              << " | candidate=" << candidate
+              << " | sample=" << sample << '/' << kCnProductionSelectorPasses
+              << " | elapsed=" << elapsed_ms << " ms"
+              << " | progress=" << state.baseline_samples << '/'
+              << state.tile_samples << '/' << state.cg_samples
+              << std::defaultfloat << '\n';
 
     const bool done = state.baseline_samples >= kCnProductionSelectorPasses &&
         (!state.tile_ok || state.tile_samples >= kCnProductionSelectorPasses) &&
@@ -277,6 +302,10 @@ void record_cn_production_sample(int device_id,
     const float baseline = cn_hardened_median(state.baseline_ms);
     const float tile = state.tile_ok ? cn_hardened_median(state.tile_ms) : -1.0F;
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
+    const float tile_delta = state.tile_ok && baseline > 0.0F
+        ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
+    const float mul32_delta = state.cg_ok && baseline > 0.0F
+        ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
     float best_ms = baseline;
@@ -301,9 +330,11 @@ void record_cn_production_sample(int device_id,
               << "[CUDA CN production selector] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << state.count
-              << " | baseline=" << baseline << " ms@" << state.threads_t4
-              << " | tile64=" << tile << " ms@" << state.threads_tile
-              << " | cg=" << cg << " ms@" << state.threads_cg
+              << " | baseline-median=" << baseline << " ms@" << state.threads_t4
+              << " | tile64-median=" << tile << " ms@" << state.threads_tile
+              << " | tile64-vs-baseline=" << tile_delta << "%"
+              << " | mul32-median=" << cg << " ms@" << state.threads_cg
+              << " | mul32-vs-baseline=" << mul32_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
