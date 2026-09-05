@@ -42,18 +42,17 @@
 #undef launch_split_cryptonight_variant_phase_profiled
 #undef launch_cn_scheduled_if_ready
 
-// The staggered scheduler's setup/loop/final launchers are selector-aware and
-// lazily initialize their own parity-tested production choices. Requiring those
-// selectors to be initialized before entering the staggered path creates a
-// circular gate: the code that initializes them can never run. Keep the legacy
-// scheduler's conservative readiness check unchanged, but let staggered dispatch
-// enter whenever the device index is valid; its normal launchers still own all
-// parity and tuning decisions before any candidate is promoted.
+// Staggered execution must not bypass the real-production CN selector. The
+// selector temporarily clears the hardened production mode while collecting its
+// 3/3/3 real-batch samples; require that selector to finish before allowing the
+// stagger scheduler to own dispatch for this variant. This preserves lazy
+// initialization while preventing stagger from starving an in-progress trial.
 template <std::uint8_t VariantIndex>
 bool cn_stagger_selectors_ready(int device_id, bool)
 {
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
-    return device_id >= 0 && device_id < kCnPhaseProfileMaxDevices;
+    return device_id >= 0 && device_id < kCnPhaseProfileMaxDevices &&
+           g_cn_production_selector[device_id][VariantIndex].selected;
 }
 
 // Capture the CUDA runtime entry point before temporarily overriding the public
