@@ -39,6 +39,7 @@
 
 namespace {
 
+constexpr int kCnProductionGeometryRevision = 1;
 constexpr int kCnProductionGeometryPasses = 3;
 constexpr int kCnProductionGeometryMaxCandidates = 6;
 
@@ -58,27 +59,6 @@ struct CnProductionGeometryState {
 
 static std::array<std::array<CnProductionGeometryState, 6>, kCn2LaneMaxDevices>
     g_cn_production_geometry{};
-
-inline bool cn_geometry_threads_valid(int mode,
-                                      int threads,
-                                      const cudaDeviceProp& props)
-{
-    const int warp = std::max(32, props.warpSize);
-    if (threads < warp || threads > props.maxThreadsPerBlock ||
-        (threads % warp) != 0)
-        return false;
-    if (mode == 222) {
-        int active = 0;
-        const cudaError_t rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &active, cryptonight_loop_stage_ttable2_tile64<0>, threads,
-            cn_tile64_dynamic_shared_bytes(threads));
-        if (rc != cudaSuccess || active <= 0) {
-            cudaGetLastError();
-            return false;
-        }
-    }
-    return true;
-}
 
 template <std::uint8_t VariantIndex>
 bool cn_geometry_threads_valid_variant(int mode,
@@ -103,6 +83,98 @@ bool cn_geometry_threads_valid_variant(int mode,
 }
 
 template <std::uint8_t VariantIndex>
+std::filesystem::path cn_production_geometry_cache_path(int device_id,
+                                                        const cudaDeviceProp& props,
+                                                        std::size_t count,
+                                                        int mode)
+{
+    int driver_version = 0;
+    int runtime_version = 0;
+    if (cudaDriverGetVersion(&driver_version) != cudaSuccess ||
+        cudaRuntimeGetVersion(&runtime_version) != cudaSuccess) {
+        cudaGetLastError();
+        return {};
+    }
+    const std::string key = cn_cache_key(
+        device_id, props, count, driver_version, runtime_version);
+    return cn_cache_directory() /
+        ("cn-geometry-rev" + std::to_string(kCnProductionGeometryRevision) +
+         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) +
+         "-m" + std::to_string(mode) + '-' + key + ".txt");
+}
+
+template <std::uint8_t VariantIndex>
+bool load_cn_production_geometry_cache(int device_id,
+                                       const cudaDeviceProp& props,
+                                       std::size_t count,
+                                       int mode,
+                                       int baseline_threads)
+{
+    const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
+    if (retune && *retune && std::string(retune) != "0") return false;
+    const auto path = cn_production_geometry_cache_path<VariantIndex>(
+        device_id, props, count, mode);
+    if (path.empty()) return false;
+
+    std::ifstream in(path);
+    std::string magic;
+    int revision = 0, variant = -1, cached_mode = 0, threads = 0;
+    if (!(in >> magic >> revision >> variant >> cached_mode >> threads) ||
+        magic != "YERBAS_CN_GEOMETRY" ||
+        revision != kCnProductionGeometryRevision ||
+        variant != static_cast<int>(VariantIndex) || cached_mode != mode ||
+        !cn_geometry_threads_valid_variant<VariantIndex>(mode, threads, props))
+        return false;
+
+    auto& state = g_cn_production_geometry[device_id][VariantIndex];
+    state = CnProductionGeometryState{};
+    state.initialized = true;
+    state.selected = true;
+    state.count = count;
+    state.mode = mode;
+    state.baseline_threads = baseline_threads;
+    state.candidate_count = 1;
+    state.threads[0] = threads;
+    g_cn_hardened_threads[device_id][VariantIndex] = threads;
+
+    std::cout << "[GPU " << device_id << "] CryptoNight production geometry cache loaded | "
+              << cryptonight::config_value(VariantIndex).name
+              << " | batch=" << count
+              << " | mode=" << cn_residency_mode_name(mode)
+              << " | threads=" << threads << '\n';
+    return true;
+}
+
+template <std::uint8_t VariantIndex>
+void save_cn_production_geometry_cache(int device_id,
+                                       const cudaDeviceProp& props,
+                                       std::size_t count,
+                                       int mode,
+                                       int threads)
+{
+    try {
+        const auto path = cn_production_geometry_cache_path<VariantIndex>(
+            device_id, props, count, mode);
+        if (path.empty()) return;
+        std::filesystem::create_directories(path.parent_path());
+        const auto temp = path.string() + ".tmp";
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out) return;
+        out << "YERBAS_CN_GEOMETRY " << kCnProductionGeometryRevision << ' '
+            << static_cast<int>(VariantIndex) << ' ' << mode << ' ' << threads << '\n';
+        out.close();
+        if (!out) return;
+        std::error_code ec;
+        std::filesystem::rename(temp, path, ec);
+        if (ec) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+            std::filesystem::rename(temp, path, ec);
+        }
+    } catch (...) {}
+}
+
+template <std::uint8_t VariantIndex>
 void initialize_cn_production_geometry(int device_id,
                                        const cudaDeviceProp& props,
                                        std::size_t count,
@@ -111,6 +183,10 @@ void initialize_cn_production_geometry(int device_id,
 {
     auto& state = g_cn_production_geometry[device_id][VariantIndex];
     if (state.initialized) return;
+    if (load_cn_production_geometry_cache<VariantIndex>(
+            device_id, props, count, mode, baseline_threads))
+        return;
+
     state = CnProductionGeometryState{};
     state.initialized = true;
     state.count = count;
@@ -125,8 +201,6 @@ void initialize_cn_production_geometry(int device_id,
             state.threads[state.candidate_count++] = threads;
     };
 
-    // Architecture-generic production candidates. The selector-provided baseline
-    // is always included; unsupported sizes are skipped on smaller devices.
     add(baseline_threads);
     add(32);
     add(128);
@@ -155,6 +229,7 @@ void initialize_cn_production_geometry(int device_id,
 
 template <std::uint8_t VariantIndex>
 void record_cn_production_geometry_sample(int device_id,
+                                          const cudaDeviceProp& props,
                                           float elapsed_ms)
 {
     auto& state = g_cn_production_geometry[device_id][VariantIndex];
@@ -193,6 +268,8 @@ void record_cn_production_geometry_sample(int device_id,
     }
     state.selected = true;
     g_cn_hardened_threads[device_id][VariantIndex] = best_threads;
+    save_cn_production_geometry_cache<VariantIndex>(
+        device_id, props, state.count, state.mode, best_threads);
     std::cout << " | selected=" << best_threads
               << " | selected-ms=" << best_ms
               << std::defaultfloat << '\n';
@@ -223,6 +300,16 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
         stream, device_id, props, count, scratchpads, contexts);
     auto& selector = g_cn_production_selector[device_id][VariantIndex];
 
+    // mul32 passed exact parity but never reached the 5% promotion threshold in
+    // repeated real-batch tests. Keep the implementation available as a reference
+    // candidate, but retire its three full production timing passes.
+    if (!selector.selected && selector.cg_ok) {
+        selector.cg_ok = false;
+        std::cout << "[CUDA CN production selector] GPU " << device_id
+                  << " | " << cryptonight::config_value(VariantIndex).name
+                  << " | mul32=retired-from-production-timing\n";
+    }
+
     // The existing production kernel selector still owns parity and kernel mode.
     // Let it finish first; its launch path is already measured on the real batch.
     if (!selector.selected) {
@@ -241,8 +328,6 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
         initialize_cn_production_geometry<VariantIndex>(
             device_id, props, count, mode, baseline_threads);
 
-    // Stagger partitions must not reset or contaminate the full-batch geometry
-    // trial. Until tuning completes they use the selector's safe baseline.
     if (!tune.selected && tune.count != count) {
         cn_launch_mode<VariantIndex>(stream, mode, tune.baseline_threads,
                                      count, scratchpads, contexts);
@@ -265,7 +350,7 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
                    "cudaEventElapsedTime CN geometry failed");
         cudaEventDestroy(stop);
         cudaEventDestroy(start);
-        record_cn_production_geometry_sample<VariantIndex>(device_id, elapsed_ms);
+        record_cn_production_geometry_sample<VariantIndex>(device_id, props, elapsed_ms);
         return;
     }
 
@@ -278,8 +363,6 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
 
 #define cryptonight_setup_stage_cooperative8 cryptonight_setup_stage_cooperative8_sharedkey
 #define cryptonight_final_stage_cooperative8 cryptonight_final_stage_cooperative8_sharedkey
-// Retain the previous profiler/scheduler as the safe fallback, but rename its
-// public dispatch points so the staggered scheduler can own production routing.
 #define launch_cn_scheduled_if_ready launch_cn_scheduled_if_ready_legacy
 #define launch_split_cryptonight_variant_phase_profiled launch_split_cryptonight_variant_phase_profiled_legacy
 #define launch_split_cryptonight_phase_profiled launch_split_cryptonight_phase_profiled_legacy
@@ -288,9 +371,6 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
 #undef launch_split_cryptonight_variant_phase_profiled
 #undef launch_cn_scheduled_if_ready
 
-// Stagger may begin only after both the production kernel selector and the new
-// full-batch geometry selector have finished. That keeps partition launches from
-// starving or contaminating either trial sequence.
 template <std::uint8_t VariantIndex>
 bool cn_stagger_selectors_ready(int device_id, bool)
 {
@@ -300,18 +380,11 @@ bool cn_stagger_selectors_ready(int device_id, bool)
            g_cn_production_geometry[device_id][VariantIndex].selected;
 }
 
-// Capture the CUDA runtime entry point before temporarily overriding the public
-// cudaGetDeviceProperties macro below. Newer CUDA headers define that name as a
-// versioned macro alias, so restoring it through another temporary macro leaves a
-// dangling token once the helper macro is undefined.
 cudaError_t yerbas_cuda_get_device_properties(cudaDeviceProp* props, int device_id)
 {
     return cudaGetDeviceProperties(props, device_id);
 }
 
-// cudaDeviceProp is immutable for the lifetime of the process, but the stagger
-// wrapper previously queried it for every CryptoNight stage. Cache one copy per
-// device and preserve the CUDA error contract expected by check_cuda().
 cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int device_id)
 {
     if (props == nullptr) return cudaErrorInvalidValue;
@@ -330,10 +403,6 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
     return cudaSuccess;
 }
 
-// The staggered implementation historically created/destroyed CUDA events on
-// every launch. Route those calls through a tiny per-device persistent pool while
-// this include is compiled. The legacy scheduler and the rest of the backend keep
-// their existing CUDA event behavior unchanged.
 #include "cuda/generated/cuda_backend_cn_stagger_event_pool.inc"
 #define cn_overlap_selectors_ready cn_stagger_selectors_ready
 #ifdef cudaGetDeviceProperties
