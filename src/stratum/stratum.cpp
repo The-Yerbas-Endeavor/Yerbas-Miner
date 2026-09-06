@@ -408,7 +408,10 @@ int Client::run(std::atomic_bool& stop_requested)
             for (int i = 0; i < 50 && !stop_requested.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
-    report_stats(true);
+    // Do not manufacture a short, forced rate window during shutdown. The
+    // regular reporter already emits stable 150-second samples; forcing an
+    // arbitrary partial interval here can produce meaningless CPU/TOTAL rates.
+    report_stats(false);
 #ifdef _WIN32
     WSACleanup();
 #endif
