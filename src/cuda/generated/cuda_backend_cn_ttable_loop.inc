@@ -204,7 +204,11 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                       lane == 2U ? na1_lo : na1_hi;
         aw = na_word ^ t_word;
         bw = cw;
-        __syncwarp(mask);
+
+        // Each lane owns one 32-bit word of the hash scratchpad. The following
+        // iteration reloads that same lane-local word before exchanging values
+        // through __shfl_sync, so there is no cross-lane global-memory dependency
+        // requiring an explicit warp barrier here.
     }
 }
 
