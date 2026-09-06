@@ -377,7 +377,9 @@ bool cn_stagger_selectors_ready(int device_id, bool)
     static_assert(VariantIndex < 6, "invalid CryptoNight variant");
     if (device_id < 0 || device_id >= kCnPhaseProfileMaxDevices) return false;
     return g_cn_production_selector[device_id][VariantIndex].selected &&
-           g_cn_production_geometry[device_id][VariantIndex].selected;
+           g_cn_production_geometry[device_id][VariantIndex].selected &&
+           g_cn_word_setup[device_id][VariantIndex] != 0 &&
+           g_cn_word_final[device_id][VariantIndex] != 0;
 }
 
 cudaError_t yerbas_cuda_get_device_properties(cudaDeviceProp* props, int device_id)
@@ -420,12 +422,84 @@ cudaError_t cn_stagger_cached_device_properties(cudaDeviceProp* props, int devic
 #undef cryptonight_final_stage_cooperative8
 #undef cryptonight_setup_stage_cooperative8
 
+// Setup/final backend choice is independent of the phase-2 loop geometry. During
+// warm-up we run a normal single-stream pipeline so the three-way phase selectors
+// and the existing loop/geometry selectors can settle safely. Once all selectors
+// are ready, the proven stagger scheduler is reused unchanged. We present it with
+// aes_backend=1 only as a phase-dispatch signal; its loop path is already fully
+// selected at that point, so phase-2 kernel/geometry behavior remains unchanged.
+template <std::uint8_t VariantIndex>
+void launch_split_cryptonight_variant_phase_backend(cudaStream_t stream,
+                                                    std::uint8_t* states,
+                                                    std::size_t count,
+                                                    std::uint8_t* scratchpads,
+                                                    cryptonight::SplitContext* contexts,
+                                                    const CnGeometry& geometry)
+{
+    static_assert(VariantIndex < 6, "invalid CryptoNight variant");
+    int device_id = 0;
+    cudaDeviceProp props{};
+    check_cuda(cudaGetDevice(&device_id), "cudaGetDevice CN phase backend failed");
+    check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase backend failed");
+
+    const bool device_ok = device_id >= 0 && device_id < kCnPhaseProfileMaxDevices;
+    const bool phase_ready = device_ok &&
+        g_cn_word_setup[device_id][VariantIndex] != 0 &&
+        g_cn_word_final[device_id][VariantIndex] != 0;
+    const bool loop_ready = device_ok &&
+        g_cn_production_selector[device_id][VariantIndex].selected &&
+        g_cn_production_geometry[device_id][VariantIndex].selected;
+
+    if (phase_ready && loop_ready) {
+        CnGeometry scheduled_geometry = geometry;
+        scheduled_geometry.aes_backend = 1;
+        if (launch_cn_staggered_if_ready<VariantIndex>(
+                stream, device_id, count, states, scratchpads, contexts,
+                scheduled_geometry, props))
+            return;
+    }
+
+    // Single-stream warm-up/fallback. Setup and final always use their own
+    // production selector; only phase 2 continues to honor geometry.aes_backend.
+    launch_cn_setup_selected<VariantIndex>(
+        stream, device_id, count, states, scratchpads, contexts);
+
+    if (geometry.aes_backend == 1)
+        launch_cn_loop_block_tuned<VariantIndex, true>(
+            stream, states, count, scratchpads, contexts, geometry);
+    else
+        launch_cn_loop_block_tuned<VariantIndex, false>(
+            stream, states, count, scratchpads, contexts, geometry);
+
+    launch_cn_final_selected<VariantIndex>(
+        stream, device_id, count, states, scratchpads, contexts);
+}
+
+void launch_split_cryptonight_phase_backend(cudaStream_t stream,
+                                            std::uint8_t* states,
+                                            std::size_t count,
+                                            std::uint8_t variant,
+                                            std::uint8_t* scratchpads,
+                                            cryptonight::SplitContext* contexts,
+                                            const CnGeometry& geometry)
+{
+    switch (variant) {
+    case 0: launch_split_cryptonight_variant_phase_backend<0>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 1: launch_split_cryptonight_variant_phase_backend<1>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 2: launch_split_cryptonight_variant_phase_backend<2>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 3: launch_split_cryptonight_variant_phase_backend<3>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 4: launch_split_cryptonight_variant_phase_backend<4>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 5: launch_split_cryptonight_variant_phase_backend<5>(stream, states, count, scratchpads, contexts, geometry); break;
+    default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
+    }
+}
+
 #define build_gpu_tune_policy build_gpu_tune_policy_unchecked
 #include "cuda/generated/cuda_backend_gpu_faststart.inc"
 #undef build_gpu_tune_policy
 #include "cuda/generated/cuda_backend_gpu_calibration_safe.inc"
 
-#define launch_split_cryptonight launch_split_cryptonight_phase_profiled
+#define launch_split_cryptonight launch_split_cryptonight_phase_backend
 #include "cuda/generated/cuda_backend_part3.inc"
 #include "cuda/generated/cuda_backend_part4.inc"
 #undef launch_split_cryptonight
