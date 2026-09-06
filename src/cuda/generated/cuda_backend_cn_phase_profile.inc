@@ -6,6 +6,11 @@
 // A two-stream layout must beat single-stream by >=7% before promotion. Results
 // are cached by GPU runtime/batch/CN variant; no GPU model or architecture rule
 // participates in the decision.
+//
+// When YERBAS_DIAGNOSTICS is enabled, the first real production invocation of
+// each GPU/CryptoNight-variant pair bypasses overlap once and records a clean
+// setup/loop/final phase split. After that single measurement, normal scheduling
+// resumes and that pair incurs no further phase-timing synchronization overhead.
 
 namespace {
 
@@ -340,9 +345,17 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     check_cuda(cudaGetDeviceProperties(&props, device_id), "cudaGetDeviceProperties CN phase profile failed");
     const bool use_ttable = geometry.aes_backend == 1;
 
-    if (launch_cn_scheduled_if_ready<VariantIndex>(stream, device_id, count,
-                                                   states, scratchpads, contexts,
-                                                   geometry, props)) return;
+    // Diagnostics gets exactly one clean, non-overlapped production-path sample
+    // for every GPU/variant pair. This intentionally happens before the overlap
+    // scheduler can return early; after the sample is captured, normal cached
+    // scheduling resumes on the very next invocation.
+    const bool sample = device_id >= 0 && device_id < kCnPhaseProfileMaxDevices &&
+                        cn_phase_diagnostics_enabled() &&
+                        g_cn_phase_samples[device_id][VariantIndex] == 0U;
+
+    if (!sample && launch_cn_scheduled_if_ready<VariantIndex>(stream, device_id, count,
+                                                              states, scratchpads, contexts,
+                                                              geometry, props)) return;
 
     const int setup_threads = use_ttable ? kCnSharedKeyMaxThreads
         : cn_setup_occupancy_threads<VariantIndex, false>(props);
@@ -352,12 +365,6 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     const int setup_blocks = static_cast<int>((total_threads + setup_threads - 1U) / setup_threads);
     const int final_blocks = static_cast<int>((total_threads + final_threads - 1U) / final_threads);
 
-    bool sample = false;
-    if (device_id >= 0 && device_id < kCnPhaseProfileMaxDevices && cn_phase_diagnostics_enabled()) {
-        auto& launches = g_cn_phase_launches[device_id][VariantIndex];
-        ++launches;
-        sample = (launches % 8U) == 0U;
-    }
     cudaEvent_t e0{}, e1{}, e2{}, e3{};
     if (sample) {
         check_cuda(cudaEventCreateWithFlags(&e0, cudaEventDefault), "cudaEventCreate CN phase setup start failed");
@@ -408,13 +415,10 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
     const float setup_pct = total_ms > 0.0F ? setup_ms*100.0F/total_ms : 0.0F;
     const float loop_pct = total_ms > 0.0F ? loop_ms*100.0F/total_ms : 0.0F;
     const float final_pct = total_ms > 0.0F ? final_ms*100.0F/total_ms : 0.0F;
-    const double avg_setup = g_cn_phase_setup_ms[device_id][VariantIndex] / static_cast<double>(samples);
-    const double avg_loop = g_cn_phase_loop_ms[device_id][VariantIndex] / static_cast<double>(samples);
-    const double avg_final = g_cn_phase_final_ms[device_id][VariantIndex] / static_cast<double>(samples);
     const int loop_mode = cn_hardened_mode(device_id, VariantIndex);
 
     std::cout << std::fixed << std::setprecision(3)
-              << "[CUDA CN phase] GPU " << device_id
+              << "[CUDA CN phase one-shot] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | batch=" << count
               << " | setup-mode=" << (use_ttable ? cn_word_setup_name(device_id, VariantIndex) : "byte-aes")
@@ -428,8 +432,7 @@ void launch_split_cryptonight_variant_phase_profiled(cudaStream_t stream,
               << " | final=" << final_ms << " ms (" << std::setprecision(1) << final_pct << "%)"
               << std::setprecision(3)
               << " | total=" << total_ms << " ms"
-              << " | samples=" << samples
-              << " | rolling=" << avg_setup << '/' << avg_loop << '/' << avg_final << " ms"
+              << " | captured=1/1"
               << std::defaultfloat << '\n';
 }
 
