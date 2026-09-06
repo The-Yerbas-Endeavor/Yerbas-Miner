@@ -126,11 +126,33 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
     #pragma unroll 1
     for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
-        const std::uint32_t aw0 = __shfl_sync(mask, aw, base);
-        const std::uint32_t aw1 = __shfl_sync(mask, aw, base + 1U);
-        const std::uint64_t a_low = static_cast<std::uint64_t>(aw0) |
-                                    (static_cast<std::uint64_t>(aw1) << 32U);
-        const std::uint32_t index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
+        std::uint32_t aw0 = 0U;
+        std::uint32_t aw1 = 0U;
+        std::uint32_t index = 0U;
+
+        if constexpr (VariantIndex == 2) {
+            // CN-Fast spends 262,144 iterations in this dependent loop. Keep the
+            // 64-bit address reconstruction on lane 0 and broadcast only the
+            // resulting 32-bit scratchpad index. This avoids doing identical
+            // 64-bit combine/mask work in all four lanes while preserving the
+            // exact four-lane memory transaction pattern.
+            aw1 = __shfl_sync(mask, aw, base + 1U);
+            std::uint32_t scalar_index = 0U;
+            if (lane == 0U) {
+                aw0 = aw;
+                const std::uint64_t a_low = static_cast<std::uint64_t>(aw0) |
+                                            (static_cast<std::uint64_t>(aw1) << 32U);
+                scalar_index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
+            }
+            index = __shfl_sync(mask, scalar_index, base);
+            aw0 = __shfl_sync(mask, aw, base);
+        } else {
+            aw0 = __shfl_sync(mask, aw, base);
+            aw1 = __shfl_sync(mask, aw, base + 1U);
+            const std::uint64_t a_low = static_cast<std::uint64_t>(aw0) |
+                                        (static_cast<std::uint64_t>(aw1) << 32U);
+            index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
+        }
         std::uint8_t* slot = scratch + static_cast<std::size_t>(index) * 16U;
 
         // One naturally coalesced 32-bit load per lane. ShiftRows source bytes
@@ -147,8 +169,7 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         // Variant1 mutates only byte 11. In the 4-lane layout that byte is the
         // high byte of lane 2's 32-bit word, so mutate it in-register before
-        // the store instead of making lane 0 write into lane 2's word. This
-        // removes the two mutation barriers without changing the state machine.
+        // the store instead of making lane 0 write into lane 2's word.
         std::uint32_t first_store_word = cw ^ bw;
         if (lane == 2U) {
             const std::uint8_t tmp = static_cast<std::uint8_t>(first_store_word >> 24U);
@@ -159,23 +180,48 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         }
         reinterpret_cast<std::uint32_t*>(slot)[lane] = first_store_word;
 
-        const std::uint32_t c0 = __shfl_sync(mask, cw, base);
-        const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
-        const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
-                                    (static_cast<std::uint64_t>(c1) << 32U);
-        const std::uint32_t j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
+        std::uint32_t c0 = 0U;
+        std::uint32_t c1 = 0U;
+        std::uint32_t j = 0U;
+        if constexpr (VariantIndex == 2) {
+            c1 = __shfl_sync(mask, cw, base + 1U);
+            std::uint32_t scalar_j = 0U;
+            if (lane == 0U) {
+                c0 = cw;
+                const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
+                                            (static_cast<std::uint64_t>(c1) << 32U);
+                scalar_j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
+            }
+            j = __shfl_sync(mask, scalar_j, base);
+            c0 = __shfl_sync(mask, cw, base);
+        } else {
+            c0 = __shfl_sync(mask, cw, base);
+            c1 = __shfl_sync(mask, cw, base + 1U);
+            const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
+                                        (static_cast<std::uint64_t>(c1) << 32U);
+            j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
+        }
         std::uint8_t* slot2 = scratch + static_cast<std::size_t>(j) * 16U;
 
         const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
-        const std::uint32_t t0_lo = __shfl_sync(mask, t_word, base);
+        std::uint32_t t0_lo = 0U;
+        if constexpr (VariantIndex == 2) {
+            // Lane 0 already owns the low half of t0v; avoid shuffling it back
+            // to itself on CN-Fast. Other lanes do not consume t0_lo.
+            t0_lo = lane == 0U ? t_word : 0U;
+        } else {
+            t0_lo = __shfl_sync(mask, t_word, base);
+        }
         const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
-        const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
-                                  (static_cast<std::uint64_t>(t0_hi) << 32U);
         const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
         const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
 
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
+            const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
+                                        (static_cast<std::uint64_t>(c1) << 32U);
+            const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
+                                      (static_cast<std::uint64_t>(t0_hi) << 32U);
             const std::uint64_t lo = c_low * t0v;
             const std::uint64_t hi = __umul64hi(c_low, t0v);
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
@@ -204,11 +250,6 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                       lane == 2U ? na1_lo : na1_hi;
         aw = na_word ^ t_word;
         bw = cw;
-
-        // Each lane owns one 32-bit word of the hash scratchpad. The following
-        // iteration reloads that same lane-local word before exchanging values
-        // through __shfl_sync, so there is no cross-lane global-memory dependency
-        // requiring an explicit warp barrier here.
     }
 }
 
