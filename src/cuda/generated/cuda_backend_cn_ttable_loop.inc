@@ -145,7 +145,6 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                 scalar_index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
             }
             index = __shfl_sync(mask, scalar_index, base);
-            aw0 = __shfl_sync(mask, aw, base);
         } else {
             aw0 = __shfl_sync(mask, aw, base);
             aw1 = __shfl_sync(mask, aw, base + 1U);
@@ -155,8 +154,6 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         }
         std::uint8_t* slot = scratch + static_cast<std::size_t>(index) * 16U;
 
-        // One naturally coalesced 32-bit load per lane. ShiftRows source bytes
-        // come from the next three lanes in the four-lane subgroup.
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
         const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
         const std::uint32_t w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
@@ -167,9 +164,6 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
         const std::uint32_t cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
 
-        // Variant1 mutates only byte 11. In the 4-lane layout that byte is the
-        // high byte of lane 2's 32-bit word, so mutate it in-register before
-        // the store instead of making lane 0 write into lane 2's word.
         std::uint32_t first_store_word = cw ^ bw;
         if (lane == 2U) {
             const std::uint8_t tmp = static_cast<std::uint8_t>(first_store_word >> 24U);
@@ -193,7 +187,6 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                 scalar_j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
             }
             j = __shfl_sync(mask, scalar_j, base);
-            c0 = __shfl_sync(mask, cw, base);
         } else {
             c0 = __shfl_sync(mask, cw, base);
             c1 = __shfl_sync(mask, cw, base + 1U);
