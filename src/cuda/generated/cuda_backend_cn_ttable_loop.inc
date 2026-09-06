@@ -145,10 +145,19 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
         const std::uint32_t cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
 
-        reinterpret_cast<std::uint32_t*>(slot)[lane] = cw ^ bw;
-        __syncwarp(mask);
-        if (lane == 0U) cryptonight::variant1_mutate(slot);
-        __syncwarp(mask);
+        // Variant1 mutates only byte 11. In the 4-lane layout that byte is the
+        // high byte of lane 2's 32-bit word, so mutate it in-register before
+        // the store instead of making lane 0 write into lane 2's word. This
+        // removes the two mutation barriers without changing the state machine.
+        std::uint32_t first_store_word = cw ^ bw;
+        if (lane == 2U) {
+            const std::uint8_t tmp = static_cast<std::uint8_t>(first_store_word >> 24U);
+            constexpr std::uint32_t table = 0x75310U;
+            const std::uint8_t mutate_index =
+                static_cast<std::uint8_t>((((tmp >> 3U) & 6U) | (tmp & 1U)) << 1U);
+            first_store_word ^= ((table >> mutate_index) & 0x30U) << 24U;
+        }
+        reinterpret_cast<std::uint32_t*>(slot)[lane] = first_store_word;
 
         const std::uint32_t c0 = __shfl_sync(mask, cw, base);
         const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
