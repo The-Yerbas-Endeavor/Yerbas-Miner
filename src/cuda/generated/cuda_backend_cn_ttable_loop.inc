@@ -131,20 +131,12 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         std::uint32_t index = 0U;
 
         if constexpr (VariantIndex == 2) {
-            // CN-Fast spends 262,144 iterations in this dependent loop. Keep the
-            // 64-bit address reconstruction on lane 0 and broadcast only the
-            // resulting 32-bit scratchpad index. This avoids doing identical
-            // 64-bit combine/mask work in all four lanes while preserving the
-            // exact four-lane memory transaction pattern.
-            aw1 = __shfl_sync(mask, aw, base + 1U);
-            std::uint32_t scalar_index = 0U;
-            if (lane == 0U) {
-                aw0 = aw;
-                const std::uint64_t a_low = static_cast<std::uint64_t>(aw0) |
-                                            (static_cast<std::uint64_t>(aw1) << 32U);
-                scalar_index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
-            }
-            index = __shfl_sync(mask, scalar_index, base);
+            // Every supported CN address mask fits entirely in the low 32 bits.
+            // CN-Fast therefore does not need lane 1 before issuing its first
+            // dependent scratchpad load. Broadcast only lane 0's low word and
+            // defer the high-word shuffle until the multiply/accumulate step.
+            aw0 = __shfl_sync(mask, aw, base);
+            index = (aw0 >> 4U) & static_cast<std::uint32_t>(address_mask);
         } else {
             aw0 = __shfl_sync(mask, aw, base);
             aw1 = __shfl_sync(mask, aw, base + 1U);
@@ -178,15 +170,11 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         std::uint32_t c1 = 0U;
         std::uint32_t j = 0U;
         if constexpr (VariantIndex == 2) {
-            c1 = __shfl_sync(mask, cw, base + 1U);
-            std::uint32_t scalar_j = 0U;
-            if (lane == 0U) {
-                c0 = cw;
-                const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
-                                            (static_cast<std::uint64_t>(c1) << 32U);
-                scalar_j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
-            }
-            j = __shfl_sync(mask, scalar_j, base);
+            // The second dependent address likewise depends only on c's low
+            // 32-bit word. Issue slot2 before fetching c1 and the remaining A
+            // words needed by the 64-bit multiply/add dependency chain.
+            c0 = __shfl_sync(mask, cw, base);
+            j = (c0 >> 4U) & static_cast<std::uint32_t>(address_mask);
         } else {
             c0 = __shfl_sync(mask, cw, base);
             c1 = __shfl_sync(mask, cw, base + 1U);
@@ -199,9 +187,12 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
         std::uint32_t t0_lo = 0U;
         if constexpr (VariantIndex == 2) {
-            // Lane 0 already owns the low half of t0v; avoid shuffling it back
-            // to itself on CN-Fast. Other lanes do not consume t0_lo.
             t0_lo = lane == 0U ? t_word : 0U;
+            // These values are not part of either scratchpad address. Fetch them
+            // only after slot2 has been issued so their shuffle latency is off
+            // the dependent memory-address path as much as possible.
+            aw1 = __shfl_sync(mask, aw, base + 1U);
+            c1 = __shfl_sync(mask, cw, base + 1U);
         } else {
             t0_lo = __shfl_sync(mask, t_word, base);
         }
