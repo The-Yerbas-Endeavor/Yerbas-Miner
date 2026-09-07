@@ -120,6 +120,13 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     const auto& ctx = contexts[group];
     std::uint32_t aw = cryptonight::load32le_aligned(ctx.a + lane * 4U);
     std::uint32_t bw = cryptonight::load32le_aligned(ctx.b + lane * 4U);
+    std::uint32_t fast_aw1_shadow = 0U;
+    if constexpr (VariantIndex == 2) {
+        // Lane 0 is the only lane that consumes the high word of olda0 during
+        // the multiply/add dependency step. Keep a lane-0 shadow so CN-Fast
+        // does not have to fetch the same word from lane 1 every iteration.
+        if (lane == 0U) fast_aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
+    }
     const std::uint64_t tweak = ctx.tweak;
     const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
     const std::uint32_t tweak_hi = static_cast<std::uint32_t>(tweak >> 32U);
@@ -134,9 +141,10 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // Every supported CN address mask fits entirely in the low 32 bits.
             // CN-Fast therefore does not need lane 1 before issuing its first
             // dependent scratchpad load. Broadcast only lane 0's low word and
-            // defer the high-word shuffle until the multiply/accumulate step.
+            // keep the high word in lane 0's shadow register.
             aw0 = __shfl_sync(mask, aw, base);
             index = (aw0 >> 4U) & static_cast<std::uint32_t>(address_mask);
+            if (lane == 0U) aw1 = fast_aw1_shadow;
         } else {
             aw0 = __shfl_sync(mask, aw, base);
             aw1 = __shfl_sync(mask, aw, base + 1U);
@@ -188,10 +196,9 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         std::uint32_t t0_lo = 0U;
         if constexpr (VariantIndex == 2) {
             t0_lo = lane == 0U ? t_word : 0U;
-            // These values are not part of either scratchpad address. Fetch them
-            // only after slot2 has been issued so their shuffle latency is off
-            // the dependent memory-address path as much as possible.
-            aw1 = __shfl_sync(mask, aw, base + 1U);
+            // c1 is not part of either scratchpad address. Fetch it only after
+            // slot2 has been issued so its shuffle latency stays off the memory
+            // address path. aw1 comes from lane 0's carried shadow instead.
             c1 = __shfl_sync(mask, cw, base + 1U);
         } else {
             t0_lo = __shfl_sync(mask, t_word, base);
@@ -218,6 +225,12 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             na0_hi = static_cast<std::uint32_t>(na0 >> 32U);
             na1_lo = static_cast<std::uint32_t>(na1);
             na1_hi = static_cast<std::uint32_t>(na1 >> 32U);
+            if constexpr (VariantIndex == 2) {
+                // Next iteration's lane-1 A word is exactly na0_hi ^ t0_hi.
+                // Carry it here instead of rediscovering it with a subgroup
+                // shuffle from lane 1 on the following iteration.
+                fast_aw1_shadow = na0_hi ^ t0_hi;
+            }
         }
         na0_lo = __shfl_sync(mask, na0_lo, base);
         na0_hi = __shfl_sync(mask, na0_hi, base);
