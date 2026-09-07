@@ -158,27 +158,32 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         }
 
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
-        std::uint32_t w1 = 0U;
-        std::uint32_t w2 = 0U;
-        std::uint32_t w3 = 0U;
+        std::uint32_t cw = 0U;
         if constexpr (VariantIndex == 2) {
-            // CN-Fast is permanently mapped as 4 lanes per hash. Use CUDA's
-            // native 4-lane shuffle segmentation so ShiftRows source lanes are
-            // relative to the subgroup and no longer require base+lane address
-            // arithmetic for all three cross-lane AES inputs every iteration.
-            w1 = __shfl_sync(mask, own, (lane + 1U) & 3U, 4);
-            w2 = __shfl_sync(mask, own, (lane + 2U) & 3U, 4);
-            w3 = __shfl_sync(mask, own, (lane + 3U) & 3U, 4);
+            // Each lane owns one 32-bit AES input word. Perform all four shared
+            // T-table reads from that local word first, before any ShiftRows
+            // exchange. This exposes the independent table loads to the GPU
+            // together instead of serializing them behind three source-word
+            // shuffles. Then route the already-computed table contributions to
+            // the destination lane that consumes each ShiftRows byte.
+            const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
+            const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
+            const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
+            const std::uint32_t q3_local = t3[static_cast<std::uint8_t>(own >> 24U)];
+            const std::uint32_t q1 = __shfl_sync(mask, q1_local, base + ((lane + 1U) & 3U));
+            const std::uint32_t q2 = __shfl_sync(mask, q2_local, base + ((lane + 2U) & 3U));
+            const std::uint32_t q3 = __shfl_sync(mask, q3_local, base + ((lane + 3U) & 3U));
+            cw = q0 ^ q1 ^ q2 ^ q3 ^ aw;
         } else {
-            w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
-            w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
-            w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+            const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
+            const std::uint32_t w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
+            const std::uint32_t w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+            const std::uint8_t x0 = static_cast<std::uint8_t>(own);
+            const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
+            const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
+            const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
+            cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
         }
-        const std::uint8_t x0 = static_cast<std::uint8_t>(own);
-        const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
-        const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
-        const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
-        const std::uint32_t cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
 
         std::uint32_t first_store_word = cw ^ bw;
         if (lane == 2U) {
