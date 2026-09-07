@@ -103,6 +103,8 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
     constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::uint32_t byte_address_mask =
+        static_cast<std::uint32_t>(address_mask << 4U);
     const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
     const unsigned int lane = threadIdx.x & 3U;
     const unsigned int warp_lane = threadIdx.x & 31U;
@@ -135,24 +137,25 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
         std::uint32_t aw0 = 0U;
         std::uint32_t aw1 = 0U;
-        std::uint32_t index = 0U;
+        std::uint8_t* slot = nullptr;
 
         if constexpr (VariantIndex == 2) {
-            // Every supported CN address mask fits entirely in the low 32 bits.
-            // CN-Fast therefore does not need lane 1 before issuing its first
-            // dependent scratchpad load. Broadcast only lane 0's low word and
-            // keep the high word in lane 0's shadow register.
+            // CN-Fast's index expression ((aw0 >> 4) & address_mask) * 16
+            // is exactly aw0 & (address_mask << 4). Keep the dependency path
+            // in 32 bits and issue the scratchpad access from one mask instead
+            // of shift + mask + widened multiply-by-16 address arithmetic.
             aw0 = __shfl_sync(mask, aw, base);
-            index = (aw0 >> 4U) & static_cast<std::uint32_t>(address_mask);
+            const std::uint32_t byte_offset = aw0 & byte_address_mask;
+            slot = scratch + static_cast<std::size_t>(byte_offset);
             if (lane == 0U) aw1 = fast_aw1_shadow;
         } else {
             aw0 = __shfl_sync(mask, aw, base);
             aw1 = __shfl_sync(mask, aw, base + 1U);
             const std::uint64_t a_low = static_cast<std::uint64_t>(aw0) |
                                         (static_cast<std::uint64_t>(aw1) << 32U);
-            index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
+            const std::uint32_t index = static_cast<std::uint32_t>((a_low >> 4U) & address_mask);
+            slot = scratch + static_cast<std::size_t>(index) * 16U;
         }
-        std::uint8_t* slot = scratch + static_cast<std::size_t>(index) * 16U;
 
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
         const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
@@ -176,21 +179,22 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         std::uint32_t c0 = 0U;
         std::uint32_t c1 = 0U;
-        std::uint32_t j = 0U;
+        std::uint8_t* slot2 = nullptr;
         if constexpr (VariantIndex == 2) {
-            // The second dependent address likewise depends only on c's low
-            // 32-bit word. Issue slot2 before fetching c1 and the remaining A
-            // words needed by the 64-bit multiply/add dependency chain.
+            // Same strength reduction for the second dependent access. c1 and
+            // the remaining A words stay off the address path until slot2 has
+            // already been issued.
             c0 = __shfl_sync(mask, cw, base);
-            j = (c0 >> 4U) & static_cast<std::uint32_t>(address_mask);
+            const std::uint32_t byte_offset = c0 & byte_address_mask;
+            slot2 = scratch + static_cast<std::size_t>(byte_offset);
         } else {
             c0 = __shfl_sync(mask, cw, base);
             c1 = __shfl_sync(mask, cw, base + 1U);
             const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
                                         (static_cast<std::uint64_t>(c1) << 32U);
-            j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
+            const std::uint32_t j = static_cast<std::uint32_t>((c_low >> 4U) & address_mask);
+            slot2 = scratch + static_cast<std::size_t>(j) * 16U;
         }
-        std::uint8_t* slot2 = scratch + static_cast<std::size_t>(j) * 16U;
 
         const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
         std::uint32_t t0_lo = 0U;
