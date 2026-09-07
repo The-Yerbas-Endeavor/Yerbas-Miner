@@ -158,9 +158,22 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         }
 
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
-        const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
-        const std::uint32_t w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
-        const std::uint32_t w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+        std::uint32_t w1 = 0U;
+        std::uint32_t w2 = 0U;
+        std::uint32_t w3 = 0U;
+        if constexpr (VariantIndex == 2) {
+            // CN-Fast is permanently mapped as 4 lanes per hash. Use CUDA's
+            // native 4-lane shuffle segmentation so ShiftRows source lanes are
+            // relative to the subgroup and no longer require base+lane address
+            // arithmetic for all three cross-lane AES inputs every iteration.
+            w1 = __shfl_sync(mask, own, (lane + 1U) & 3U, 4);
+            w2 = __shfl_sync(mask, own, (lane + 2U) & 3U, 4);
+            w3 = __shfl_sync(mask, own, (lane + 3U) & 3U, 4);
+        } else {
+            w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
+            w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
+            w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+        }
         const std::uint8_t x0 = static_cast<std::uint8_t>(own);
         const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
         const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
@@ -213,30 +226,12 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
-            std::uint64_t lo = 0U;
-            std::uint64_t hi = 0U;
-            if constexpr (VariantIndex == 2) {
-                // Build the full 128-bit c0:t0 product once from four 32x32
-                // partial products. The old path requested low64 with a normal
-                // 64-bit multiply and high64 again via __umul64hi, which can
-                // duplicate limb work on architectures without native 64x64.
-                const std::uint64_t p00 = static_cast<std::uint64_t>(c0) * t0_lo;
-                const std::uint64_t p01 = static_cast<std::uint64_t>(c0) * t0_hi;
-                const std::uint64_t p10 = static_cast<std::uint64_t>(c1) * t0_lo;
-                const std::uint64_t p11 = static_cast<std::uint64_t>(c1) * t0_hi;
-                const std::uint64_t middle = (p00 >> 32U) +
-                                             static_cast<std::uint32_t>(p01) +
-                                             static_cast<std::uint32_t>(p10);
-                lo = static_cast<std::uint32_t>(p00) | (middle << 32U);
-                hi = p11 + (p01 >> 32U) + (p10 >> 32U) + (middle >> 32U);
-            } else {
-                const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
-                                            (static_cast<std::uint64_t>(c1) << 32U);
-                const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
-                                          (static_cast<std::uint64_t>(t0_hi) << 32U);
-                lo = c_low * t0v;
-                hi = __umul64hi(c_low, t0v);
-            }
+            const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
+                                        (static_cast<std::uint64_t>(c1) << 32U);
+            const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
+                                      (static_cast<std::uint64_t>(t0_hi) << 32U);
+            const std::uint64_t lo = c_low * t0v;
+            const std::uint64_t hi = __umul64hi(c_low, t0v);
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
                                         (static_cast<std::uint64_t>(aw1) << 32U);
             const std::uint64_t olda1 = static_cast<std::uint64_t>(old_a2) |
