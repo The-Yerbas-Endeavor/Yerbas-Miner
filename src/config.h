@@ -29,7 +29,10 @@ struct GpuConfig {
     std::vector<int> devices{};
     int intensity{0};
     bool skip_validation{false};
-    // Explicit one-shot calibration. Normal production startup never benchmarks.
+    // User-facing GPU tuning policy: auto uses normal cached behavior, full
+    // forces one fresh calibration pass, and off disables explicit calibration.
+    std::string gpu_tune{"auto"};
+    // Internal compatibility flag consumed by the existing CUDA calibration path.
     bool autotune{false};
 };
 
