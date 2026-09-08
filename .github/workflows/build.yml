@@ -94,7 +94,7 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.8.1'
-          method: local
+          method: network
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Resolve and verify CUDA compiler
