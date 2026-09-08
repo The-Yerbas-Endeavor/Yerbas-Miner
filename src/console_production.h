@@ -18,14 +18,14 @@ inline bool suppress_line(const std::string& line)
 {
     if (diagnostics_enabled()) return false;
 
-    // CPU retune details: keep only the final/cached selection summary.
+    // CPU tuning progress stays concise in production: the existing
+    // GhostRider-search start, final-validation and selected/cached summaries
+    // remain visible, while individual measurements stay diagnostic-only.
     if (line.rfind("[CPU topology]", 0) == 0) return true;
     if (line.rfind("[CPU CN probe]", 0) == 0) return true;
     if (line.rfind("[CPU CN confirm]", 0) == 0) return true;
     if (line.rfind("[CPU affinity]", 0) == 0) return true;
     if (line.rfind("[CPU tune] baseline", 0) == 0) return true;
-    if (line.rfind("[CPU tune] GhostRider production search", 0) == 0) return true;
-    if (line.rfind("[CPU tune] final validation", 0) == 0) return true;
 
     // Per-rotation learning/probe output is intentionally retained for
     // diagnostics/perf capture but is far too noisy for the normal miner UI.
@@ -43,10 +43,12 @@ inline bool suppress_line(const std::string& line)
     if (line.find("rotation-adaptive batch") != std::string::npos) return true;
 
     // CUDA selector/tuner details are useful for diagnostics and CSV capture,
-    // but are unnecessary in the normal production console.
+    // but are unnecessary in the normal production console. Concise GPU
+    // initialization/cache summaries emitted elsewhere remain visible.
     if (line.find("[CUDA CN stagger tuner]") != std::string::npos) return true;
     if (line.find("[CUDA CN stagger]") != std::string::npos) return true;
     if (line.find("[CUDA CN selector]") != std::string::npos) return true;
+    if (line.find("[CUDA CN hardened selector]") != std::string::npos) return true;
     if (line.find("[CUDA CN validation]") != std::string::npos) return true;
     if (line.find("[CUDA CN parity]") != std::string::npos) return true;
 
