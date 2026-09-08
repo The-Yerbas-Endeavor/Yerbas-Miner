@@ -45,6 +45,18 @@ std::string normalize_tune_mode(std::string value)
     return value;
 }
 
+std::string normalize_gpu_tune_mode(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "default") value = "auto";
+    if (value == "none" || value == "no" || value == "false" || value == "0") value = "off";
+    if (value != "off" && value != "auto" && value != "full")
+        throw std::runtime_error("GPU tune mode must be off, auto, or full");
+    return value;
+}
+
 void apply_json(AppConfig& cfg, const json& root)
 {
     if (root.contains("pool")) {
@@ -67,8 +79,10 @@ void apply_json(AppConfig& cfg, const json& root)
         if (g.contains("enabled")) cfg.gpu.enabled = g.at("enabled").get<bool>();
         if (g.contains("devices")) cfg.gpu.devices = g.at("devices").get<std::vector<int>>();
         if (g.contains("intensity")) cfg.gpu.intensity = g.at("intensity").get<int>();
+        if (g.contains("gpu_tune")) cfg.gpu.gpu_tune = normalize_gpu_tune_mode(g.at("gpu_tune").get<std::string>());
         if (g.contains("skip_validation")) cfg.gpu.skip_validation = g.at("skip_validation").get<bool>();
-        if (g.contains("autotune")) cfg.gpu.autotune = g.at("autotune").get<bool>();
+        // Legacy compatibility: an existing boolean autotune=true maps to full.
+        if (g.contains("autotune") && g.at("autotune").get<bool>()) cfg.gpu.gpu_tune = "full";
     }
     if (root.contains("logging")) {
         const auto& l = root.at("logging");
@@ -105,17 +119,18 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--threads") cfg.miner.threads = static_cast<unsigned int>(std::stoul(require_value(argc, argv, i, "--threads")));
         else if (arg == "--cpu-batch") cfg.miner.cpu_batch = static_cast<unsigned int>(std::stoul(require_value(argc, argv, i, "--cpu-batch")));
         else if (arg == "--tune") cfg.miner.cpu_tune = normalize_tune_mode(require_value(argc, argv, i, "--tune"));
+        else if (arg == "--gpu-tune") cfg.gpu.gpu_tune = normalize_gpu_tune_mode(require_value(argc, argv, i, "--gpu-tune"));
         else if (arg == "--autotune") {
             cfg.miner.autotune = true;
             cfg.miner.cpu_tune = "default";
-            cfg.gpu.autotune = true;
+            cfg.gpu.gpu_tune = "full";
         }
         else if (arg == "--no-tune") cfg.miner.cpu_tune = "off";
         else if (arg == "--no-cpu") cfg.miner.cpu_enabled = false;
         else if (arg == "--no-hybrid") cfg.miner.hybrid = false;
         else if (arg == "--devices") cfg.gpu.devices = parse_devices(require_value(argc, argv, i, "--devices"));
         else if (arg == "--intensity") cfg.gpu.intensity = std::stoi(require_value(argc, argv, i, "--intensity"));
-        else if (arg == "--gpu-autotune") cfg.gpu.autotune = true;
+        else if (arg == "--gpu-autotune") cfg.gpu.gpu_tune = "full";
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
@@ -125,6 +140,8 @@ AppConfig load_config(int argc, char** argv)
     }
 
     cfg.miner.cpu_tune = normalize_tune_mode(cfg.miner.cpu_tune);
+    cfg.gpu.gpu_tune = normalize_gpu_tune_mode(cfg.gpu.gpu_tune);
+    cfg.gpu.autotune = cfg.gpu.gpu_tune == "full";
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
     return cfg;
 }
@@ -140,13 +157,14 @@ void print_config_help(const char* program)
         << "  --threads N         CPU thread ceiling (0 = all logical CPUs)\n"
         << "  --cpu-batch N       CPU batch when tuning is off / initial reference value\n"
         << "  --tune MODE         CPU tuning: off, simple, default, full\n"
+        << "  --gpu-tune MODE     GPU tuning: off, auto, full\n"
         << "  --autotune          Fresh CPU + GPU calibration with visible progress\n"
         << "  --no-tune           Start immediately with configured/default CPU settings\n"
         << "  --no-cpu            Disable CPU mining\n"
         << "  --no-hybrid         Do not combine CPU and GPU\n"
         << "  --devices 0,1       GPU device ids\n"
         << "  --intensity N       GPU intensity (0 = auto)\n"
-        << "  --gpu-autotune      Run one bounded GPU calibration and cache the result\n"
+        << "  --gpu-autotune      Alias for --gpu-tune full\n"
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
@@ -161,9 +179,10 @@ void print_config_help(const char* program)
         << "  simple   quick production tuning\n"
         << "  default  balanced production tuning\n"
         << "  full     exhaustive production/rotation tuning where supported\n\n"
-        << "GPU tuning:\n"
-        << "  Normal startup never benchmarks. --gpu-autotune runs a short explicit\n"
-        << "  calibration, validates the winner, and saves it for later instant startup.\n\n"
+        << "GPU tuning modes:\n"
+        << "  off      disable explicit GPU calibration and use safe/default selections\n"
+        << "  auto     normal startup; use valid cached CUDA policies when available\n"
+        << "  full     force one fresh bounded CUDA calibration and cache the winner\n\n"
         << "CPU autotune environment:\n"
         << "  YERBAS_CPU_RETUNE=1            Ignore cached CPU tuning and benchmark again\n"
         << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Force direct/no-tune CPU startup\n"
