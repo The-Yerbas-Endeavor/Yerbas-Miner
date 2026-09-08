@@ -6,9 +6,12 @@
 #include "stratum/stratum.h"
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <streambuf>
 #include <thread>
 #include <utility>
 
@@ -21,10 +24,168 @@ namespace yerbas {
 namespace {
 std::atomic_bool g_mining_stop_requested{false};
 
+constexpr auto kDevFeeFirstDelay = std::chrono::minutes(3);
+constexpr auto kDevFeeInterval = std::chrono::hours(1);
+constexpr auto kDevFeeMiningTime = std::chrono::seconds(60);
+constexpr auto kDevFeeSetupLimit = std::chrono::seconds(4);
+constexpr auto kDevFeeHashStallLimit = std::chrono::seconds(3);
+constexpr const char* kDevPoolUrl = "stratum+tcp://pool.yerbas.org:3333";
+constexpr const char* kDevPoolUser = "yYoUt7DosfK6CB4XzLuZSf43auMZFfFFxY";
+constexpr const char* kDevPoolWorker = "ymdev";
+constexpr const char* kDevPoolPassword = "x";
+
+class NullStreamBuffer final : public std::streambuf {
+protected:
+    int overflow(int ch) override { return traits_type::not_eof(ch); }
+};
+
+class ScopedIostreamSilence {
+public:
+    ScopedIostreamSilence()
+        : cout_buffer_(std::cout.rdbuf(&null_)),
+          cerr_buffer_(std::cerr.rdbuf(&null_))
+    {
+    }
+
+    ~ScopedIostreamSilence() { restore(); }
+
+    void restore()
+    {
+        if (restored_) return;
+        std::cout.rdbuf(cout_buffer_);
+        std::cerr.rdbuf(cerr_buffer_);
+        restored_ = true;
+    }
+
+private:
+    NullStreamBuffer null_;
+    std::streambuf* cout_buffer_{nullptr};
+    std::streambuf* cerr_buffer_{nullptr};
+    bool restored_{false};
+};
+
 void handle_signal(int)
 {
     g_mining_stop_requested.store(true, std::memory_order_relaxed);
     request_stop();
+}
+
+bool global_mining_stop_requested()
+{
+    return g_mining_stop_requested.load(std::memory_order_relaxed) || stop_requested();
+}
+
+bool run_user_session_until(stratum::Client& client,
+                            std::chrono::steady_clock::time_point deadline)
+{
+    std::atomic_bool session_stop{false};
+    std::atomic_bool session_done{false};
+    std::thread runner([&]() {
+        (void)client.run(session_stop);
+        session_done.store(true, std::memory_order_release);
+    });
+
+    while (!session_done.load(std::memory_order_acquire)) {
+        if (global_mining_stop_requested() || std::chrono::steady_clock::now() >= deadline) {
+            session_stop.store(true, std::memory_order_relaxed);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (global_mining_stop_requested())
+        session_stop.store(true, std::memory_order_relaxed);
+
+    if (runner.joinable()) runner.join();
+    return !global_mining_stop_requested();
+}
+
+bool run_developer_fee_round(stratum::Client& client,
+                             const PoolConfig& user_pool,
+                             const std::string& user_worker)
+{
+    PoolConfig dev_pool;
+    dev_pool.url = kDevPoolUrl;
+    dev_pool.user = kDevPoolUser;
+    dev_pool.password = kDevPoolPassword;
+    client.set_pool_session(dev_pool, kDevPoolWorker);
+
+    std::fprintf(stderr, "[DEV FEE] Starting developer mining round\n");
+
+    std::atomic_bool session_stop{false};
+    std::atomic_bool session_done{false};
+    bool completed = false;
+    bool became_ready = false;
+
+    {
+        // Keep the compiled developer identity out of normal console output.
+        // Status messages for the fee controller use stdio directly while the
+        // Stratum client's iostream output is muted for this short session.
+        ScopedIostreamSilence silence;
+        std::thread runner([&]() {
+            (void)client.run(session_stop);
+            session_done.store(true, std::memory_order_release);
+        });
+
+        const auto setup_deadline = std::chrono::steady_clock::now() + kDevFeeSetupLimit;
+        while (!session_done.load(std::memory_order_acquire) &&
+               !client.session_mining_ready() &&
+               !global_mining_stop_requested() &&
+               std::chrono::steady_clock::now() < setup_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        if (!global_mining_stop_requested() &&
+            !session_done.load(std::memory_order_acquire) &&
+            client.session_mining_ready()) {
+            became_ready = true;
+            std::fprintf(stderr, "[DEV FEE] Developer pool ready\n");
+            std::fprintf(stderr, "[DEV FEE] 60-second mining period started\n");
+
+            const auto mining_started = std::chrono::steady_clock::now();
+            auto last_progress = mining_started;
+            std::uint64_t last_hashes = client.hashes_done_snapshot();
+
+            while (!global_mining_stop_requested() &&
+                   !session_done.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                const auto now = std::chrono::steady_clock::now();
+                const std::uint64_t hashes = client.hashes_done_snapshot();
+                if (hashes != last_hashes) {
+                    last_hashes = hashes;
+                    last_progress = now;
+                }
+
+                if (now - mining_started >= kDevFeeMiningTime) {
+                    completed = true;
+                    break;
+                }
+
+                // A stopped hash counter means the dev connection/job is no
+                // longer producing work. Abort before Client::run reaches its
+                // normal five-second reconnect attempt; do not reclaim time.
+                if (now - last_progress >= kDevFeeHashStallLimit) break;
+            }
+        }
+
+        session_stop.store(true, std::memory_order_relaxed);
+        if (runner.joinable()) runner.join();
+        silence.restore();
+    }
+
+    client.set_pool_session(user_pool, user_worker);
+
+    if (global_mining_stop_requested()) return false;
+
+    if (completed) {
+        std::cout << "[DEV FEE] Developer mining round complete\n";
+    } else if (!became_ready) {
+        std::cout << "[DEV FEE] Developer pool unavailable; round skipped\n";
+    } else {
+        std::cout << "[DEV FEE] Developer mining round interrupted; round skipped\n";
+    }
+    std::cout << "[DEV FEE] Returning to user pool\n";
+    return true;
 }
 
 void print_cpu_capabilities()
@@ -195,6 +356,7 @@ int Miner::run()
         return 130;
     }
     stratum_client.print_connection_plan();
+    std::cout << "Developer fee: 1.67% | 60 seconds/hour | first round after 3 minutes\n";
 
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled) {
@@ -303,7 +465,24 @@ int Miner::run()
         return 2;
     }
 
-    return stratum_client.run(g_mining_stop_requested);
+    const PoolConfig user_pool = config_.pool;
+    const std::string user_worker = config_.miner.worker;
+    auto next_dev_round = std::chrono::steady_clock::now() + kDevFeeFirstDelay;
+
+    while (!global_mining_stop_requested()) {
+        if (!run_user_session_until(stratum_client, next_dev_round)) break;
+        if (global_mining_stop_requested()) break;
+
+        if (!run_developer_fee_round(stratum_client, user_pool, user_worker)) break;
+        next_dev_round += kDevFeeInterval;
+
+        // Never stack missed fees. If the machine slept or a round took
+        // unusually long, advance to the next future hourly slot.
+        const auto now = std::chrono::steady_clock::now();
+        while (next_dev_round <= now) next_dev_round += kDevFeeInterval;
+    }
+
+    return global_mining_stop_requested() ? 130 : 0;
 }
 
 } // namespace yerbas
