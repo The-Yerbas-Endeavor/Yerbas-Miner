@@ -342,16 +342,25 @@ if(YERBAS_ENABLE_CUDA)
     set(YERBAS_CUDA_AVAILABLE ON)
 
     if(DEFINED ENV{CI} AND NOT "$ENV{CI}" STREQUAL "" AND NOT "$ENV{CI}" STREQUAL "false")
-        set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "52;60;61;70;75;80;86;89;90")
+        # CI only needs one portable device-code image to prove the full CUDA
+        # production translation unit compiles. compute_52 PTX is forward-JIT
+        # compatible across the supported NVIDIA generations and avoids
+        # recompiling the enormous GhostRider CUDA TU nine times per job.
+        set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "52-virtual")
     else()
         set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "native")
     endif()
     set(YERBAS_CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES_DEFAULT}" CACHE STRING
-        "CUDA compute capabilities built into Yerbas-Miner (native locally; broad set in CI)")
+        "CUDA compute capabilities built into Yerbas-Miner (native locally; portable PTX in CI)")
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
     set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)
+    if(DEFINED ENV{CI} AND NOT "$ENV{CI}" STREQUAL "" AND NOT "$ENV{CI}" STREQUAL "false")
+        # GitHub-hosted runners have limited RAM; keep nvcc from multiplying
+        # memory use inside the already-parallel CMake build.
+        set(YERBAS_NVCC_PARALLEL_FLAGS --threads=1)
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(YERBAS_CUDA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cuda")
