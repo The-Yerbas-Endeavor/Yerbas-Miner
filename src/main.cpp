@@ -46,6 +46,26 @@ struct StreamBufferRestore {
 };
 
 #ifdef _WIN32
+void configure_windows_console_utf8()
+{
+    // Yerbas console text is UTF-8 (emoji, box drawing, symbols). Windows
+    // consoles otherwise inherit the active OEM code page, which turns those
+    // bytes into mojibake. CP_UTF8 works in modern Windows Terminal/PowerShell
+    // and also improves Unicode handling in current conhost builds.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    // Preserve any existing console mode while enabling ANSI/VT sequences.
+    // console.h performs the same capability check for colors; doing it here
+    // means UTF-8 and VT are established before the first banner is emitted.
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out != INVALID_HANDLE_VALUE && out != nullptr) {
+        DWORD mode = 0;
+        if (GetConsoleMode(out, &mode))
+            SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+}
+
 const char* windows_access_kind(ULONG_PTR kind)
 {
     switch (kind) {
@@ -105,6 +125,7 @@ void pause_on_windows_error()
 int main(int argc, char** argv)
 {
 #ifdef _WIN32
+    configure_windows_console_utf8();
     SetUnhandledExceptionFilter(windows_unhandled_exception_filter);
 #endif
 
