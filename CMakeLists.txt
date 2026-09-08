@@ -1,4 +1,92 @@
 cmake_minimum_required(VERSION 3.24)
+
+# CUDA 12.x does not support modern GCC 14/15 host compilers. Detect that
+# combination before project() locks in the C/C++ toolchain so a normal Linux
+# user gets a compatible GCC 13 build automatically instead of a late
+# libstdc++/CUDA link failure.
+set(_YERBAS_PREFLIGHT_CUDA ON)
+if(DEFINED YERBAS_ENABLE_CUDA AND NOT YERBAS_ENABLE_CUDA)
+    set(_YERBAS_PREFLIGHT_CUDA OFF)
+endif()
+
+if(_YERBAS_PREFLIGHT_CUDA AND UNIX AND NOT APPLE)
+    find_program(_YERBAS_NVCC_EXECUTABLE NAMES nvcc)
+    if(_YERBAS_NVCC_EXECUTABLE)
+        execute_process(
+            COMMAND "${_YERBAS_NVCC_EXECUTABLE}" --version
+            OUTPUT_VARIABLE _YERBAS_NVCC_VERSION_TEXT
+            ERROR_VARIABLE _YERBAS_NVCC_VERSION_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        string(REGEX MATCH "release[ \t]+([0-9]+)\\." _YERBAS_NVCC_RELEASE_MATCH "${_YERBAS_NVCC_VERSION_TEXT}")
+        set(_YERBAS_CUDA_MAJOR "${CMAKE_MATCH_1}")
+
+        if(_YERBAS_CUDA_MAJOR STREQUAL "12")
+            set(_YERBAS_COMPILER_EXPLICIT OFF)
+            set(_YERBAS_CXX_PROBE "")
+
+            if(DEFINED CMAKE_CXX_COMPILER AND NOT CMAKE_CXX_COMPILER STREQUAL "")
+                set(_YERBAS_CXX_PROBE "${CMAKE_CXX_COMPILER}")
+                set(_YERBAS_COMPILER_EXPLICIT ON)
+            elseif(DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL "")
+                set(_YERBAS_CXX_PROBE "$ENV{CXX}")
+                set(_YERBAS_COMPILER_EXPLICIT ON)
+            else()
+                find_program(_YERBAS_CXX_PROBE NAMES c++ g++)
+            endif()
+
+            if((DEFINED CMAKE_C_COMPILER AND NOT CMAKE_C_COMPILER STREQUAL "") OR
+               (DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL ""))
+                set(_YERBAS_COMPILER_EXPLICIT ON)
+            endif()
+
+            if(_YERBAS_CXX_PROBE)
+                execute_process(
+                    COMMAND "${_YERBAS_CXX_PROBE}" -dumpfullversion -dumpversion
+                    OUTPUT_VARIABLE _YERBAS_CXX_VERSION_TEXT
+                    ERROR_VARIABLE _YERBAS_CXX_VERSION_ERROR
+                    RESULT_VARIABLE _YERBAS_CXX_VERSION_RESULT
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                )
+                if(_YERBAS_CXX_VERSION_RESULT EQUAL 0)
+                    string(REGEX MATCH "^([0-9]+)" _YERBAS_CXX_MAJOR_MATCH "${_YERBAS_CXX_VERSION_TEXT}")
+                    set(_YERBAS_CXX_MAJOR "${CMAKE_MATCH_1}")
+
+                    if(_YERBAS_CXX_MAJOR MATCHES "^[0-9]+$" AND _YERBAS_CXX_MAJOR GREATER_EQUAL 14)
+                        find_program(_YERBAS_GCC13 NAMES gcc-13)
+                        find_program(_YERBAS_GXX13 NAMES g++-13)
+
+                        if(NOT _YERBAS_GCC13 OR NOT _YERBAS_GXX13)
+                            message(FATAL_ERROR
+                                "CUDA 12.x was detected with GCC/G++ ${_YERBAS_CXX_MAJOR}, which is not a supported host compiler combination.\n"
+                                "Yerbas-Miner requires GCC 13 for CUDA 12.x on this system.\n"
+                                "Install it with:\n"
+                                "  sudo apt install gcc-13 g++-13\n"
+                                "Then remove the build directory and configure again.")
+                        endif()
+
+                        if(_YERBAS_COMPILER_EXPLICIT)
+                            message(FATAL_ERROR
+                                "CUDA 12.x was detected with explicitly selected GCC/G++ ${_YERBAS_CXX_MAJOR}.\n"
+                                "A compatible GCC 13 toolchain is installed at:\n"
+                                "  ${_YERBAS_GCC13}\n"
+                                "  ${_YERBAS_GXX13}\n"
+                                "Remove the build directory and reconfigure without forcing CC/CXX, or use:\n"
+                                "  CC=${_YERBAS_GCC13} CXX=${_YERBAS_GXX13} CUDAHOSTCXX=${_YERBAS_GXX13} cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release")
+                        endif()
+
+                        set(CMAKE_C_COMPILER "${_YERBAS_GCC13}" CACHE FILEPATH "Yerbas CUDA-compatible C compiler" FORCE)
+                        set(CMAKE_CXX_COMPILER "${_YERBAS_GXX13}" CACHE FILEPATH "Yerbas CUDA-compatible C++ compiler" FORCE)
+                        set(CMAKE_CUDA_HOST_COMPILER "${_YERBAS_GXX13}" CACHE FILEPATH "Yerbas CUDA host compiler" FORCE)
+                        message(STATUS
+                            "Yerbas CUDA 12.x preflight: default GCC/G++ ${_YERBAS_CXX_MAJOR} is too new; using GCC/G++ 13 for a consistent host toolchain")
+                    endif()
+                endif()
+            endif()
+        endif()
+    endif()
+endif()
+
 project(YerbasMiner VERSION 0.5.2 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
