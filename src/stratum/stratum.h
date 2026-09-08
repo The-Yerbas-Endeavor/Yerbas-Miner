@@ -125,6 +125,8 @@ public:
     // infrastructure remain owned by this Client and are not reinitialized.
     void set_pool_session(const PoolConfig& pool, const std::string& worker)
     {
+        authorized_.store(false, std::memory_order_relaxed);
+        target_ready_.store(false, std::memory_order_relaxed);
         config_.pool = pool;
         config_.miner.worker = worker;
         endpoint_ = parse_endpoint(config_.pool.url);
