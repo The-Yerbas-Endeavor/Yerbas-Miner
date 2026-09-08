@@ -65,6 +65,7 @@ void apply_json(AppConfig& cfg, const json& root)
         if (p.contains("user")) cfg.pool.user = p.at("user").get<std::string>();
         if (p.contains("password")) cfg.pool.password = p.at("password").get<std::string>();
     }
+    if (root.contains("developer_fee")) cfg.developer_fee = root.at("developer_fee").get<bool>();
     if (root.contains("miner")) {
         const auto& m = root.at("miner");
         if (m.contains("worker")) cfg.miner.worker = m.at("worker").get<std::string>();
