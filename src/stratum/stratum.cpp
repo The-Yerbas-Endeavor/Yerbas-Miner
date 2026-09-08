@@ -381,10 +381,21 @@ std::string Client::login_user() const
 int Client::run(std::atomic_bool& stop_requested)
 {
     if (!ready()) { std::cerr << "Pool configuration is incomplete. Set pool.url and pool.user.\n"; return 2; }
-    mining_started_ = std::chrono::steady_clock::now();
-    last_report_ = mining_started_;
+
+    const auto session_started = std::chrono::steady_clock::now();
+    if (mining_started_.time_since_epoch().count() == 0)
+        mining_started_ = session_started;
+
+    // Current-rate windows are session-local so a user -> dev -> user switch
+    // cannot mix counters from two different reporting intervals. Lifetime
+    // uptime/AVG intentionally remain anchored to the first mining session.
+    last_report_ = session_started;
     hashes_at_last_report_ = hashes_done_;
     cpu_hashes_at_last_report_ = cpu_hashes_done_;
+#ifdef YERBAS_HAS_CUDA
+    for (auto& worker : gpu_workers_) worker.hashes_at_last_report = worker.hashes_done;
+#endif
+
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled && !gpu_workers_.empty() && !gpu_pipeline_ready_) {
         std::cout << "[GPU] Devices detected, but full GhostRider CUDA pipeline is not ready yet.\n";
