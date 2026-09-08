@@ -28,7 +28,8 @@ constexpr auto kDevFeeFirstDelay = std::chrono::minutes(3);
 constexpr auto kDevFeeInterval = std::chrono::hours(1);
 constexpr auto kDevFeeMiningTime = std::chrono::seconds(60);
 constexpr auto kDevFeeSetupLimit = std::chrono::seconds(4);
-constexpr auto kDevFeeHashStallLimit = std::chrono::seconds(3);
+constexpr auto kDevFeeFirstHashLimit = std::chrono::seconds(15);
+constexpr auto kDevFeeHashStallLimit = std::chrono::seconds(15);
 constexpr const char* kDevPoolUrl = "stratum+tcp://pool.yerbas.org:3333";
 constexpr const char* kDevPoolUser = "yYoUt7DosfK6CB4XzLuZSf43auMZFfFFxY";
 constexpr const char* kDevPoolWorker = "ymdev";
@@ -116,6 +117,7 @@ bool run_developer_fee_round(stratum::Client& client,
     std::atomic_bool session_done{false};
     bool completed = false;
     bool became_ready = false;
+    bool mining_active = false;
 
     {
         // Keep the compiled developer identity out of normal console output.
@@ -140,31 +142,51 @@ bool run_developer_fee_round(stratum::Client& client,
             client.session_mining_ready()) {
             became_ready = true;
             std::fprintf(stderr, "[DEV FEE] Developer pool ready\n");
-            std::fprintf(stderr, "[DEV FEE] 60-second mining period started\n");
+            std::fprintf(stderr, "[DEV FEE] Waiting for mining activity\n");
 
-            const auto mining_started = std::chrono::steady_clock::now();
-            auto last_progress = mining_started;
             std::uint64_t last_hashes = client.hashes_done_snapshot();
+            const auto first_hash_deadline = std::chrono::steady_clock::now() + kDevFeeFirstHashLimit;
 
             while (!global_mining_stop_requested() &&
-                   !session_done.load(std::memory_order_acquire)) {
+                   !session_done.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < first_hash_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                const auto now = std::chrono::steady_clock::now();
                 const std::uint64_t hashes = client.hashes_done_snapshot();
                 if (hashes != last_hashes) {
                     last_hashes = hashes;
-                    last_progress = now;
-                }
-
-                if (now - mining_started >= kDevFeeMiningTime) {
-                    completed = true;
+                    mining_active = true;
                     break;
                 }
+            }
 
-                // A stopped hash counter means the dev connection/job is no
-                // longer producing work. Abort before Client::run reaches its
-                // normal five-second reconnect attempt; do not reclaim time.
-                if (now - last_progress >= kDevFeeHashStallLimit) break;
+            if (mining_active &&
+                !global_mining_stop_requested() &&
+                !session_done.load(std::memory_order_acquire)) {
+                std::fprintf(stderr, "[DEV FEE] Mining active; 60-second period started\n");
+
+                const auto mining_started = std::chrono::steady_clock::now();
+                auto last_progress = mining_started;
+
+                while (!global_mining_stop_requested() &&
+                       !session_done.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    const auto now = std::chrono::steady_clock::now();
+                    const std::uint64_t hashes = client.hashes_done_snapshot();
+                    if (hashes != last_hashes) {
+                        last_hashes = hashes;
+                        last_progress = now;
+                    }
+
+                    if (now - mining_started >= kDevFeeMiningTime) {
+                        completed = true;
+                        break;
+                    }
+
+                    // Long CUDA CryptoNight kernels can take several seconds.
+                    // Only treat the session as stalled after a generous gap
+                    // in real hash progress, not after one normal kernel.
+                    if (now - last_progress >= kDevFeeHashStallLimit) break;
+                }
             }
         }
 
@@ -181,6 +203,8 @@ bool run_developer_fee_round(stratum::Client& client,
         std::cout << "[DEV FEE] Developer mining round complete\n";
     } else if (!became_ready) {
         std::cout << "[DEV FEE] Developer pool unavailable; round skipped\n";
+    } else if (!mining_active) {
+        std::cout << "[DEV FEE] No mining activity detected; round skipped\n";
     } else {
         std::cout << "[DEV FEE] Developer mining round interrupted; round skipped\n";
     }
