@@ -27,6 +27,21 @@ inline bool suppress_line(const std::string& line)
     if (line.rfind("[CPU tune] GhostRider production search", 0) == 0) return true;
     if (line.rfind("[CPU tune] final validation", 0) == 0) return true;
 
+    // Per-rotation learning/probe output is intentionally retained for
+    // diagnostics/perf capture but is far too noisy for the normal miner UI.
+    if (line.rfind("[CPU fingerprint]", 0) == 0) return true;
+    if (line.rfind("[GhostRider] rotation=", 0) == 0) return true;
+
+    // Routine job lifecycle details do not require operator attention. Keep
+    // share results, rejects, block finds, warnings and failures visible.
+    if (line.rfind("[stratum] New job #", 0) == 0) return true;
+    if (line.find("[hybrid] stale candidates suppressed") != std::string::npos) return true;
+    if (line.rfind("[hybrid] Job partitioned:", 0) == 0) return true;
+
+    // Rotation-adaptive GPU batch changes happen frequently and are tuning
+    // telemetry rather than production status information.
+    if (line.find("rotation-adaptive batch") != std::string::npos) return true;
+
     // CUDA selector/tuner details are useful for diagnostics and CSV capture,
     // but are unnecessary in the normal production console.
     if (line.find("[CUDA CN stagger tuner]") != std::string::npos) return true;
@@ -70,9 +85,10 @@ protected:
 private:
     void emit(bool newline)
     {
-        if (!suppress_line(pending_) && !pending_.empty())
+        const bool suppressed = suppress_line(pending_);
+        if (!suppressed && !pending_.empty())
             destination_->sputn(pending_.data(), static_cast<std::streamsize>(pending_.size()));
-        if (!suppress_line(pending_) && newline) destination_->sputc('\n');
+        if (!suppressed && newline) destination_->sputc('\n');
         pending_.clear();
     }
 
