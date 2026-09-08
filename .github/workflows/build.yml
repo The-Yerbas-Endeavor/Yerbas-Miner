@@ -68,6 +68,89 @@ jobs:
           path: dist/yerbas-miner-linux-x86_64.tar.gz
           if-no-files-found: error
 
+  linux-cuda-x86_64:
+    name: Linux CUDA x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            git \
+            libboost-dev \
+            gcc-13 \
+            g++-13
+
+      - name: Install CUDA Toolkit 12.8.1
+        id: cuda-toolkit
+        timeout-minutes: 20
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.8.1'
+          method: local
+          sub-packages: '["nvcc", "cudart"]'
+
+      - name: Resolve and verify CUDA compiler
+        run: |
+          set -euxo pipefail
+          command -v nvcc
+          nvcc --version
+          gcc-13 --version
+          g++-13 --version
+
+      - name: Configure CUDA build
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: |
+          cmake -S . -B build-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYERBAS_ENABLE_CUDA=ON \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_CUDA_HOST_COMPILER=g++-13
+
+      - name: Verify CUDA configuration
+        run: |
+          set -euxo pipefail
+          test -f build-cuda/CMakeCache.txt
+          grep -E '^YERBAS_ENABLE_CUDA:BOOL=ON$' build-cuda/CMakeCache.txt
+          grep -E '^CMAKE_CUDA_COMPILER:FILEPATH=.*/nvcc$' build-cuda/CMakeCache.txt
+          grep -E '^CMAKE_CXX_COMPILER:FILEPATH=.*/g\+\+-13$' build-cuda/CMakeCache.txt
+
+      - name: Build CUDA miner only
+        run: cmake --build build-cuda --target yerbas-miner --parallel "$(nproc)"
+
+      - name: Verify CUDA binary
+        run: test -x build-cuda/yerbas-miner
+
+      - name: Package CUDA miner
+        run: |
+          mkdir -p dist/yerbas-miner-linux-cuda-x86_64
+          cp build-cuda/yerbas-miner dist/yerbas-miner-linux-cuda-x86_64/
+          cp README.md config.example.json dist/yerbas-miner-linux-cuda-x86_64/
+          cat > dist/yerbas-miner-linux-cuda-x86_64/CUDA-BUILD.txt <<'EOF'
+          This artifact was built with the NVIDIA CUDA backend compiled in.
+          CI verifies CUDA configuration before publishing this archive.
+          Requires a supported NVIDIA GPU and driver.
+          EOF
+          tar -C dist -czf dist/yerbas-miner-linux-cuda-x86_64.tar.gz yerbas-miner-linux-cuda-x86_64
+
+      - name: Upload CUDA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-linux-cuda-x86_64
+          path: dist/yerbas-miner-linux-cuda-x86_64.tar.gz
+          if-no-files-found: error
+
   linux-arm64:
     name: Linux ARM64
     runs-on: ubuntu-24.04-arm
