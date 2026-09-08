@@ -120,9 +120,6 @@ bool run_developer_fee_round(stratum::Client& client,
     bool mining_active = false;
 
     {
-        // Keep the compiled developer identity out of normal console output.
-        // Status messages for the fee controller use stdio directly while the
-        // Stratum client's iostream output is muted for this short session.
         ScopedIostreamSilence silence;
         std::thread runner([&]() {
             (void)client.run(session_stop);
@@ -182,9 +179,6 @@ bool run_developer_fee_round(stratum::Client& client,
                         break;
                     }
 
-                    // Long CUDA CryptoNight kernels can take several seconds.
-                    // Only treat the session as stalled after a generous gap
-                    // in real hash progress, not after one normal kernel.
                     if (now - last_progress >= kDevFeeHashStallLimit) break;
                 }
             }
@@ -260,20 +254,12 @@ void set_environment_value(const char* name, const char* value)
 
 void set_gpu_tune_environment(const std::string& mode)
 {
-    // Keep one authoritative user-facing policy while translating it to the
-    // legacy/internal CUDA controls used by the individual tuning layers.
     set_environment_value("YERBAS_GPU_TUNE_MODE", mode.c_str());
 
     if (mode == "full") {
-        // Fresh bounded GPU calibration plus fresh CryptoNight selectors,
-        // production geometry and stagger policy. Every CUDA cache loader that
-        // honors YERBAS_CUDA_RETUNE will be bypassed for this run.
         set_environment_value("YERBAS_GPU_AUTOTUNE", "1");
         set_environment_value("YERBAS_CUDA_RETUNE", "1");
     } else {
-        // Config is authoritative for production starts. Avoid inheriting a
-        // stale environment setting from a launcher/shell and accidentally
-        // turning auto/off into a full retune.
         set_environment_value("YERBAS_GPU_AUTOTUNE", "0");
         set_environment_value("YERBAS_CUDA_RETUNE", "0");
     }
@@ -380,7 +366,10 @@ int Miner::run()
         return 130;
     }
     stratum_client.print_connection_plan();
-    std::cout << "Developer fee: 1.67% | 60 seconds/hour | first round after 3 minutes\n";
+    if (config_.developer_fee)
+        std::cout << "Developer fee: 1.67% | 60 seconds/hour | first round after 3 minutes\n";
+    else
+        std::cout << "[TEST] Developer fee disabled by config\n";
 
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled) {
@@ -491,17 +480,18 @@ int Miner::run()
 
     const PoolConfig user_pool = config_.pool;
     const std::string user_worker = config_.miner.worker;
-    auto next_dev_round = std::chrono::steady_clock::now() + kDevFeeFirstDelay;
+    auto next_dev_round = config_.developer_fee
+        ? std::chrono::steady_clock::now() + kDevFeeFirstDelay
+        : std::chrono::steady_clock::time_point::max();
 
     while (!global_mining_stop_requested()) {
         if (!run_user_session_until(stratum_client, next_dev_round)) break;
         if (global_mining_stop_requested()) break;
+        if (!config_.developer_fee) continue;
 
         if (!run_developer_fee_round(stratum_client, user_pool, user_worker)) break;
         next_dev_round += kDevFeeInterval;
 
-        // Never stack missed fees. If the machine slept or a round took
-        // unusually long, advance to the next future hourly slot.
         const auto now = std::chrono::steady_clock::now();
         while (next_dev_round <= now) next_dev_round += kDevFeeInterval;
     }
