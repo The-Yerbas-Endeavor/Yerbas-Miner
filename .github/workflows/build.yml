@@ -123,8 +123,8 @@ jobs:
           set -euxo pipefail
           test -f build-cuda/CMakeCache.txt
           grep -E '^YERBAS_ENABLE_CUDA:BOOL=ON$' build-cuda/CMakeCache.txt
-          grep -E '^CMAKE_CUDA_COMPILER:FILEPATH=.*/nvcc$' build-cuda/CMakeCache.txt
-          grep -E '^CMAKE_CXX_COMPILER:FILEPATH=.*/g\+\+-13$' build-cuda/CMakeCache.txt
+          grep -E '^CMAKE_CUDA_COMPILER:[^=]+=.*/nvcc$' build-cuda/CMakeCache.txt
+          grep -E '^CMAKE_CXX_COMPILER:[^=]+=.*/g\+\+-13$' build-cuda/CMakeCache.txt
 
       - name: Build CUDA miner only
         run: cmake --build build-cuda --target yerbas-miner --parallel "$(nproc)"
