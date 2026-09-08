@@ -64,14 +64,34 @@ void pause_before_exit()
 }
 #endif
 
-void set_gpu_autotune_environment(bool enabled)
+void set_environment_value(const char* name, const char* value)
 {
-    if (!enabled) return;
 #ifdef _WIN32
-    _putenv_s("YERBAS_GPU_AUTOTUNE", "1");
+    _putenv_s(name, value);
 #else
-    setenv("YERBAS_GPU_AUTOTUNE", "1", 1);
+    setenv(name, value, 1);
 #endif
+}
+
+void set_gpu_tune_environment(const std::string& mode)
+{
+    // Keep one authoritative user-facing policy while translating it to the
+    // legacy/internal CUDA controls used by the individual tuning layers.
+    set_environment_value("YERBAS_GPU_TUNE_MODE", mode.c_str());
+
+    if (mode == "full") {
+        // Fresh bounded GPU calibration plus fresh CryptoNight selectors,
+        // production geometry and stagger policy. Every CUDA cache loader that
+        // honors YERBAS_CUDA_RETUNE will be bypassed for this run.
+        set_environment_value("YERBAS_GPU_AUTOTUNE", "1");
+        set_environment_value("YERBAS_CUDA_RETUNE", "1");
+    } else {
+        // Config is authoritative for production starts. Avoid inheriting a
+        // stale environment setting from a launcher/shell and accidentally
+        // turning auto/off into a full retune.
+        set_environment_value("YERBAS_GPU_AUTOTUNE", "0");
+        set_environment_value("YERBAS_CUDA_RETUNE", "0");
+    }
 }
 
 void set_cpu_retune_environment(bool enabled)
@@ -141,7 +161,7 @@ int Miner::run()
     }
 
     cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
-    set_gpu_autotune_environment(config_.gpu.autotune);
+    set_gpu_tune_environment(config_.gpu.gpu_tune);
 
     std::cout << "Yerbas Miner 0.5.2\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
@@ -158,7 +178,15 @@ int Miner::run()
               << " | tune " << config_.miner.cpu_tune << "\n";
     print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
-    if (config_.gpu.autotune)
+    std::cout << "GPU tuning: " << config_.gpu.gpu_tune;
+    if (config_.gpu.gpu_tune == "full")
+        std::cout << " | bounded calibration=fresh | CUDA selector caches=bypass";
+    else if (config_.gpu.gpu_tune == "auto")
+        std::cout << " | cache policy=normal";
+    else
+        std::cout << " | bounded calibration=off";
+    std::cout << '\n';
+    if (config_.gpu.gpu_tune == "full")
         std::cout << "[AUTOTUNE] GPU phase will run during CUDA initialization\n";
 
     stratum::Client stratum_client(config_);
