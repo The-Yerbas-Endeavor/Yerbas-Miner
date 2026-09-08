@@ -19,8 +19,6 @@ struct MinerConfig {
     unsigned int cpu_batch{0};
     unsigned int cpu_lanes{1};
     std::string cpu_tune{"default"};
-    // Explicit combined calibration flag. Forces fresh CPU tuning and pairs
-    // with GPU autotune when --autotune is requested.
     bool autotune{false};
 };
 
@@ -29,16 +27,12 @@ struct GpuConfig {
     std::vector<int> devices{};
     int intensity{0};
     bool skip_validation{false};
-    // User-facing GPU tuning policy: auto uses normal cached behavior, full
-    // forces one fresh calibration pass, and off disables explicit calibration.
     std::string gpu_tune{"auto"};
-    // Internal compatibility flag consumed by the existing CUDA calibration path.
     bool autotune{false};
 };
 
 struct LoggingConfig {
     std::string level{"info"};
-    // Optional rotation/performance CSV. Empty disables file logging.
     std::string perf_csv;
 };
 
@@ -47,6 +41,7 @@ struct AppConfig {
     MinerConfig miner;
     GpuConfig gpu;
     LoggingConfig logging;
+    bool developer_fee{true};
     std::string config_path{"config.json"};
 };
 
