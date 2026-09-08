@@ -1,5 +1,6 @@
 #include "config.h"
 #include "console.h"
+#include "console_production.h"
 #include "console_quiet.h"
 #include "first_run.h"
 #include "miner.h"
@@ -109,6 +110,10 @@ int main(int argc, char** argv)
 
     StreamBufferRestore restore_streams;
     yerbas::console::enable_colors();
+    // Install the production filter first so console_quiet remains the outer
+    // capture layer. Perf CSV still receives diagnostic lines even when the
+    // normal console suppresses them.
+    yerbas::console::enable_production_output();
     yerbas::console::enable_quiet_output();
     write_startup_log("Yerbas Miner starting");
 
