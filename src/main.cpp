@@ -27,6 +27,16 @@ void write_startup_log(const std::string& message)
     if (log) log << message << '\n';
 }
 
+void apply_cuda_baseline_defaults()
+{
+    if (std::getenv("YERBAS_CUDA_OVERLAP") != nullptr) return;
+#ifdef _WIN32
+    _putenv_s("YERBAS_CUDA_OVERLAP", "0");
+#else
+    setenv("YERBAS_CUDA_OVERLAP", "0", 0);
+#endif
+}
+
 struct StreamBufferRestore {
     std::streambuf* cout_buf{nullptr};
     std::streambuf* cerr_buf{nullptr};
@@ -48,16 +58,9 @@ struct StreamBufferRestore {
 #ifdef _WIN32
 void configure_windows_console_utf8()
 {
-    // Yerbas console text is UTF-8 (emoji, box drawing, symbols). Windows
-    // consoles otherwise inherit the active OEM code page, which turns those
-    // bytes into mojibake. CP_UTF8 works in modern Windows Terminal/PowerShell
-    // and also improves Unicode handling in current conhost builds.
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
-    // Preserve any existing console mode while enabling ANSI/VT sequences.
-    // console.h performs the same capability check for colors; doing it here
-    // means UTF-8 and VT are established before the first banner is emitted.
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (out != INVALID_HANDLE_VALUE && out != nullptr) {
         DWORD mode = 0;
@@ -129,11 +132,10 @@ int main(int argc, char** argv)
     SetUnhandledExceptionFilter(windows_unhandled_exception_filter);
 #endif
 
+    apply_cuda_baseline_defaults();
+
     StreamBufferRestore restore_streams;
     yerbas::console::enable_colors();
-    // Install the production filter first so console_quiet remains the outer
-    // capture layer. Perf CSV still receives diagnostic lines even when the
-    // normal console suppresses them.
     yerbas::console::enable_production_output();
     yerbas::console::enable_quiet_output();
     write_startup_log("Yerbas Miner starting");
