@@ -121,6 +121,27 @@ public:
     bool ready() const noexcept;
     int run(std::atomic_bool& stop_requested);
 
+    // Switch only the Stratum identity/endpoint. CUDA engines and CPU worker
+    // infrastructure remain owned by this Client and are not reinitialized.
+    void set_pool_session(const PoolConfig& pool, const std::string& worker)
+    {
+        config_.pool = pool;
+        config_.miner.worker = worker;
+        endpoint_ = parse_endpoint(config_.pool.url);
+    }
+
+    // Cross-thread scheduler snapshots used by the developer-fee controller.
+    bool session_mining_ready() const noexcept
+    {
+        return authorized_.load(std::memory_order_relaxed) &&
+               target_ready_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t hashes_done_snapshot() const noexcept
+    {
+        return hashes_done_.load(std::memory_order_relaxed);
+    }
+
 private:
     bool run_session(std::atomic_bool& stop_requested);
     bool pump_socket_messages(std::intptr_t socket_value, int wait_ms = 0);
@@ -152,13 +173,13 @@ private:
     AppConfig config_;
     Endpoint endpoint_;
     std::uint64_t received_jobs_{0};
-    std::uint64_t hashes_done_{0};
+    std::atomic<std::uint64_t> hashes_done_{0};
     std::uint64_t cpu_hashes_done_{0};
     std::uint64_t shares_submitted_{0};
     std::uint64_t shares_accepted_{0};
     std::uint64_t shares_rejected_{0};
     bool subscribed_{false};
-    bool authorized_{false};
+    std::atomic_bool authorized_{false};
 
     std::string extranonce1_;
     std::size_t extranonce2_size_{4};
@@ -167,7 +188,7 @@ private:
     MiningJob job_;
 
     std::array<std::uint8_t, 32> target_le_{};
-    bool target_ready_{false};
+    std::atomic_bool target_ready_{false};
     double difficulty_{0.0};
     std::array<std::uint8_t, 32> pending_target_le_{};
     bool pending_target_ready_{false};
