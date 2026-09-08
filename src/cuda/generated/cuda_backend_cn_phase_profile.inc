@@ -1,11 +1,12 @@
 // Production CryptoNight phase profiling plus generic runtime overlap scheduling.
 //
-// YERBAS_CUDA_OVERLAP=1 (or "auto") enables a conservative runtime scheduler.
-// After the existing lazy parity selectors are warm, the scheduler compares the
-// real active batch using single-stream, 33/67 and 50/50 two-stream execution.
-// A two-stream layout must beat single-stream by >=7% before promotion. Results
-// are cached by GPU runtime/batch/CN variant; no GPU model or architecture rule
-// participates in the decision.
+// The overlap scheduler is enabled by default for GPU tune auto/full and can be
+// disabled with YERBAS_CUDA_OVERLAP=0/off/false. YERBAS_CUDA_OVERLAP=1 (or
+// "auto") explicitly enables it. After the existing lazy parity selectors are
+// warm, the scheduler compares the real active batch using single-stream, 33/67
+// and 50/50 two-stream execution. A two-stream layout must beat single-stream by
+// >=7% before promotion. Results are cached by GPU runtime/batch/CN variant; no
+// GPU model or architecture rule participates in the decision.
 //
 // When YERBAS_DIAGNOSTICS is enabled, the first real production invocation of
 // each GPU/CryptoNight-variant pair bypasses overlap once and records a clean
@@ -36,9 +37,16 @@ inline bool cn_phase_diagnostics_enabled()
 inline bool cn_overlap_enabled()
 {
     const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
-    if (!value || !*value) return false;
-    const std::string v(value);
-    return v != "0" && v != "off" && v != "false";
+    if (value && *value) {
+        const std::string v(value);
+        return v != "0" && v != "off" && v != "false";
+    }
+
+    // gpu_tune=off is the explicit no-calibration/safe path. For auto/full,
+    // enable the generic production scheduler and let measured throughput decide
+    // whether single-stream or two-stream execution is actually faster.
+    const char* tune = std::getenv("YERBAS_GPU_TUNE_MODE");
+    return !(tune && std::string(tune) == "off");
 }
 
 inline cudaStream_t cn_overlap_stream(int device_id)
