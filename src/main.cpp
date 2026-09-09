@@ -1,6 +1,7 @@
 #include "config.h"
 #include "console.h"
 #include "console_quiet.h"
+#include "console_share_filter.h"
 #include "first_run.h"
 #include "miner.h"
 
@@ -135,11 +136,12 @@ int main(int argc, char** argv)
 
     StreamBufferRestore restore_streams;
     yerbas::console::enable_colors();
-    // Match the validated 8bd07d0 console path: a single quiet/perf capture
-    // streambuf around std::cout. The later nested production filter added a
-    // second per-character line buffer on the hot reporting path and made the
-    // terminal appear to freeze while workers continued hashing.
     yerbas::console::enable_quiet_output();
+    // Keep high-frequency submitted/accepted share chatter off the production
+    // terminal. The periodic status table already reports accepted/rejected
+    // totals, while rejects and block-found messages remain visible. Set
+    // YERBAS_VERBOSE_SHARES=1 to restore per-share output for diagnostics.
+    yerbas::console::enable_share_filter();
     write_startup_log("Yerbas Miner starting");
 
     std::cout << "\nYerbas Miner starting...\n"
