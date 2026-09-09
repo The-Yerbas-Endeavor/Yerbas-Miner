@@ -308,28 +308,42 @@ protected:
     int overflow(int ch) override
     {
         if (ch == traits_type::eof()) return traits_type::not_eof(ch);
+        auto& pending = thread_pending();
         const char c = static_cast<char>(ch);
-        if (c == '\n') emit(true);
-        else pending_.push_back(c);
+        if (c == '\n') emit(pending, true);
+        else pending.push_back(c);
         return ch;
     }
 
     std::streamsize xsputn(const char* s, std::streamsize count) override
     {
+        auto& pending = thread_pending();
         for (std::streamsize i = 0; i < count; ++i) {
-            if (s[i] == '\n') emit(true);
-            else pending_.push_back(s[i]);
+            if (s[i] == '\n') emit(pending, true);
+            else pending.push_back(s[i]);
         }
         return count;
     }
 
     int sync() override
     {
-        if (!pending_.empty()) emit(false);
+        auto& pending = thread_pending();
+        if (!pending.empty()) emit(pending, false);
+        std::lock_guard<std::mutex> lock(output_mutex_);
         return destination_->pubsync();
     }
 
 private:
+    static std::string& thread_pending()
+    {
+        // Mining, Stratum and status threads all write to std::cout. Assemble
+        // each thread's line independently, then serialize only complete lines.
+        // This preserves every user-facing share/status line without allowing
+        // concurrent fragments to corrupt the stream buffer.
+        static thread_local std::string pending;
+        return pending;
+    }
+
     static bool is_status_top(const std::string& line)
     {
         return strip_ansi(line).find("PROOF OF GRASS | STATUS UPDATE") != std::string::npos;
@@ -369,29 +383,31 @@ private:
         buffering_status_ = false;
     }
 
-    void emit(bool newline)
+    void emit(std::string& pending, bool newline)
     {
+        std::lock_guard<std::mutex> lock(output_mutex_);
+
         if (buffering_status_) {
-            status_lines_.push_back(pending_);
-            const bool bottom = is_status_bottom(pending_);
-            pending_.clear();
+            status_lines_.push_back(pending);
+            const bool bottom = is_status_bottom(pending);
+            pending.clear();
             if (bottom) flush_status_buffer();
             return;
         }
 
-        if (newline && is_status_top(pending_)) {
+        if (newline && is_status_top(pending)) {
             buffering_status_ = true;
-            status_lines_.push_back(pending_);
-            pending_.clear();
+            status_lines_.push_back(pending);
+            pending.clear();
             return;
         }
 
-        forward_line(pending_, newline);
-        pending_.clear();
+        forward_line(pending, newline);
+        pending.clear();
     }
 
     std::streambuf* destination_{nullptr};
-    std::string pending_;
+    std::mutex output_mutex_;
     bool buffering_status_{false};
     std::vector<std::string> status_lines_;
 };
