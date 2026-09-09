@@ -1,6 +1,5 @@
 #include "config.h"
 #include "console.h"
-#include "console_production.h"
 #include "console_quiet.h"
 #include "first_run.h"
 #include "miner.h"
@@ -136,7 +135,10 @@ int main(int argc, char** argv)
 
     StreamBufferRestore restore_streams;
     yerbas::console::enable_colors();
-    yerbas::console::enable_production_output();
+    // Match the validated 8bd07d0 console path: a single quiet/perf capture
+    // streambuf around std::cout. The later nested production filter added a
+    // second per-character line buffer on the hot reporting path and made the
+    // terminal appear to freeze while workers continued hashing.
     yerbas::console::enable_quiet_output();
     write_startup_log("Yerbas Miner starting");
 
