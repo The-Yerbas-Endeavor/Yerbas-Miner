@@ -360,8 +360,14 @@ bool gpu_calibration_parity(cudaStream_t stream,
 {
     baseline.batch = 2;
     candidate.batch = 2;
-    std::array<std::uint8_t, 2 * kStateBytes> a{};
-    std::array<std::uint8_t, 2 * kStateBytes> b{};
+    // Keep this parity buffer size local to the fast-start calibration path.
+    // Some nvcc configurations reject the TU-level anonymous-namespace
+    // kStateBytes constant as a std::array non-type template argument here,
+    // even though it is constexpr. A CryptoNight/GhostRider state is 64 bytes.
+    constexpr std::size_t kCalibrationStateBytes = 64U;
+    constexpr std::size_t kCalibrationParityBytes = 2U * kCalibrationStateBytes;
+    std::array<std::uint8_t, kCalibrationParityBytes> a{};
+    std::array<std::uint8_t, kCalibrationParityBytes> b{};
     (void)run_gpu_calibration_once(stream, d_job, d_nonces, states, scratchpads, contexts, job, baseline);
     check_cuda(cudaMemcpyAsync(a.data(), states, a.size(), cudaMemcpyDeviceToHost, stream),
                "GPU calibration baseline parity copy failed");
