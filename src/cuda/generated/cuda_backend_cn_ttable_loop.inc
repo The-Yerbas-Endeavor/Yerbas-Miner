@@ -144,7 +144,7 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // is exactly aw0 & (address_mask << 4). Keep the dependency path
             // in 32 bits and issue the scratchpad access from one mask instead
             // of shift + mask + widened multiply-by-16 address arithmetic.
-            aw0 = __shfl_sync(mask, aw, base);
+            aw0 = __shfl_sync(mask, aw, 0, 4);
             const std::uint32_t byte_offset = aw0 & byte_address_mask;
             slot = scratch + static_cast<std::size_t>(byte_offset);
             if (lane == 0U) aw1 = fast_aw1_shadow;
@@ -160,19 +160,18 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
         std::uint32_t cw = 0U;
         if constexpr (VariantIndex == 2) {
-            // Each lane owns one 32-bit AES input word. Perform all four shared
-            // T-table reads from that local word first, before any ShiftRows
-            // exchange. This exposes the independent table loads to the GPU
-            // together instead of serializing them behind three source-word
-            // shuffles. Then route the already-computed table contributions to
-            // the destination lane that consumes each ShiftRows byte.
+            // CN-Fast permanently assigns one hash to each 4-lane subgroup.
+            // Keep all four local T-table reads ahead of ShiftRows, then use
+            // native width-4 shuffles so source lanes are subgroup-relative.
+            // This removes repeated base+lane address arithmetic from the hot
+            // loop without changing the successful table-load ordering.
             const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
             const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
             const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
             const std::uint32_t q3_local = t3[static_cast<std::uint8_t>(own >> 24U)];
-            const std::uint32_t q1 = __shfl_sync(mask, q1_local, base + ((lane + 1U) & 3U));
-            const std::uint32_t q2 = __shfl_sync(mask, q2_local, base + ((lane + 2U) & 3U));
-            const std::uint32_t q3 = __shfl_sync(mask, q3_local, base + ((lane + 3U) & 3U));
+            const std::uint32_t q1 = __shfl_sync(mask, q1_local, (lane + 1U) & 3U, 4);
+            const std::uint32_t q2 = __shfl_sync(mask, q2_local, (lane + 2U) & 3U, 4);
+            const std::uint32_t q3 = __shfl_sync(mask, q3_local, (lane + 3U) & 3U, 4);
             cw = q0 ^ q1 ^ q2 ^ q3 ^ aw;
         } else {
             const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
@@ -202,7 +201,7 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // Same strength reduction for the second dependent access. c1 and
             // the remaining A words stay off the address path until slot2 has
             // already been issued.
-            c0 = __shfl_sync(mask, cw, base);
+            c0 = __shfl_sync(mask, cw, 0, 4);
             const std::uint32_t byte_offset = c0 & byte_address_mask;
             slot2 = scratch + static_cast<std::size_t>(byte_offset);
         } else {
@@ -221,13 +220,19 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // c1 is not part of either scratchpad address. Fetch it only after
             // slot2 has been issued so its shuffle latency stays off the memory
             // address path. aw1 comes from lane 0's carried shadow instead.
-            c1 = __shfl_sync(mask, cw, base + 1U);
+            c1 = __shfl_sync(mask, cw, 1, 4);
         } else {
             t0_lo = __shfl_sync(mask, t_word, base);
         }
-        const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
-        const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
-        const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
+        const std::uint32_t t0_hi = VariantIndex == 2
+            ? __shfl_sync(mask, t_word, 1, 4)
+            : __shfl_sync(mask, t_word, base + 1U);
+        const std::uint32_t old_a2 = VariantIndex == 2
+            ? __shfl_sync(mask, aw, 2, 4)
+            : __shfl_sync(mask, aw, base + 2U);
+        const std::uint32_t old_a3 = VariantIndex == 2
+            ? __shfl_sync(mask, aw, 3, 4)
+            : __shfl_sync(mask, aw, base + 3U);
 
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
@@ -254,10 +259,17 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                 fast_aw1_shadow = na0_hi ^ t0_hi;
             }
         }
-        na0_lo = __shfl_sync(mask, na0_lo, base);
-        na0_hi = __shfl_sync(mask, na0_hi, base);
-        na1_lo = __shfl_sync(mask, na1_lo, base);
-        na1_hi = __shfl_sync(mask, na1_hi, base);
+        if constexpr (VariantIndex == 2) {
+            na0_lo = __shfl_sync(mask, na0_lo, 0, 4);
+            na0_hi = __shfl_sync(mask, na0_hi, 0, 4);
+            na1_lo = __shfl_sync(mask, na1_lo, 0, 4);
+            na1_hi = __shfl_sync(mask, na1_hi, 0, 4);
+        } else {
+            na0_lo = __shfl_sync(mask, na0_lo, base);
+            na0_hi = __shfl_sync(mask, na0_hi, base);
+            na1_lo = __shfl_sync(mask, na1_lo, base);
+            na1_hi = __shfl_sync(mask, na1_hi, base);
+        }
 
         const std::uint32_t store_word = lane == 0U ? na0_lo :
                                          lane == 1U ? na0_hi :
