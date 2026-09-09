@@ -1,7 +1,6 @@
 #include "config.h"
 #include "console.h"
 #include "console_quiet.h"
-#include "console_share_filter.h"
 #include "first_run.h"
 #include "miner.h"
 
@@ -136,12 +135,10 @@ int main(int argc, char** argv)
 
     StreamBufferRestore restore_streams;
     yerbas::console::enable_colors();
+    // Keep the single validated quiet/performance streambuf only. Accepted share
+    // feedback is part of the normal miner UX and must remain visible in real time;
+    // do not add another filtering/locking streambuf in front of std::cout.
     yerbas::console::enable_quiet_output();
-    // Keep high-frequency submitted/accepted share chatter off the production
-    // terminal. The periodic status table already reports accepted/rejected
-    // totals, while rejects and block-found messages remain visible. Set
-    // YERBAS_VERBOSE_SHARES=1 to restore per-share output for diagnostics.
-    yerbas::console::enable_share_filter();
     write_startup_log("Yerbas Miner starting");
 
     std::cout << "\nYerbas Miner starting...\n"
