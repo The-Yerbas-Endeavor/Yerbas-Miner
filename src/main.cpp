@@ -33,6 +33,27 @@ bool cpu_runtime_learning_requested()
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+bool cuda_profile_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_PROFILE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+void enable_cuda_profile_diagnostics()
+{
+    if (!cuda_profile_requested()) return;
+
+    // The CUDA backend already has a one-shot production phase profiler behind
+    // YERBAS_DIAGNOSTICS. Expose a narrower operator-facing switch so profiling
+    // does not require remembering the implementation-level diagnostics flag.
+#ifdef _WIN32
+    _putenv_s("YERBAS_DIAGNOSTICS", "1");
+#else
+    setenv("YERBAS_DIAGNOSTICS", "1", 1);
+#endif
+    std::cout << "CUDA production profiler: enabled | one-shot setup/loop/final timing per GPU/CN variant\n";
+}
+
 struct StreamBufferRestore {
     std::streambuf* cout_buf{nullptr};
     std::streambuf* cerr_buf{nullptr};
@@ -136,6 +157,8 @@ int main(int argc, char** argv)
         // transient width/worker experiments seen in normal production logs.
         if (!cpu_runtime_learning_requested())
             yerbas::cpu::set_tuning_measurement_mode(true);
+
+        enable_cuda_profile_diagnostics();
 
         if (!config.logging.perf_csv.empty()) {
             yerbas::console::set_perf_csv_path(config.logging.perf_csv);
