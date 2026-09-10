@@ -27,7 +27,6 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                                        int kernel_max,
                                        std::size_t requested_batch,
                                        std::size_t capacity,
-                                       std::size_t scratchpad_budget_bytes,
                                        cudaStream_t stream,
                                        std::uint8_t* states,
                                        std::uint8_t* scratchpads,
@@ -46,12 +45,13 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
     baseline.core_threads = core_threads;
     baseline.cn_threads = warp;
 
-    // Calibrate against the arena actually allocated by BatchEngine rather than
-    // an artificial heavy-batch x 2MiB ceiling. This exposes memory-safe upward
-    // headroom on any CUDA device while the explicit byte-budget guard still
-    // prevents a candidate from exceeding the allocated scratchpad arena.
+    // BatchEngine derives capacity from its allocated scratchpad arena using the
+    // 256KiB class. Therefore capacity * 256KiB is always a safe lower bound for
+    // the bytes actually available to calibration. If capacity was constrained
+    // by another limit, this remains conservative rather than overcommitting.
     const std::size_t baseline_budget = baseline.batch * kGpuBatchClassPageBytes[0];
-    const std::size_t scratchpad_budget = std::max(baseline_budget, scratchpad_budget_bytes);
+    const std::size_t capacity_budget = capacity * kGpuBatchClassPageBytes[3];
+    const std::size_t scratchpad_budget = std::max(baseline_budget, capacity_budget);
 
     DeviceJob* d_job = nullptr;
     std::uint32_t* d_nonces = nullptr;
@@ -73,7 +73,7 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                   << " | metric=whole-GhostRider H/s"
                   << " | batch-search=down/nominal/up"
                   << " | thread-width-search=off"
-                  << " | safety=allocated-scratchpad-clamp\n";
+                  << " | safety=allocated-capacity-clamp\n";
 
         for (std::size_t cls = 0; cls < kGpuBatchClassCount; ++cls) {
             const std::size_t actual_page = gpu_calibration_job_max_page(jobs[cls]);
@@ -248,7 +248,6 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
 GpuTunePolicy build_gpu_tune_policy(int device_id,
                                     std::size_t requested_batch,
                                     std::size_t capacity,
-                                    std::size_t scratchpad_budget_bytes,
                                     cudaStream_t stream,
                                     std::uint8_t* states,
                                     std::uint8_t* scratchpads,
@@ -266,7 +265,7 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
 
     if (gpu_calibration_requested()) {
         return run_gpu_calibration_safe(device_id, props, kernel_max,
-                                        requested_batch, capacity, scratchpad_budget_bytes, stream,
+                                        requested_batch, capacity, stream,
                                         states, scratchpads, contexts);
     }
 
