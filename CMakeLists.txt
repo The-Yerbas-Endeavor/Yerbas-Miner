@@ -252,6 +252,22 @@ if(YERBAS_ENABLE_CUDA)
     enable_language(CUDA)
     set(YERBAS_CUDA_AVAILABLE ON)
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        execute_process(
+            COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libstdc++.so
+            OUTPUT_VARIABLE YERBAS_CXX_LIBSTDCXX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(YERBAS_CXX_LIBSTDCXX
+           AND IS_ABSOLUTE "${YERBAS_CXX_LIBSTDCXX}"
+           AND EXISTS "${YERBAS_CXX_LIBSTDCXX}")
+            get_filename_component(YERBAS_CXX_RUNTIME_DIR "${YERBAS_CXX_LIBSTDCXX}" DIRECTORY)
+            target_link_directories(yerbas-miner BEFORE PRIVATE "${YERBAS_CXX_RUNTIME_DIR}")
+            message(STATUS "Yerbas CUDA host link C++ runtime: ${YERBAS_CXX_RUNTIME_DIR}")
+        endif()
+    endif()
+
     if(DEFINED ENV{CI} AND NOT "$ENV{CI}" STREQUAL "" AND NOT "$ENV{CI}" STREQUAL "false")
         set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "52;60;61;70;75;80;86;89;90")
     else()
@@ -392,7 +408,7 @@ if(BUILD_TESTING)
             tests
             "${YERBAS_CUDA_GENERATED_DIR}"
             "${YERBAS_CORE_SRC}/crypto"
-            "${YERBAS_CORE_SRC}/cryptonight"
+            "${YERBAS_CORE_SRC}/cryptonote"
         )
         target_link_libraries(cuda-keccak-validation PRIVATE yerbas-ghostrider-reference)
         target_compile_options(cuda-keccak-validation PRIVATE
