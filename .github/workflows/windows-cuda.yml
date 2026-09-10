@@ -1,0 +1,123 @@
+name: Windows CUDA Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yerbas-miner-windows-cuda-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-cuda-x86_64:
+    name: Windows CUDA x86_64
+    runs-on: windows-2022
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit 12.8.1
+        id: cuda-toolkit
+        timeout-minutes: 20
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.8.1'
+          method: local
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
+      - name: Resolve and verify CUDA compiler
+        shell: pwsh
+        run: |
+          $candidates = @()
+          if ($env:CUDA_PATH) {
+            $candidates += (Join-Path $env:CUDA_PATH 'bin\nvcc.exe')
+          }
+          $candidates += 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe'
+          $candidates += 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8.1\bin\nvcc.exe'
+
+          $nvcc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $nvcc) { throw 'CUDA installer completed but nvcc.exe was not found' }
+
+          $cudaRoot = Split-Path (Split-Path $nvcc -Parent) -Parent
+          "CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CUDAToolkit_ROOT=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $cudaRoot 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nvcc --version
+
+      - name: Use balanced NVCC parallelism
+        shell: pwsh
+        run: |
+          $cmake = Get-Content CMakeLists.txt -Raw
+          $old = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)'
+          $new = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=2)'
+          if (-not $cmake.Contains($old)) { throw 'Could not locate YERBAS_NVCC_PARALLEL_FLAGS in CMakeLists.txt' }
+          $cmake.Replace($old, $new) | Set-Content CMakeLists.txt -NoNewline
+          Write-Host 'Windows CUDA CI: nvcc internal parallelism set to two workers.'
+
+      - name: Configure broad-compatible CUDA release
+        shell: pwsh
+        run: |
+          $nvcc = Join-Path $env:CUDA_PATH 'bin\nvcc.exe'
+          if (-not (Test-Path $nvcc)) { throw "nvcc missing before CMake: $nvcc" }
+
+          # Keep native code for the most common generations and one compute_52
+          # PTX fallback so the artifact is not tied to one test card/model.
+          $architectures = '52-virtual;61-real;75-real;86-real;89-real;90-real'
+          cmake -S . -B build-cuda -G "Visual Studio 17 2022" -A x64 `
+            -DYERBAS_ENABLE_CUDA=ON `
+            -DBUILD_TESTING=OFF `
+            "-DYERBAS_CUDA_ARCHITECTURES=$architectures" `
+            -DCMAKE_CUDA_COMPILER="$nvcc" `
+            -DCUDAToolkit_ROOT="$env:CUDA_PATH"
+
+      - name: Verify CUDA configuration
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build-cuda/yerbas-miner.vcxproj)) {
+            throw 'Yerbas CUDA miner project was not generated'
+          }
+          $cache = Get-Content build-cuda/CMakeCache.txt -Raw
+          if ($cache -notmatch 'YERBAS_CUDA_ARCHITECTURES:STRING=52-virtual;61-real;75-real;86-real;89-real;90-real') {
+            Write-Host $cache
+            throw 'Expected Windows CUDA architecture set was not configured'
+          }
+          Write-Host 'Confirmed CUDA release architecture set: PTX 5.2 + native 6.1/7.5/8.6/8.9/9.0'
+
+      - name: Build CUDA miner
+        shell: pwsh
+        run: cmake --build build-cuda --config Release --target yerbas-miner --parallel 1
+
+      - name: Package Windows CUDA miner
+        shell: pwsh
+        run: |
+          $exe = 'build-cuda/Release/yerbas-miner.exe'
+          if (-not (Test-Path $exe)) { throw 'CUDA miner executable not produced' }
+
+          $out = 'dist/yerbas-miner-windows-cuda-x86_64'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item $exe "$out/yerbas-miner.exe"
+          Copy-Item README.md "$out/README.md"
+          Copy-Item config.example.json "$out/config.example.json"
+          @'
+          Yerbas Miner Windows CUDA x86_64
+          CUDA Toolkit: 12.8.1
+          CUDA coverage: compute_52 PTX fallback + sm_61/sm_75/sm_86/sm_89/sm_90 native code
+          Build target: production yerbas-miner
+          '@ | Set-Content "$out/CUDA-BUILD.txt"
+          Compress-Archive -Path "$out/*" -DestinationPath 'dist/yerbas-miner-windows-cuda-x86_64.zip'
+          Get-FileHash 'dist/yerbas-miner-windows-cuda-x86_64.zip' -Algorithm SHA256 | Format-List
+
+      - name: Upload Windows CUDA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-windows-cuda-x86_64
+          path: dist/yerbas-miner-windows-cuda-x86_64.zip
+          if-no-files-found: error
+          retention-days: 30
