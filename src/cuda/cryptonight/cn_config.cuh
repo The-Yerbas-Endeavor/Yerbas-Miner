@@ -92,21 +92,24 @@ inline std::size_t adaptive_batch_from_budget(int device_id,
 
 } // namespace detail
 
-// Production auto batch remains deliberately conservative. This value is also
-// the batch size used by the existing CryptoNight tuning/cache keys.
+// Throughput-first production sizing. Keep a device-independent reserve for the
+// display/driver/runtime, but allow substantially more of the currently-free
+// VRAM and SM concurrency to participate in the heavy 2MiB CryptoNight class.
+// The live BatchEngine still applies its exact allocated-byte guard before any
+// job batch is launched, so this only widens the safe search space.
 inline std::size_t adaptive_batch_limit(int device_id)
 {
-    return detail::adaptive_batch_from_budget(device_id, 70U, 128U, 1024U);
+    return detail::adaptive_batch_from_budget(device_id, 82U, 192U, 1024U);
 }
 
-// Allocate modest headroom above the production batch so active-batch throughput
-// experiments can move upward without reallocating buffers or invalidating the
-// already-proven CryptoNight tuning. The extra capacity still caps scratchpad
-// use at roughly 80% of currently free VRAM and 160 hashes/SM.
+// Deep-tune capacity is intentionally wider than the initial production batch.
+// It is derived only from runtime memory/SM limits (never GPU names or compute
+// generations) and leaves an 8% free-VRAM reserve. Calibration/parity gates then
+// decide whether any of this headroom is actually worth using.
 inline std::size_t adaptive_batch_capacity(int device_id)
 {
     const std::size_t production = adaptive_batch_limit(device_id);
-    const std::size_t capacity = detail::adaptive_batch_from_budget(device_id, 80U, 160U, production);
+    const std::size_t capacity = detail::adaptive_batch_from_budget(device_id, 92U, 256U, production);
     return capacity < production ? production : capacity;
 }
 
