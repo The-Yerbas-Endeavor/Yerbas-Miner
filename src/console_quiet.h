@@ -308,40 +308,45 @@ protected:
     int overflow(int ch) override
     {
         if (ch == traits_type::eof()) return traits_type::not_eof(ch);
-        auto& pending = thread_pending();
+        auto& state = thread_state();
         const char c = static_cast<char>(ch);
-        if (c == '\n') emit(pending, true);
-        else pending.push_back(c);
+        if (c == '\n') emit(state, true);
+        else state.pending.push_back(c);
         return ch;
     }
 
     std::streamsize xsputn(const char* s, std::streamsize count) override
     {
-        auto& pending = thread_pending();
+        auto& state = thread_state();
         for (std::streamsize i = 0; i < count; ++i) {
-            if (s[i] == '\n') emit(pending, true);
-            else pending.push_back(s[i]);
+            if (s[i] == '\n') emit(state, true);
+            else state.pending.push_back(s[i]);
         }
         return count;
     }
 
     int sync() override
     {
-        auto& pending = thread_pending();
-        if (!pending.empty()) emit(pending, false);
+        auto& state = thread_state();
+        if (!state.pending.empty()) emit(state, false);
         std::lock_guard<std::mutex> lock(output_mutex_);
         return destination_->pubsync();
     }
 
 private:
-    static std::string& thread_pending()
+    struct ThreadState {
+        std::string pending;
+        bool buffering_status{false};
+        std::vector<std::string> status_lines;
+    };
+
+    static ThreadState& thread_state()
     {
-        // Mining, Stratum and status threads all write to std::cout. Assemble
-        // each thread's line independently, then serialize only complete lines.
-        // This preserves every user-facing share/status line without allowing
-        // concurrent fragments to corrupt the stream buffer.
-        static thread_local std::string pending;
-        return pending;
+        // Each producer owns its partial line and status snapshot. In particular,
+        // a status panel must never hold share/Stratum lines from other threads
+        // while the panel is being assembled.
+        static thread_local ThreadState state;
+        return state;
     }
 
     static bool is_status_top(const std::string& line)
@@ -365,10 +370,10 @@ private:
         if (!suppress && newline) destination_->sputc('\n');
     }
 
-    void flush_status_buffer()
+    void flush_status_buffer(ThreadState& state)
     {
         bool empty_snapshot = false;
-        for (const auto& line : status_lines_) {
+        for (const auto& line : state.status_lines) {
             const std::string clean = strip_ansi(line);
             if (clean.rfind("TOTAL", 0) == 0 && clean.find("0.00 H/s") != std::string::npos) {
                 empty_snapshot = true;
@@ -377,39 +382,37 @@ private:
         }
 
         if (!empty_snapshot) {
-            for (const auto& line : status_lines_) forward_line(line, true);
+            for (const auto& line : state.status_lines) forward_line(line, true);
         }
-        status_lines_.clear();
-        buffering_status_ = false;
+        state.status_lines.clear();
+        state.buffering_status = false;
     }
 
-    void emit(std::string& pending, bool newline)
+    void emit(ThreadState& state, bool newline)
     {
         std::lock_guard<std::mutex> lock(output_mutex_);
 
-        if (buffering_status_) {
-            status_lines_.push_back(pending);
-            const bool bottom = is_status_bottom(pending);
-            pending.clear();
-            if (bottom) flush_status_buffer();
+        if (state.buffering_status) {
+            state.status_lines.push_back(state.pending);
+            const bool bottom = is_status_bottom(state.pending);
+            state.pending.clear();
+            if (bottom) flush_status_buffer(state);
             return;
         }
 
-        if (newline && is_status_top(pending)) {
-            buffering_status_ = true;
-            status_lines_.push_back(pending);
-            pending.clear();
+        if (newline && is_status_top(state.pending)) {
+            state.buffering_status = true;
+            state.status_lines.push_back(state.pending);
+            state.pending.clear();
             return;
         }
 
-        forward_line(pending, newline);
-        pending.clear();
+        forward_line(state.pending, newline);
+        state.pending.clear();
     }
 
     std::streambuf* destination_{nullptr};
     std::mutex output_mutex_;
-    bool buffering_status_{false};
-    std::vector<std::string> status_lines_;
 };
 
 } // namespace quiet_detail
