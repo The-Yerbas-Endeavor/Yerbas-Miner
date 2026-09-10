@@ -174,6 +174,12 @@ void save_cn_production_geometry_cache(int device_id,
     } catch (...) {}
 }
 
+bool cn_production_geometry_retune_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_RETUNE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 template <std::uint8_t VariantIndex>
 void initialize_cn_production_geometry(int device_id,
                                        const cudaDeviceProp& props,
@@ -192,6 +198,27 @@ void initialize_cn_production_geometry(int device_id,
     state.count = count;
     state.mode = mode;
     state.baseline_threads = baseline_threads;
+
+    // Normal auto/off production must never benchmark real mining batches.
+    // Use the hardened selector's baseline immediately when no exact geometry
+    // cache exists. Full/retune mode remains the only path that may run the
+    // synchronous production geometry sampler and write a new cache.
+    if (!cn_production_geometry_retune_requested()) {
+        int selected_threads = baseline_threads;
+        if (!cn_geometry_threads_valid_variant<VariantIndex>(mode, selected_threads, props)) {
+            for (const int candidate : {128, 64, 32}) {
+                if (cn_geometry_threads_valid_variant<VariantIndex>(mode, candidate, props)) {
+                    selected_threads = candidate;
+                    break;
+                }
+            }
+        }
+        state.selected = true;
+        state.candidate_count = 1;
+        state.threads[0] = selected_threads;
+        g_cn_hardened_threads[device_id][VariantIndex] = selected_threads;
+        return;
+    }
 
     const auto add = [&](int threads) {
         if (!cn_geometry_threads_valid_variant<VariantIndex>(mode, threads, props)) return;
