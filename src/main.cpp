@@ -108,10 +108,10 @@ int main(int argc, char** argv)
 #endif
 
     StreamBufferRestore restore_streams;
-    yerbas::console::enable_colors();
-    // Keep normal console output on the direct color stream. The quiet-output
-    // wrapper buffers complete lines/status snapshots and can make live mining
-    // output appear seconds behind under concurrent CPU/GPU/Stratum activity.
+    // Normal mining output must stay on the native std::cout/std::cerr buffers.
+    // Both console streambuf wrappers assemble/inspect complete lines, and the
+    // enhanced color/status wrapper also performs synchronous telemetry work.
+    // Keeping them off the hot console path restores immediate terminal output.
     write_startup_log("Yerbas Miner starting");
 
     std::cout << "\nYerbas Miner starting...\n"
