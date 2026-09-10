@@ -27,6 +27,7 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                                        int kernel_max,
                                        std::size_t requested_batch,
                                        std::size_t capacity,
+                                       std::size_t scratchpad_budget_bytes,
                                        cudaStream_t stream,
                                        std::uint8_t* states,
                                        std::uint8_t* scratchpads,
@@ -45,7 +46,12 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
     baseline.core_threads = core_threads;
     baseline.cn_threads = warp;
 
-    const std::size_t scratchpad_budget = baseline.batch * kGpuBatchClassPageBytes[0];
+    // Calibrate against the arena actually allocated by BatchEngine rather than
+    // an artificial heavy-batch x 2MiB ceiling. This exposes memory-safe upward
+    // headroom on any CUDA device while the explicit byte-budget guard still
+    // prevents a candidate from exceeding the allocated scratchpad arena.
+    const std::size_t baseline_budget = baseline.batch * kGpuBatchClassPageBytes[0];
+    const std::size_t scratchpad_budget = std::max(baseline_budget, scratchpad_budget_bytes);
 
     DeviceJob* d_job = nullptr;
     std::uint32_t* d_nonces = nullptr;
@@ -59,14 +65,15 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
         std::array<std::size_t, kGpuBatchClassCount> class_batches{};
         std::array<double, kGpuBatchClassCount> class_hps{};
         constexpr unsigned int total_measurements =
-            static_cast<unsigned int>(kGpuBatchClassCount * 2U);
+            static_cast<unsigned int>(kGpuBatchClassCount * 3U);
         unsigned int progress = 0U;
 
         std::cout << "[GPU " << device_id << "] GPU scratchpad-class autotune starting"
                   << " | classes=4 | measurements<=" << total_measurements
                   << " | metric=whole-GhostRider H/s"
+                  << " | batch-search=down/nominal/up"
                   << " | thread-width-search=off"
-                  << " | safety=actual-scratchpad-clamp\n";
+                  << " | safety=allocated-scratchpad-clamp\n";
 
         for (std::size_t cls = 0; cls < kGpuBatchClassCount; ++cls) {
             const std::size_t actual_page = gpu_calibration_job_max_page(jobs[cls]);
@@ -76,24 +83,21 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
             // contains a heavier fallback job. Never run that heavier job with
             // the lighter class batch. Inherit the previous heavier result.
             if (actual_cls != cls) {
-                ++progress;
                 const std::size_t inherited = cls == 0U
                     ? baseline.batch
                     : class_batches[cls - 1U];
                 class_batches[cls] = inherited;
                 class_hps[cls] = cls == 0U ? 0.0 : class_hps[cls - 1U];
-                std::cout << "[GPU " << device_id << "] GPU autotune "
-                          << progress << '/' << total_measurements
-                          << " | class=" << kGpuBatchClassNames[cls]
-                          << " | representative unavailable"
-                          << " | actual-class=" << kGpuBatchClassNames[actual_cls]
-                          << " | CN=" << gpu_calibration_cn_summary(jobs[cls])
-                          << " | inherit-safe-batch=" << inherited << '\n';
-                ++progress;
-                std::cout << "[GPU " << device_id << "] GPU autotune "
-                          << progress << '/' << total_measurements
-                          << " | class=" << kGpuBatchClassNames[cls]
-                          << " | measurement skipped safely\n";
+                for (int skipped = 0; skipped < 3; ++skipped) {
+                    ++progress;
+                    std::cout << "[GPU " << device_id << "] GPU autotune "
+                              << progress << '/' << total_measurements
+                              << " | class=" << kGpuBatchClassNames[cls]
+                              << " | representative unavailable"
+                              << " | actual-class=" << kGpuBatchClassNames[actual_cls]
+                              << " | inherit-safe-batch=" << inherited
+                              << " | measurement skipped safely\n";
+                }
                 continue;
             }
 
@@ -106,6 +110,9 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
             nominal = gpu_align_batch(nominal, capacity, quantum);
             const std::size_t reduced = gpu_align_batch(
                 std::min(max_safe_batch, (nominal * 7U) / 8U), capacity, quantum);
+            const std::size_t increased = gpu_align_batch(
+                std::min(max_safe_batch, nominal + std::max<std::size_t>(quantum, nominal / 8U)),
+                capacity, quantum);
 
             GpuCalibrationShape best = baseline;
             best.batch = nominal;
@@ -125,19 +132,22 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                       << " done | " << best_hps << " H/s | best="
                       << best_hps << " H/s" << std::defaultfloat << '\n';
 
-            ++progress;
-            if (reduced == nominal) {
-                std::cout << "[GPU " << device_id << "] GPU autotune "
-                          << progress << '/' << total_measurements
-                          << " | class=" << kGpuBatchClassNames[cls]
-                          << " | reduced candidate duplicates nominal | skipped\n";
-            } else {
+            const auto try_candidate = [&](std::size_t candidate_batch, const char* label) {
+                ++progress;
+                if (candidate_batch == nominal) {
+                    std::cout << "[GPU " << device_id << "] GPU autotune "
+                              << progress << '/' << total_measurements
+                              << " | class=" << kGpuBatchClassNames[cls]
+                              << " | " << label << " candidate duplicates nominal | skipped\n";
+                    return;
+                }
                 GpuCalibrationShape candidate = baseline;
-                candidate.batch = reduced;
+                candidate.batch = candidate_batch;
                 std::cout << "[GPU " << device_id << "] GPU autotune "
                           << progress << '/' << total_measurements
                           << " | class=" << kGpuBatchClassNames[cls]
-                          << " | batch=" << reduced << " | testing..." << std::flush;
+                          << " | candidate=" << label
+                          << " | batch=" << candidate_batch << " | testing..." << std::flush;
                 const double hps = gpu_calibration_hps(
                     stream, d_job, d_nonces, states, scratchpads, contexts,
                     jobs[cls], candidate);
@@ -149,13 +159,16 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                           << " | gain=" << (gain_pct >= 0.0 ? "+" : "")
                           << gain_pct << '%'
                           << " | gate=+1.00% | "
-                          << (wins ? "NEW BEST" : "keep nominal")
+                          << (wins ? "NEW BEST" : "keep best")
                           << std::defaultfloat << '\n';
                 if (wins) {
                     best = candidate;
                     best_hps = hps;
                 }
-            }
+            };
+
+            try_candidate(reduced, "down");
+            try_candidate(increased, "up");
 
             class_batches[cls] = best.batch;
             class_hps[cls] = best_hps;
@@ -235,6 +248,7 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
 GpuTunePolicy build_gpu_tune_policy(int device_id,
                                     std::size_t requested_batch,
                                     std::size_t capacity,
+                                    std::size_t scratchpad_budget_bytes,
                                     cudaStream_t stream,
                                     std::uint8_t* states,
                                     std::uint8_t* scratchpads,
@@ -252,7 +266,7 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
 
     if (gpu_calibration_requested()) {
         return run_gpu_calibration_safe(device_id, props, kernel_max,
-                                        requested_batch, capacity, stream,
+                                        requested_batch, capacity, scratchpad_budget_bytes, stream,
                                         states, scratchpads, contexts);
     }
 
