@@ -1,6 +1,7 @@
 #include "config.h"
 #include "console.h"
 #include "console_quiet.h"
+#include "cpu/cpu_worker_pool.h"
 #include "first_run.h"
 #include "miner.h"
 
@@ -24,6 +25,12 @@ void write_startup_log(const std::string& message)
 {
     std::ofstream log("yerbas-miner-startup.log", std::ios::app);
     if (log) log << message << '\n';
+}
+
+bool cpu_runtime_learning_requested()
+{
+    const char* value = std::getenv("YERBAS_CPU_RUNTIME_LEARN");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
 struct StreamBufferRestore {
@@ -121,6 +128,15 @@ int main(int argc, char** argv)
     try {
         auto config = yerbas::load_config(argc, argv);
         yerbas::first_run::apply(config);
+
+        // The startup autotuner has already selected the production worker count,
+        // lane grouping and per-CryptoNight widths. Do not spend live mining time
+        // re-probing those choices rotation-by-rotation unless explicitly asked.
+        // This keeps all configured workers on productive hashes and avoids the
+        // transient width/worker experiments seen in normal production logs.
+        if (!cpu_runtime_learning_requested())
+            yerbas::cpu::set_tuning_measurement_mode(true);
+
         if (!config.logging.perf_csv.empty()) {
             yerbas::console::set_perf_csv_path(config.logging.perf_csv);
             std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
