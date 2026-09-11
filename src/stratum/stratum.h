@@ -15,6 +15,7 @@
 
 #include "config.h"
 #include "cpu/cpu_worker_pool.h"
+#include "stratum/rotation_telemetry.h"
 
 #ifdef YERBAS_HAS_CUDA
 #include "cuda/cuda_backend.h"
@@ -239,10 +240,10 @@ private:
     mutable double dev_fee_mined_seconds_{0.0};
     mutable std::chrono::steady_clock::time_point dev_fee_last_tick_{};
 
-    std::uint64_t active_rotation_fingerprint_{0};
+    RotationFingerprint active_rotation_fingerprint_{};
     std::chrono::steady_clock::time_point rotation_started_{};
-    std::uint64_t rotation_hashes_done_{0};
-    std::uint64_t rotation_cpu_hashes_done_{0};
+    RotationHashCounter rotation_hashes_done_{RotationHashCounter::Kind::Total};
+    RotationHashCounter rotation_cpu_hashes_done_{RotationHashCounter::Kind::Cpu};
 
 #ifdef YERBAS_HAS_CUDA
     struct GpuScanState {
