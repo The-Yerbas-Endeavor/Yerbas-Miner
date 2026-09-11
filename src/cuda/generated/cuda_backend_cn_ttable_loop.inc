@@ -16,8 +16,8 @@ namespace {
 
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
-                                               std::uint8_t* scratchpads,
-                                               const cryptonight::SplitContext* contexts)
+                                               std::uint8_t* __restrict__ scratchpads,
+                                               const cryptonight::SplitContext* __restrict__ contexts)
 {
     __shared__ std::uint32_t tables[1024];
     cryptonight::init_shared_aes_ttables(tables);
@@ -94,8 +94,8 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
 
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
-                                                         std::uint8_t* scratchpads,
-                                                         const cryptonight::SplitContext* contexts)
+                                                         std::uint8_t* __restrict__ scratchpads,
+                                                         const cryptonight::SplitContext* __restrict__ contexts)
 {
     __shared__ std::uint32_t tables[1024];
     cryptonight::init_shared_aes_ttables(tables);
