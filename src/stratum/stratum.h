@@ -126,14 +126,54 @@ private:
     bool pump_socket_messages(std::intptr_t socket_value, int wait_ms = 0);
     void handle_message(const std::string& line);
     std::string login_user() const;
+
+    // Start the fee switch at minute 3 of each hour, but do not count pool
+    // connect/authorize/job setup toward the one-minute fee. The 60-second
+    // clock advances only while the dev-fee session is authorized and has a
+    // valid target/job, so reconnect downtime cannot shorten the fee window.
     bool dev_fee_active(std::chrono::steady_clock::time_point mining_started) const
     {
         if (!config_.miner.developer_fee || mining_started.time_since_epoch().count() == 0) return false;
-        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - mining_started).count();
-        if (elapsed < 0) return false;
-        const auto second_in_hour = static_cast<std::uint64_t>(elapsed) % 3600ULL;
-        return second_in_hour >= 180ULL && second_in_hour < 240ULL;
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - mining_started).count();
+        if (elapsed_seconds < 0) return false;
+
+        const std::int64_t cycle = elapsed_seconds / 3600;
+        const std::int64_t cycle_second = elapsed_seconds % 3600;
+
+        if (!dev_fee_session_active_) {
+            if (cycle_second < 180 || cycle <= dev_fee_completed_cycle_) return false;
+            dev_fee_session_active_ = true;
+            dev_fee_active_cycle_ = cycle;
+            dev_fee_clock_started_ = false;
+            dev_fee_mined_seconds_ = 0.0;
+            dev_fee_last_tick_ = now;
+            return true;
+        }
+
+        if (dev_fee_clock_started_) {
+            const double delta = std::chrono::duration<double>(now - dev_fee_last_tick_).count();
+            if (authorized_ && job_.valid && target_ready_ && delta > 0.0)
+                dev_fee_mined_seconds_ += delta;
+        }
+        dev_fee_last_tick_ = now;
+
+        if (!dev_fee_clock_started_ && authorized_ && job_.valid && target_ready_) {
+            dev_fee_clock_started_ = true;
+            dev_fee_last_tick_ = now;
+        }
+
+        if (dev_fee_clock_started_ && dev_fee_mined_seconds_ >= 60.0) {
+            dev_fee_session_active_ = false;
+            dev_fee_clock_started_ = false;
+            dev_fee_completed_cycle_ = dev_fee_active_cycle_;
+            dev_fee_active_cycle_ = -1;
+            dev_fee_mined_seconds_ = 0.0;
+            return false;
+        }
+
+        return true;
     }
 
     bool build_header(std::array<std::uint8_t, 80>& header,
@@ -189,6 +229,15 @@ private:
     std::chrono::steady_clock::time_point last_report_{};
     std::uint64_t hashes_at_last_report_{0};
     std::uint64_t cpu_hashes_at_last_report_{0};
+
+    // Mutable because dev_fee_active() is queried from const scheduling paths.
+    // These fields track actual authorized/job-ready dev-fee mining time.
+    mutable bool dev_fee_session_active_{false};
+    mutable bool dev_fee_clock_started_{false};
+    mutable std::int64_t dev_fee_active_cycle_{-1};
+    mutable std::int64_t dev_fee_completed_cycle_{-1};
+    mutable double dev_fee_mined_seconds_{0.0};
+    mutable std::chrono::steady_clock::time_point dev_fee_last_tick_{};
 
     std::uint64_t active_rotation_fingerprint_{0};
     std::chrono::steady_clock::time_point rotation_started_{};
