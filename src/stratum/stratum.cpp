@@ -61,10 +61,33 @@ constexpr const char* kBlockColor = "\x1b[1;30;103m";
 constexpr const char* kGrassColor = "\x1b[1;92m";
 constexpr const char* kColorReset = "\x1b[0m";
 
+// Yerbas-Miner developer fee schedule. The miner switches the existing mining
+// client to the Yerbas pool at minute 3 for one minute of every hour, then
+// returns to the user's configured pool. GPU engines stay resident; only the
+// Stratum session is switched, so there is no hourly CUDA reinitialization.
+constexpr const char* kDevFeePoolUrl = "stratum+tcp://pool.yerbas.org:3333";
+constexpr const char* kDevFeeAddress = "yYoUt7DosfK6CB4XzLuZSf43auMZFfFFxY";
+constexpr std::uint64_t kDevFeePeriodSeconds = 60ULL * 60ULL;
+constexpr std::uint64_t kDevFeeStartSeconds = 3ULL * 60ULL;
+constexpr std::uint64_t kDevFeeDurationSeconds = 60ULL;
+
 std::unordered_map<int, std::string> g_pending_share_sources;
 std::unordered_map<std::string, std::uint64_t> g_source_accepted;
 std::mutex g_pending_share_sources_mutex;
 std::uint64_t g_blocks_found = 0;
+bool g_dev_fee_switch_requested = false;
+std::string g_active_login_user;
+
+bool dev_fee_active(std::chrono::steady_clock::time_point mining_started)
+{
+    if (mining_started.time_since_epoch().count() == 0) return false;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - mining_started).count();
+    if (elapsed < 0) return false;
+    const auto second_in_hour = static_cast<std::uint64_t>(elapsed) % kDevFeePeriodSeconds;
+    return second_in_hour >= kDevFeeStartSeconds &&
+           second_in_hour < kDevFeeStartSeconds + kDevFeeDurationSeconds;
+}
 
 std::string timestamp()
 {
@@ -385,6 +408,8 @@ int Client::run(std::atomic_bool& stop_requested)
     last_report_ = mining_started_;
     hashes_at_last_report_ = hashes_done_;
     cpu_hashes_at_last_report_ = cpu_hashes_done_;
+    g_dev_fee_switch_requested = false;
+    g_active_login_user.clear();
 #ifdef YERBAS_HAS_CUDA
     if (config_.gpu.enabled && !gpu_workers_.empty() && !gpu_pipeline_ready_) {
         std::cout << "[GPU] Devices detected, but full GhostRider CUDA pipeline is not ready yet.\n";
@@ -399,11 +424,16 @@ int Client::run(std::atomic_bool& stop_requested)
         return 3;
 #endif
     }
+    std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | " << kDevFeeAddress << '\n';
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
         try { if (run_session(stop_requested)) break; }
         catch (const std::exception& e) { std::cerr << "[stratum] " << e.what() << '\n'; }
         if (!stop_requested.load()) {
+            if (g_dev_fee_switch_requested) {
+                g_dev_fee_switch_requested = false;
+                continue;
+            }
             std::cout << "[stratum] Reconnecting in 5 seconds...\n";
             for (int i = 0; i < 50 && !stop_requested.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -433,16 +463,41 @@ bool Client::run_session(std::atomic_bool& stop_requested)
 #ifdef YERBAS_HAS_CUDA
     gpu_job_loaded_ = false;
 #endif
-    std::cout << "[stratum] Connecting to " << endpoint_.host << ':' << endpoint_.port << "...\n";
-    SocketHandle socket_handle = connect_tcp(endpoint_);
+
+    const bool session_dev_fee = dev_fee_active(mining_started_);
+    const Endpoint session_endpoint = session_dev_fee ? parse_endpoint(kDevFeePoolUrl) : endpoint_;
+    g_active_login_user = session_dev_fee ? std::string(kDevFeeAddress) : login_user();
+
+    if (session_dev_fee)
+        std::cout << timestamp() << "[DEV FEE] active for one minute | pool=" << session_endpoint.host << ':' << session_endpoint.port
+                  << " | address=" << kDevFeeAddress << '\n';
+    else
+        std::cout << timestamp() << "[DEV FEE] inactive | mining to configured user pool\n";
+
+    std::cout << "[stratum] Connecting to " << session_endpoint.host << ':' << session_endpoint.port << "...\n";
+    SocketHandle socket_handle = connect_tcp(session_endpoint);
     std::cout << "[stratum] Connected\n";
     const nlohmann::json subscribe = {{"id",1},{"method","mining.subscribe"},{"params",nlohmann::json::array({"Yerbas-Miner/0.5.2"})}};
-    const nlohmann::json authorize = {{"id",2},{"method","mining.authorize"},{"params",nlohmann::json::array({login_user(),config_.pool.password})}};
+    const nlohmann::json authorize = {{"id",2},{"method","mining.authorize"},{"params",nlohmann::json::array({g_active_login_user,config_.pool.password})}};
     if (!send_all(socket_handle, json_line(subscribe)) || !send_all(socket_handle, json_line(authorize))) {
         close_socket(socket_handle);
         throw std::runtime_error("Failed to send Stratum subscribe/authorize requests");
     }
     while (!stop_requested.load()) {
+        const bool dev_fee_now = dev_fee_active(mining_started_);
+        if (dev_fee_now != session_dev_fee) {
+#ifdef YERBAS_HAS_CUDA
+            if (gpu_pipeline_ready_) drain_gpu_scans();
+#endif
+            close_socket(socket_handle);
+            g_dev_fee_switch_requested = true;
+            if (dev_fee_now)
+                std::cout << timestamp() << "[DEV FEE] window started | switching to pool.yerbas.org:3333\n";
+            else
+                std::cout << timestamp() << "[DEV FEE] window complete | returning to configured user pool\n";
+            return false;
+        }
+
         if (!pump_socket_messages(static_cast<std::intptr_t>(socket_handle), job_.valid ? 0 : 250)) {
             close_socket(socket_handle);
             std::cout << "[stratum] Connection closed by pool\n";
@@ -514,7 +569,7 @@ void Client::handle_message(const std::string& line)
             } else std::cerr << "[stratum] Subscription rejected: " << message.dump() << '\n';
         } else if (id == 2) {
             const bool ok = message.contains("result") && message["result"].is_boolean() && message["result"].get<bool>();
-            if (ok && error.is_null()) { authorized_ = true; std::cout << "[stratum] Authorization accepted as " << login_user() << '\n'; }
+            if (ok && error.is_null()) { authorized_ = true; std::cout << "[stratum] Authorization accepted as " << g_active_login_user << '\n'; }
             else std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
         } else if (id >= 1000) {
             bool result_ok = false;
@@ -1103,13 +1158,14 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
 
     const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
     const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
-    const nlohmann::json submit = {{"id",request_id},{"method","mining.submit"},{"params",nlohmann::json::array({login_user(),job_.job_id,extranonce2_hex,job_.ntime,nonce_hex(nonce)})}};
+    const nlohmann::json submit = {{"id",request_id},{"method","mining.submit"},{"params",nlohmann::json::array({g_active_login_user,job_.job_id,extranonce2_hex,job_.ntime,nonce_hex(nonce)})}};
     if (!send_all(socket_handle, json_line(submit))) { std::cerr << "[share] Failed to send candidate share\n"; return false; }
     { std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex); g_pending_share_sources[request_id] = source; }
     ++shares_submitted_;
     std::cout << timestamp() << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << " #" << shares_submitted_
               << " SRC: " << source_color(source) << source << kColorReset << " | job=" << job_.job_id
-              << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce) << '\n';
+              << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce)
+              << (g_active_login_user == kDevFeeAddress ? " | DEV FEE" : "") << '\n';
     return true;
 }
 
