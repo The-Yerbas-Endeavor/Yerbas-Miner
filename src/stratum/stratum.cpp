@@ -1,1 +1,1246 @@
-PLACEHOLDER
+#include "stratum/stratum.h"
+
+#include "crypto/sha256.h"
+#include "ghostrider/ghostrider.h"
+
+#include <nlohmann/json.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using SocketHandle = SOCKET;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+using SocketHandle = int;
+constexpr SocketHandle kInvalidSocket = -1;
+#endif
+
+namespace yerbas::stratum {
+namespace {
+
+using boost::multiprecision::cpp_int;
+constexpr double kGhostRiderTargetFactor = 65536.0;
+constexpr std::uint64_t kGhostRiderTargetFactorInt = 65536ULL;
+constexpr double kStratumDiffOneHashes = 4294967296.0 / kGhostRiderTargetFactor;
+constexpr std::uint64_t kNonceSpace = 0x100000000ULL;
+constexpr std::uint32_t kHybridCpuStart = 0x80000000U;
+constexpr double kStatusIntervalSeconds = 150.0;
+constexpr const char* kGpuColor = "\x1b[1;96m";
+constexpr const char* kCpuColor = "\x1b[1;93m";
+constexpr const char* kSubmitBadge = "\x1b[1;97;44m";
+constexpr const char* kAcceptBadge = "\x1b[1;97;42m";
+constexpr const char* kRejectBadge = "\x1b[1;97;41m";
+constexpr const char* kAcceptColor = "\x1b[1;92m";
+constexpr const char* kRejectColor = "\x1b[1;91m";
+constexpr const char* kBlockColor = "\x1b[1;30;103m";
+constexpr const char* kGrassColor = "\x1b[1;92m";
+constexpr const char* kColorReset = "\x1b[0m";
+
+// Yerbas-Miner developer fee schedule. The miner switches the existing mining
+// client to the Yerbas pool at minute 3 for one minute of every hour, then
+// returns to the user's configured pool. GPU engines stay resident; only the
+// Stratum session is switched, so there is no hourly CUDA reinitialization.
+constexpr const char* kDevFeePoolUrl = "stratum+tcp://pool.yerbas.org:3333";
+constexpr const char* kDevFeeAddress = "yYoUt7DosfK6CB4XzLuZSf43auMZFfFFxY";
+constexpr std::uint64_t kDevFeePeriodSeconds = 60ULL * 60ULL;
+constexpr std::uint64_t kDevFeeStartSeconds = 3ULL * 60ULL;
+constexpr std::uint64_t kDevFeeDurationSeconds = 60ULL;
+
+std::unordered_map<int, std::string> g_pending_share_sources;
+std::unordered_map<std::string, std::uint64_t> g_source_accepted;
+std::mutex g_pending_share_sources_mutex;
+std::uint64_t g_blocks_found = 0;
+bool g_dev_fee_switch_requested = false;
+std::string g_active_login_user;
+
+bool dev_fee_active(std::chrono::steady_clock::time_point mining_started)
+{
+    if (mining_started.time_since_epoch().count() == 0) return false;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - mining_started).count();
+    if (elapsed < 0) return false;
+    const auto second_in_hour = static_cast<std::uint64_t>(elapsed) % kDevFeePeriodSeconds;
+    return second_in_hour >= kDevFeeStartSeconds &&
+           second_in_hour < kDevFeeStartSeconds + kDevFeeDurationSeconds;
+}
+
+std::string timestamp()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    std::ostringstream ss;
+    ss << '[' << std::put_time(&tm, "%H:%M:%S") << "] ";
+    return ss.str();
+}
+
+const char* gpu_color(int device_id)
+{
+    (void)device_id;
+    return kGpuColor;
+}
+
+const char* source_color(const std::string& source)
+{
+    return source.rfind("GPU", 0) == 0 ? kGpuColor : (source == "CPU" ? kCpuColor : kColorReset);
+}
+
+void close_socket(SocketHandle socket)
+{
+    if (socket == kInvalidSocket) return;
+#ifdef _WIN32
+    closesocket(socket);
+#else
+    close(socket);
+#endif
+}
+
+std::string socket_error_string()
+{
+#ifdef _WIN32
+    return "Winsock error " + std::to_string(WSAGetLastError());
+#else
+    return std::strerror(errno);
+#endif
+}
+
+bool send_all(SocketHandle socket, const std::string& data)
+{
+    std::size_t sent = 0;
+    while (sent < data.size()) {
+#ifdef _WIN32
+        const int n = send(socket, data.data() + sent, static_cast<int>(data.size() - sent), 0);
+#else
+        const ssize_t n = send(socket, data.data() + sent, data.size() - sent, 0);
+#endif
+        if (n <= 0) return false;
+        sent += static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+SocketHandle connect_tcp(const Endpoint& endpoint)
+{
+#ifdef _WIN32
+    WSADATA data{};
+    const int startup = WSAStartup(MAKEWORD(2, 2), &data);
+    if (startup != 0) throw std::runtime_error("WSAStartup failed: " + std::to_string(startup));
+#endif
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    addrinfo* result = nullptr;
+    const std::string port = std::to_string(endpoint.port);
+    const int rc = getaddrinfo(endpoint.host.c_str(), port.c_str(), &hints, &result);
+    if (rc != 0) {
+#ifdef _WIN32
+        throw std::runtime_error("DNS lookup failed for " + endpoint.host + ": " + std::to_string(rc));
+#else
+        throw std::runtime_error("DNS lookup failed for " + endpoint.host + ": " + gai_strerror(rc));
+#endif
+    }
+    SocketHandle connected = kInvalidSocket;
+    for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
+        SocketHandle s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == kInvalidSocket) continue;
+        if (connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) { connected = s; break; }
+        close_socket(s);
+    }
+    freeaddrinfo(result);
+    if (connected == kInvalidSocket)
+        throw std::runtime_error("Could not connect to " + endpoint.host + ':' + std::to_string(endpoint.port) + " (" + socket_error_string() + ')');
+    return connected;
+}
+
+bool socket_readable(SocketHandle socket, int milliseconds)
+{
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(socket, &readfds);
+    timeval tv{};
+    tv.tv_sec = milliseconds / 1000;
+    tv.tv_usec = (milliseconds % 1000) * 1000;
+#ifdef _WIN32
+    const int result = select(0, &readfds, nullptr, nullptr, &tv);
+#else
+    const int result = select(socket + 1, &readfds, nullptr, nullptr, &tv);
+#endif
+    return result > 0 && FD_ISSET(socket, &readfds);
+}
+
+std::string json_line(const nlohmann::json& message) { return message.dump() + "\n"; }
+
+int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+    return -1;
+}
+
+std::vector<std::uint8_t> hex_to_bytes(const std::string& hex)
+{
+    if ((hex.size() & 1U) != 0) throw std::runtime_error("Odd-length hex field in Stratum job");
+    std::vector<std::uint8_t> out(hex.size() / 2);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const int hi = hex_value(hex[i * 2]);
+        const int lo = hex_value(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) throw std::runtime_error("Invalid hex field in Stratum job");
+        out[i] = static_cast<std::uint8_t>((hi << 4) | lo);
+    }
+    return out;
+}
+
+std::string hex_fixed(std::uint64_t value, std::size_t bytes)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(static_cast<int>(bytes * 2)) << value;
+    std::string out = ss.str();
+    if (out.size() > bytes * 2) out = out.substr(out.size() - bytes * 2);
+    return out;
+}
+
+std::string nonce_hex(std::uint32_t nonce)
+{
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(8) << nonce;
+    return ss.str();
+}
+
+void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
+{
+    header[76] = static_cast<std::uint8_t>(nonce);
+    header[77] = static_cast<std::uint8_t>(nonce >> 8);
+    header[78] = static_cast<std::uint8_t>(nonce >> 16);
+    header[79] = static_cast<std::uint8_t>(nonce >> 24);
+}
+
+std::array<std::uint8_t, 32> merkle_root(const MiningJob& job, const std::string& extranonce1, const std::string& extranonce2)
+{
+    std::vector<std::uint8_t> coinbase = hex_to_bytes(job.coinb1 + extranonce1 + extranonce2 + job.coinb2);
+    auto hash = crypto::double_sha256(coinbase);
+    for (const auto& branch_hex : job.merkle_branch) {
+        const auto branch = hex_to_bytes(branch_hex);
+        if (branch.size() != 32) throw std::runtime_error("Invalid merkle branch length");
+        std::vector<std::uint8_t> pair;
+        pair.reserve(64);
+        pair.insert(pair.end(), hash.begin(), hash.end());
+        pair.insert(pair.end(), branch.begin(), branch.end());
+        hash = crypto::double_sha256(pair);
+    }
+    return hash;
+}
+
+std::vector<std::uint8_t> stratum_prevhash_bytes(const std::string& hex)
+{
+    auto bytes = hex_to_bytes(hex);
+    if (bytes.size() != 32) throw std::runtime_error("Stratum prevhash must be 32 bytes");
+    for (std::size_t i = 0; i < 32; i += 4)
+        std::reverse(bytes.begin() + static_cast<std::ptrdiff_t>(i), bytes.begin() + static_cast<std::ptrdiff_t>(i + 4));
+    return bytes;
+}
+
+std::vector<std::uint8_t> reversed_4byte_field(const std::string& hex)
+{
+    auto bytes = hex_to_bytes(hex);
+    if (bytes.size() != 4) throw std::runtime_error("Expected 4-byte Stratum header field");
+    std::reverse(bytes.begin(), bytes.end());
+    return bytes;
+}
+
+bool hash_meets_target(const ghostrider::Hash256& hash, const std::array<std::uint8_t, 32>& target_le)
+{
+    for (int i = 31; i >= 0; --i) {
+        const auto index = static_cast<std::size_t>(i);
+        if (hash[index] < target_le[index]) return true;
+        if (hash[index] > target_le[index]) return false;
+    }
+    return true;
+}
+
+std::array<std::uint8_t, 32> compact_target_le(const std::string& nbits_hex)
+{
+    if (nbits_hex.size() != 8) throw std::runtime_error("nBits must be exactly 4 bytes");
+    const std::uint32_t compact = static_cast<std::uint32_t>(std::stoul(nbits_hex, nullptr, 16));
+    const unsigned int exponent = compact >> 24;
+    const std::uint32_t mantissa = compact & 0x007fffffU;
+    if ((compact & 0x00800000U) != 0U || mantissa == 0U)
+        throw std::runtime_error("Invalid compact network target");
+    cpp_int target = mantissa;
+    if (exponent <= 3U) target >>= 8U * (3U - exponent);
+    else target <<= 8U * (exponent - 3U);
+    const cpp_int max_target = (cpp_int(1) << 256) - 1;
+    if (target > max_target) target = max_target;
+    std::array<std::uint8_t, 32> target_le{};
+    for (std::size_t i = 0; i < 32; ++i) { target_le[i] = static_cast<std::uint8_t>(target & 0xff); target >>= 8; }
+    return target_le;
+}
+
+cpp_int parse_hex_int(const std::string& hex)
+{
+    cpp_int value = 0;
+    for (char c : hex) {
+        const int v = hex_value(c);
+        if (v < 0) throw std::runtime_error("Invalid target hex");
+        value <<= 4;
+        value += v;
+    }
+    return value;
+}
+
+std::string format_rate(double hps)
+{
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    if (hps >= 1000000.0) ss << hps / 1000000.0 << " MH/s";
+    else if (hps >= 1000.0) ss << hps / 1000.0 << " kH/s";
+    else ss << hps << " H/s";
+    return ss.str();
+}
+
+std::string format_duration(double seconds)
+{
+    if (!std::isfinite(seconds) || seconds < 0.0) return "n/a";
+    const auto total = static_cast<std::uint64_t>(seconds + 0.5);
+    const auto days = total / 86400;
+    const auto hours = (total % 86400) / 3600;
+    const auto minutes = (total % 3600) / 60;
+    const auto secs = total % 60;
+    std::ostringstream ss;
+    if (days) ss << days << 'd' << ' ';
+    if (days || hours) ss << hours << 'h' << ' ';
+    if (days || hours || minutes) ss << minutes << 'm' << ' ';
+    ss << secs << 's';
+    return ss.str();
+}
+
+} // namespace
+
+Endpoint parse_endpoint(const std::string& url)
+{
+    const auto scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) throw std::runtime_error("Pool URL must include a scheme, e.g. stratum+tcp://host:port");
+    Endpoint endpoint;
+    endpoint.scheme = url.substr(0, scheme_end);
+    const std::string authority = url.substr(scheme_end + 3);
+    const auto colon = authority.rfind(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= authority.size()) throw std::runtime_error("Pool URL must include host and port");
+    endpoint.host = authority.substr(0, colon);
+    const unsigned long port = std::stoul(authority.substr(colon + 1));
+    if (port == 0 || port > 65535) throw std::runtime_error("Pool port is out of range");
+    endpoint.port = static_cast<unsigned short>(port);
+    if (endpoint.scheme != "stratum+tcp" && endpoint.scheme != "stratum") throw std::runtime_error("Unsupported pool scheme: " + endpoint.scheme);
+    return endpoint;
+}
+
+Client::Client(const AppConfig& config) : config_(config)
+{
+    if (!config_.pool.url.empty()) endpoint_ = parse_endpoint(config_.pool.url);
+#ifdef YERBAS_HAS_CUDA
+    if (config_.gpu.enabled) initialize_gpu_engines();
+#endif
+}
+
+Client::~Client()
+{
+#ifdef YERBAS_HAS_CUDA
+    stop_gpu_workers();
+#endif
+}
+
+void Client::print_connection_plan() const
+{
+    if (config_.pool.url.empty()) { std::cout << "Pool: not configured\n"; return; }
+    std::cout << "Pool: " << endpoint_.host << ':' << endpoint_.port << '\n';
+    std::cout << "Worker: " << config_.miner.worker << '\n';
+    std::cout << "User: " << (config_.pool.user.empty() ? "not configured" : config_.pool.user) << '\n';
+#ifdef YERBAS_HAS_CUDA
+    if (config_.miner.cpu_enabled && config_.gpu.enabled && !gpu_workers_.empty()) std::cout << "Stratum transport: TCP + hybrid CPU/CUDA GhostRider scheduler\n";
+    else if (config_.gpu.enabled && !gpu_workers_.empty()) std::cout << "Stratum transport: TCP + CUDA GhostRider batch scheduler\n";
+    else std::cout << "Stratum transport: TCP + CPU GhostRider scheduler\n";
+#else
+    std::cout << "Stratum transport: TCP + CPU GhostRider scheduler\n";
+#endif
+}
+
+bool Client::ready() const noexcept { return !config_.pool.url.empty() && !config_.pool.user.empty(); }
+
+std::string Client::login_user() const
+{
+    if (config_.miner.worker.empty()) return config_.pool.user;
+    return config_.pool.user + "." + config_.miner.worker;
+}
+
+int Client::run(std::atomic_bool& stop_requested)
+{
+    if (!ready()) { std::cerr << "Pool configuration is incomplete. Set pool.url and pool.user.\n"; return 2; }
+    mining_started_ = std::chrono::steady_clock::now();
+    last_report_ = mining_started_;
+    hashes_at_last_report_ = hashes_done_;
+    cpu_hashes_at_last_report_ = cpu_hashes_done_;
+    g_dev_fee_switch_requested = false;
+    g_active_login_user.clear();
+#ifdef YERBAS_HAS_CUDA
+    if (config_.gpu.enabled && !gpu_workers_.empty() && !gpu_pipeline_ready_) {
+        std::cout << "[GPU] Devices detected, but full GhostRider CUDA pipeline is not ready yet.\n";
+        if (config_.miner.cpu_enabled) std::cout << "[hybrid] CPU workers will mine; GPU workers remain idle until validated CUDA stages are complete.\n";
+        else { std::cerr << "No usable mining backend: CPU is disabled and CUDA pipeline incomplete.\n"; return 3; }
+    }
+#endif
+    if (!config_.miner.cpu_enabled) {
+#ifdef YERBAS_HAS_CUDA
+        if (!config_.gpu.enabled || gpu_workers_.empty() || !gpu_pipeline_ready_) return 3;
+#else
+        return 3;
+#endif
+    }
+    std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | " << kDevFeeAddress << '\n';
+    std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
+    while (!stop_requested.load()) {
+        try { if (run_session(stop_requested)) break; }
+        catch (const std::exception& e) { std::cerr << "[stratum] " << e.what() << '\n'; }
+        if (!stop_requested.load()) {
+            if (g_dev_fee_switch_requested) {
+                g_dev_fee_switch_requested = false;
+                continue;
+            }
+            std::cout << "[stratum] Reconnecting in 5 seconds...\n";
+            for (int i = 0; i < 50 && !stop_requested.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    // Do not manufacture a short, forced rate window during shutdown. The
+    // regular reporter already emits stable 150-second samples; forcing an
+    // arbitrary partial interval here can produce meaningless CPU/TOTAL rates.
+    report_stats(false);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    std::cout << "Stratum miner stopped.\n";
+    return 0;
+}
+
+bool Client::run_session(std::atomic_bool& stop_requested)
+{
+    subscribed_ = false;
+    authorized_ = false;
+    job_.valid = false;
+    target_ready_ = false;
+    difficulty_ = 0.0;
+    pending_target_ready_ = false;
+    pending_difficulty_ready_ = false;
+    pending_difficulty_ = 0.0;
+    socket_pending_.clear();
+#ifdef YERBAS_HAS_CUDA
+    gpu_job_loaded_ = false;
+#endif
+
+    const bool session_dev_fee = dev_fee_active(mining_started_);
+    const Endpoint session_endpoint = session_dev_fee ? parse_endpoint(kDevFeePoolUrl) : endpoint_;
+    g_active_login_user = session_dev_fee ? std::string(kDevFeeAddress) : login_user();
+
+    if (session_dev_fee)
+        std::cout << timestamp() << "[DEV FEE] active for one minute | pool=" << session_endpoint.host << ':' << session_endpoint.port
+                  << " | address=" << kDevFeeAddress << '\n';
+    else
+        std::cout << timestamp() << "[DEV FEE] inactive | mining to configured user pool\n";
+
+    std::cout << "[stratum] Connecting to " << session_endpoint.host << ':' << session_endpoint.port << "...\n";
+    SocketHandle socket_handle = connect_tcp(session_endpoint);
+    std::cout << "[stratum] Connected\n";
+    const nlohmann::json subscribe = {{"id",1},{"method","mining.subscribe"},{"params",nlohmann::json::array({"Yerbas-Miner/0.5.2"})}};
+    const nlohmann::json authorize = {{"id",2},{"method","mining.authorize"},{"params",nlohmann::json::array({g_active_login_user,config_.pool.password})}};
+    if (!send_all(socket_handle, json_line(subscribe)) || !send_all(socket_handle, json_line(authorize))) {
+        close_socket(socket_handle);
+        throw std::runtime_error("Failed to send Stratum subscribe/authorize requests");
+    }
+    while (!stop_requested.load()) {
+        const bool dev_fee_now = dev_fee_active(mining_started_);
+        if (dev_fee_now != session_dev_fee) {
+#ifdef YERBAS_HAS_CUDA
+            if (gpu_pipeline_ready_) drain_gpu_scans();
+#endif
+            close_socket(socket_handle);
+            g_dev_fee_switch_requested = true;
+            if (dev_fee_now)
+                std::cout << timestamp() << "[DEV FEE] window started | switching to pool.yerbas.org:3333\n";
+            else
+                std::cout << timestamp() << "[DEV FEE] window complete | returning to configured user pool\n";
+            return false;
+        }
+
+        if (!pump_socket_messages(static_cast<std::intptr_t>(socket_handle), job_.valid ? 0 : 250)) {
+            close_socket(socket_handle);
+            std::cout << "[stratum] Connection closed by pool\n";
+            return false;
+        }
+        if (authorized_ && job_.valid && target_ready_) {
+#ifdef YERBAS_HAS_CUDA
+            const bool usable_gpu = config_.gpu.enabled && !gpu_workers_.empty() && gpu_pipeline_ready_;
+            if (usable_gpu && !gpu_job_loaded_) upload_gpu_job();
+            if (usable_gpu && config_.miner.cpu_enabled && config_.miner.hybrid) {
+                if (!mine_hybrid_round(static_cast<std::intptr_t>(socket_handle))) { close_socket(socket_handle); return false; }
+            } else if (usable_gpu) {
+                if (!mine_gpu_batch(static_cast<std::intptr_t>(socket_handle))) { close_socket(socket_handle); return false; }
+            } else if (config_.miner.cpu_enabled) {
+                if (!mine_cpu_batch(static_cast<std::intptr_t>(socket_handle))) { close_socket(socket_handle); return false; }
+            }
+#else
+            if (config_.miner.cpu_enabled && !mine_cpu_batch(static_cast<std::intptr_t>(socket_handle))) { close_socket(socket_handle); return false; }
+#endif
+        } else if (!socket_readable(socket_handle, 0)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        report_stats(false);
+    }
+    close_socket(socket_handle);
+    return true;
+}
+
+bool Client::pump_socket_messages(std::intptr_t socket_value, int wait_ms)
+{
+    const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
+    if (!socket_readable(socket_handle, wait_ms)) return true;
+    char buffer[8192];
+    do {
+#ifdef _WIN32
+        const int n = recv(socket_handle, buffer, static_cast<int>(sizeof(buffer)), 0);
+#else
+        const ssize_t n = recv(socket_handle, buffer, sizeof(buffer), 0);
+#endif
+        if (n <= 0) return false;
+        socket_pending_.append(buffer, static_cast<std::size_t>(n));
+        for (;;) {
+            const auto newline = socket_pending_.find('\n');
+            if (newline == std::string::npos) break;
+            std::string line = socket_pending_.substr(0, newline);
+            socket_pending_.erase(0, newline + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) handle_message(line);
+        }
+    } while (socket_readable(socket_handle, 0));
+    return true;
+}
+
+void Client::handle_message(const std::string& line)
+{
+    nlohmann::json message;
+    try { message = nlohmann::json::parse(line); }
+    catch (const std::exception&) { std::cerr << "[stratum] Non-JSON message: " << line << '\n'; return; }
+    if (message.contains("id") && !message["id"].is_null()) {
+        const int id = message["id"].is_number_integer() ? message["id"].get<int>() : -1;
+        const auto error = message.value("error", nlohmann::json(nullptr));
+        if (id == 1) {
+            if (error.is_null()) {
+                subscribed_ = true;
+                const auto result = message.value("result", nlohmann::json::array());
+                if (result.is_array() && result.size() >= 3) {
+                    if (result[1].is_string()) extranonce1_ = result[1].get<std::string>();
+                    if (result[2].is_number_unsigned() || result[2].is_number_integer()) extranonce2_size_ = result[2].get<std::size_t>();
+                }
+                std::cout << "[stratum] Subscription accepted; extranonce1=" << extranonce1_ << " extranonce2_size=" << extranonce2_size_ << '\n';
+            } else std::cerr << "[stratum] Subscription rejected: " << message.dump() << '\n';
+        } else if (id == 2) {
+            const bool ok = message.contains("result") && message["result"].is_boolean() && message["result"].get<bool>();
+            if (ok && error.is_null()) { authorized_ = true; std::cout << "[stratum] Authorization accepted as " << g_active_login_user << '\n'; }
+            else std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
+        } else if (id >= 1000) {
+            bool result_ok = false;
+            if (message.contains("result")) {
+                const auto& result = message["result"];
+                result_ok = result.is_boolean() ? result.get<bool>() : !result.is_null();
+            }
+            std::string source = "unknown";
+            {
+                std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex);
+                const auto source_it = g_pending_share_sources.find(id);
+                if (source_it != g_pending_share_sources.end()) { source = source_it->second; g_pending_share_sources.erase(source_it); }
+            }
+            const bool accepted = error.is_null() && result_ok;
+            if (accepted) {
+                ++shares_accepted_;
+                ++g_source_accepted[source];
+                std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset
+                          << " SRC: " << source_color(source) << source << kColorReset
+                          << " | accepted=" << kAcceptColor << shares_accepted_ << kColorReset
+                          << " rejected=" << shares_rejected_ << '\n';
+            } else {
+                ++shares_rejected_;
+                std::cout << timestamp() << kRejectBadge << " SHARE REJECTED " << kColorReset
+                          << " SRC: " << source_color(source) << source << kColorReset
+                          << " | accepted=" << shares_accepted_
+                          << " rejected=" << kRejectColor << shares_rejected_ << kColorReset
+                          << " | response=" << message.dump() << '\n';
+            }
+        }
+        return;
+    }
+    const std::string method = message.value("method", "");
+    const auto params = message.value("params", nlohmann::json::array());
+    if (method == "mining.notify") {
+        if (!params.is_array() || params.size() < 9) { std::cerr << "[stratum] Unsupported mining.notify shape: " << message.dump() << '\n'; return; }
+        try {
+            MiningJob next;
+            next.job_id = params[0].get<std::string>(); next.prevhash = params[1].get<std::string>(); next.coinb1 = params[2].get<std::string>(); next.coinb2 = params[3].get<std::string>();
+            for (const auto& branch : params[4]) next.merkle_branch.push_back(branch.get<std::string>());
+            next.version = params[5].get<std::string>(); next.nbits = params[6].get<std::string>(); next.ntime = params[7].get<std::string>(); next.clean_jobs = params[8].get<bool>(); next.valid = true;
+            job_ = std::move(next);
+            activate_pending_target();
+#ifdef YERBAS_HAS_CUDA
+            nonce_ = (gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty()) ? kHybridCpuStart : 0U;
+            gpu_job_loaded_ = false;
+#else
+            nonce_ = 0U;
+#endif
+            if (job_.clean_jobs) ++extranonce2_counter_;
+            update_rotation_epoch();
+            ++received_jobs_;
+            std::cout << "[stratum] New job #" << received_jobs_ << " id=" << job_.job_id << " branches=" << job_.merkle_branch.size() << " clean=" << (job_.clean_jobs ? "yes" : "no");
+            if (target_ready_) std::cout << " | active_diff=" << std::defaultfloat << std::setprecision(8) << difficulty_;
+            std::cout << '\n';
+        } catch (const std::exception& e) { job_.valid = false; std::cerr << "[stratum] Failed to decode mining.notify: " << e.what() << '\n'; }
+        return;
+    }
+    if (method == "mining.set_difficulty") { if (params.is_array() && !params.empty() && params[0].is_number()) set_difficulty(params[0].get<double>()); return; }
+    if (method == "mining.set_target") { if (params.is_array() && !params.empty() && params[0].is_string()) set_target_hex(params[0].get<std::string>()); return; }
+    std::cout << "[stratum] Message: " << message.dump() << '\n';
+}
+
+void Client::set_target_hex(const std::string& target_hex)
+{
+    std::string hex = target_hex;
+    if (hex.size() < 64) hex.insert(hex.begin(), 64 - hex.size(), '0');
+    if (hex.size() != 64) throw std::runtime_error("Pool target must be 256 bits or shorter");
+    const auto be = hex_to_bytes(hex);
+    for (std::size_t i = 0; i < 32; ++i) pending_target_le_[i] = be[31 - i];
+    pending_target_ready_ = true;
+    pending_difficulty_ready_ = false;
+    std::cout << "[stratum] Explicit share target queued for next job\n";
+}
+
+void Client::set_difficulty(double difficulty)
+{
+    if (!(difficulty > 0.0)) return;
+    pending_difficulty_ = difficulty;
+    pending_difficulty_ready_ = true;
+    static const cpp_int diff1 = parse_hex_int("00000000ffff0000000000000000000000000000000000000000000000000000");
+    const std::uint64_t scaled = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(difficulty * 1000000.0));
+    cpp_int target = (diff1 * kGhostRiderTargetFactorInt * 1000000ULL) / scaled;
+    const cpp_int max_target = (cpp_int(1) << 256) - 1;
+    if (target > max_target) target = max_target;
+    for (std::size_t i = 0; i < 32; ++i) { pending_target_le_[i] = static_cast<std::uint8_t>(target & 0xff); target >>= 8; }
+    pending_target_ready_ = true;
+    const double expected = difficulty * kStratumDiffOneHashes;
+    std::ostringstream msg;
+    msg << std::defaultfloat << std::setprecision(8) << "[stratum] Difficulty queued for next job: " << difficulty
+        << " | GhostRider target factor " << static_cast<std::uint64_t>(kGhostRiderTargetFactor)
+        << " | average work/share ~" << std::fixed << std::setprecision(0) << expected << " hashes";
+    if (target_ready_) msg << " | active job remains at diff " << std::defaultfloat << std::setprecision(8) << difficulty_;
+    std::cout << msg.str() << '\n';
+}
+
+void Client::activate_pending_target()
+{
+    if (!pending_target_ready_) return;
+    target_le_ = pending_target_le_;
+    target_ready_ = true;
+    if (pending_difficulty_ready_) difficulty_ = pending_difficulty_;
+    pending_target_ready_ = false;
+    pending_difficulty_ready_ = false;
+}
+
+void Client::update_rotation_epoch()
+{
+    std::array<std::uint8_t, 80> header{};
+    std::string extranonce2;
+    if (!build_header(header, extranonce2, 0U)) return;
+    const ghostrider::Work work{header.data(), header.size()};
+    const auto schedule = ghostrider::stage_schedule_quiet(work);
+    const std::uint64_t fingerprint = ghostrider::schedule_fingerprint(schedule);
+    if (rotation_started_.time_since_epoch().count() != 0 && fingerprint == active_rotation_fingerprint_) return;
+
+    active_rotation_fingerprint_ = fingerprint;
+    rotation_started_ = std::chrono::steady_clock::now();
+    rotation_hashes_done_ = 0;
+    rotation_cpu_hashes_done_ = 0;
+
+#ifdef YERBAS_HAS_CUDA
+    for (auto& worker : gpu_workers_) worker.rotation_hashes_done = 0;
+#endif
+}
+
+bool Client::build_header(std::array<std::uint8_t, 80>& header, std::string& extranonce2_hex, std::uint32_t nonce) const
+{
+    if (!job_.valid || extranonce1_.empty()) return false;
+    try {
+        extranonce2_hex = hex_fixed(extranonce2_counter_, extranonce2_size_);
+        const auto version = reversed_4byte_field(job_.version); const auto prev = stratum_prevhash_bytes(job_.prevhash); const auto merkle = merkle_root(job_, extranonce1_, extranonce2_hex); const auto ntime = reversed_4byte_field(job_.ntime); const auto nbits = reversed_4byte_field(job_.nbits);
+        std::copy(version.begin(), version.end(), header.begin()); std::copy(prev.begin(), prev.end(), header.begin() + 4); std::copy(merkle.begin(), merkle.end(), header.begin() + 36); std::copy(ntime.begin(), ntime.end(), header.begin() + 68); std::copy(nbits.begin(), nbits.end(), header.begin() + 72); write_nonce(header, nonce);
+        return true;
+    } catch (const std::exception& e) { std::cerr << "[miner] Header construction failed: " << e.what() << '\n'; return false; }
+}
+
+bool Client::mine_one(std::intptr_t socket_value)
+{
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
+    std::array<std::uint8_t, 80> header{};
+    std::string extranonce2;
+    const std::uint32_t nonce = nonce_++;
+    if (!build_header(header, extranonce2, nonce)) return true;
+    const ghostrider::Work work{header.data(), header.size()};
+    const auto hash = ghostrider::hash_reference(work);
+    ++cpu_hashes_done_; ++hashes_done_;
+    if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) return true;
+    ++rotation_cpu_hashes_done_; ++rotation_hashes_done_;
+    if (hash_meets_target(hash, target_le_)) {
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
+            std::cout << timestamp() << "[CPU] stale candidate suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << '\n';
+            return true;
+        }
+        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
+        return submit_share(socket_value, extranonce2, nonce, "CPU");
+    }
+    if (nonce_ == 0) ++extranonce2_counter_;
+    return true;
+}
+
+bool Client::mine_cpu_batch(std::intptr_t socket_value)
+{
+    if (!config_.miner.cpu_enabled) return true;
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
+    const unsigned int threads = config_.miner.threads == 0 ? std::max(1u, std::thread::hardware_concurrency()) : std::max(1u, config_.miner.threads);
+    const unsigned int per_thread = config_.miner.cpu_batch == 0 ? 16U : config_.miner.cpu_batch;
+    const std::uint64_t total = static_cast<std::uint64_t>(threads) * per_thread;
+
+    static std::unique_ptr<cpu::WorkerPool> worker_pool;
+    static unsigned int worker_pool_threads = 0;
+    if (!worker_pool || worker_pool_threads != threads) {
+        worker_pool = std::make_unique<cpu::WorkerPool>(threads);
+        worker_pool_threads = threads;
+        std::cout << timestamp() << kCpuColor << "[CPU] persistent worker pool initialized | threads=" << threads << kColorReset << '\n';
+    }
+
+#ifdef YERBAS_HAS_CUDA
+    const bool hybrid_nonce_partition = gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty();
+#else
+    const bool hybrid_nonce_partition = false;
+#endif
+    const std::uint64_t cpu_region_start = hybrid_nonce_partition ? kHybridCpuStart : 0ULL;
+    if (static_cast<std::uint64_t>(nonce_) < cpu_region_start) nonce_ = static_cast<std::uint32_t>(cpu_region_start);
+    if (static_cast<std::uint64_t>(nonce_) + total > kNonceSpace) { ++extranonce2_counter_; nonce_ = static_cast<std::uint32_t>(cpu_region_start); }
+
+    std::array<std::uint8_t, 80> base_header{};
+    std::string extranonce2;
+    if (!build_header(base_header, extranonce2, nonce_)) return true;
+    const std::uint32_t batch_start = nonce_;
+    nonce_ = static_cast<std::uint32_t>(static_cast<std::uint64_t>(nonce_) + total);
+
+    const auto candidates = worker_pool->run(base_header, target_le_, batch_start, per_thread);
+    cpu_hashes_done_ += total;
+    hashes_done_ += total;
+    if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
+        if (!candidates.empty()) std::cout << timestamp() << "[CPU] discarded " << candidates.size() << " stale candidate(s) from job=" << work_job_id << '\n';
+        return true;
+    }
+    rotation_cpu_hashes_done_ += total;
+    rotation_hashes_done_ += total;
+
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
+            std::cout << timestamp() << "[CPU] suppressed " << (candidates.size() - index)
+                      << " stale candidate(s) before submit | old_job=" << work_job_id << " new_job=" << job_.job_id << '\n';
+            return true;
+        }
+        const auto& candidate = candidates[index];
+        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
+    }
+    return true;
+}
+
+#ifdef YERBAS_HAS_CUDA
+void Client::start_gpu_worker(GpuWorker& worker)
+{
+    if (!worker.scan_state) worker.scan_state = std::make_unique<GpuScanState>();
+    auto* state = worker.scan_state.get();
+    auto* engine = worker.engine.get();
+    state->thread = std::thread([state, engine]() {
+        for (;;) {
+            std::uint32_t start_nonce = 0;
+            {
+                std::unique_lock<std::mutex> lock(state->mutex);
+                state->cv.wait(lock, [state]() { return state->stop || state->work_pending; });
+                if (state->stop && !state->work_pending) break;
+                start_nonce = state->start_nonce;
+                state->work_pending = false;
+                state->busy = true;
+            }
+
+            std::vector<cuda::Candidate> candidates;
+            std::exception_ptr error;
+            try {
+                candidates = engine->scan(start_nonce);
+            } catch (...) {
+                error = std::current_exception();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->candidates = std::move(candidates);
+                state->error = error;
+                state->busy = false;
+                state->result_ready = true;
+            }
+            state->cv.notify_all();
+        }
+    });
+}
+
+void Client::stop_gpu_workers() noexcept
+{
+    for (auto& worker : gpu_workers_) {
+        if (!worker.scan_state) continue;
+        {
+            std::lock_guard<std::mutex> lock(worker.scan_state->mutex);
+            worker.scan_state->stop = true;
+        }
+        worker.scan_state->cv.notify_all();
+    }
+    for (auto& worker : gpu_workers_) {
+        if (worker.scan_state && worker.scan_state->thread.joinable()) worker.scan_state->thread.join();
+    }
+}
+
+void Client::dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce)
+{
+    auto& state = *worker.scan_state;
+    std::unique_lock<std::mutex> lock(state.mutex);
+    state.cv.wait(lock, [&state]() { return !state.busy && !state.work_pending && !state.result_ready; });
+    state.start_nonce = start_nonce;
+    state.error = nullptr;
+    state.work_pending = true;
+    lock.unlock();
+    state.cv.notify_one();
+}
+
+bool Client::gpu_scan_ready(GpuWorker& worker)
+{
+    auto& state = *worker.scan_state;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.result_ready;
+}
+
+std::vector<cuda::Candidate> Client::take_gpu_scan_result(GpuWorker& worker)
+{
+    auto& state = *worker.scan_state;
+    std::unique_lock<std::mutex> lock(state.mutex);
+    state.cv.wait(lock, [&state]() { return state.result_ready; });
+    auto candidates = std::move(state.candidates);
+    const std::exception_ptr error = state.error;
+    state.error = nullptr;
+    state.result_ready = false;
+    lock.unlock();
+    state.cv.notify_all();
+    if (error) std::rethrow_exception(error);
+    return candidates;
+}
+
+void Client::drain_gpu_scans() noexcept
+{
+    for (auto& worker : gpu_workers_) {
+        if (!worker.scan_state) continue;
+        auto& state = *worker.scan_state;
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.cv.wait(lock, [&state]() { return state.result_ready || (!state.busy && !state.work_pending); });
+        state.candidates.clear();
+        state.error = nullptr;
+        state.result_ready = false;
+        lock.unlock();
+        state.cv.notify_all();
+    }
+}
+
+void Client::initialize_gpu_engines()
+{
+    const auto available = cuda::enumerate_devices();
+    std::vector<int> selected = config_.gpu.devices;
+    if (selected.empty()) for (const auto& info : available) selected.push_back(info.id);
+    for (int id : selected) {
+        const auto found = std::find_if(available.begin(), available.end(), [id](const cuda::DeviceInfo& d) { return d.id == id; });
+        if (found == available.end()) { std::cerr << "[GPU] Requested device " << id << " is not available; skipping\n"; continue; }
+        const std::size_t batch_size = config_.gpu.intensity > 0 ? (static_cast<std::size_t>(1) << std::min(config_.gpu.intensity, 24)) : 65536;
+        GpuWorker worker;
+        worker.device_id = id;
+        worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size);
+        const std::size_t actual_batch = worker.engine->batch_size();
+        gpu_workers_.push_back(std::move(worker));
+        std::cout << gpu_color(id) << "[GPU " << id << "] batch engine initialized | batch=" << actual_batch << " | CPU hash fallback=off" << kColorReset << '\n';
+    }
+    gpu_pipeline_ready_ = !gpu_workers_.empty();
+    for (const auto& worker : gpu_workers_) gpu_pipeline_ready_ = gpu_pipeline_ready_ && worker.engine->hash_pipeline_ready();
+    if (gpu_pipeline_ready_) {
+        try {
+            for (auto& worker : gpu_workers_) start_gpu_worker(worker);
+            std::cout << "[GPU] persistent host scan workers initialized | count=" << gpu_workers_.size() << '\n';
+        } catch (...) {
+            stop_gpu_workers();
+            throw;
+        }
+    }
+}
+
+void Client::upload_gpu_job()
+{
+    if (gpu_workers_.empty() || !gpu_pipeline_ready_) return;
+    drain_gpu_scans();
+    std::array<std::uint8_t, 80> header{}; std::string extranonce2;
+    if (!build_header(header, extranonce2, 0)) throw std::runtime_error("Unable to build CUDA job header");
+    cuda::JobDescriptor descriptor;
+    descriptor.header = header; descriptor.target_le = target_le_;
+    const ghostrider::Work work{descriptor.header.data(), descriptor.header.size()};
+    descriptor.stages = ghostrider::stage_schedule(work);
+    const std::uint64_t gpu_space = static_cast<std::uint64_t>(kHybridCpuStart);
+    const std::uint64_t region_size = gpu_space / std::max<std::size_t>(1, gpu_workers_.size());
+    for (std::size_t i = 0; i < gpu_workers_.size(); ++i) {
+        auto& worker = gpu_workers_[i]; worker.engine->upload_job(descriptor);
+        const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
+        worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start;
+    }
+    nonce_ = kHybridCpuStart; gpu_job_loaded_ = true;
+    std::cout << "[hybrid] Job partitioned: " << gpu_workers_.size() << " GPU region(s) + CPU upper nonce region\n";
+}
+
+bool Client::mine_gpu_batch(std::intptr_t socket_value)
+{
+    if (!gpu_pipeline_ready_) return true;
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
+    const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
+
+    struct PendingGpu {
+        GpuWorker* worker;
+        std::uint64_t count;
+        bool completed{false};
+    };
+
+    auto scan_active = [](GpuWorker& worker) {
+        auto& state = *worker.scan_state;
+        std::lock_guard<std::mutex> lock(state.mutex);
+        return state.busy || state.work_pending || state.result_ready;
+    };
+
+    auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
+        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end)
+            worker.next_nonce = worker.region_start;
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        dispatch_gpu_scan(worker, start);
+        return count;
+    };
+
+    std::vector<PendingGpu> pending;
+    pending.reserve(gpu_workers_.size());
+    for (auto& worker : gpu_workers_) {
+        std::uint64_t count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (!scan_active(worker)) count = launch_next_scan(worker);
+        pending.push_back(PendingGpu{&worker, count, false});
+    }
+
+    std::size_t remaining = pending.size();
+    bool stale = false;
+    std::size_t stale_candidates = 0;
+
+    while (remaining != 0U) {
+        if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+        stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+
+        bool consumed_result = false;
+        for (auto& task : pending) {
+            if (task.completed || !gpu_scan_ready(*task.worker)) continue;
+
+            auto candidates = take_gpu_scan_result(*task.worker);
+            task.worker->hashes_done += task.count;
+            hashes_done_ += task.count;
+            task.completed = true;
+            --remaining;
+            consumed_result = true;
+
+            if (stale) {
+                stale_candidates += candidates.size();
+                continue;
+            }
+
+            task.worker->rotation_hashes_done += task.count;
+            rotation_hashes_done_ += task.count;
+
+            // Re-prime each device independently as soon as its result is
+            // consumed. This is device-agnostic and removes the multi-GPU
+            // all-ready barrier without increasing per-device VRAM usage.
+            if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
+                (void)launch_next_scan(*task.worker);
+            else
+                stale = true;
+
+            const std::string source = "GPU " + std::to_string(task.worker->device_id);
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+                stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+                if (stale) {
+                    stale_candidates += candidates.size() - index;
+                    break;
+                }
+                const auto& candidate = candidates[index];
+                std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+                if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
+            }
+        }
+
+        if (remaining != 0U && !consumed_result)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    if (stale)
+        std::cout << timestamp() << "[GPU] stale candidates suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << " | candidates=" << stale_candidates << '\n';
+    return true;
+}
+
+bool Client::mine_hybrid_round(std::intptr_t socket_value)
+{
+    if (!gpu_pipeline_ready_) return mine_cpu_batch(socket_value);
+    const std::uint64_t work_generation = MiningJob::generation();
+    const std::string work_job_id = job_.job_id;
+    const std::string extranonce2 = hex_fixed(extranonce2_counter_, extranonce2_size_);
+
+    struct PendingGpu {
+        GpuWorker* worker;
+        std::uint64_t count;
+        bool completed{false};
+    };
+
+    auto scan_active = [](GpuWorker& worker) {
+        auto& state = *worker.scan_state;
+        std::lock_guard<std::mutex> lock(state.mutex);
+        return state.busy || state.work_pending || state.result_ready;
+    };
+
+    auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
+        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end)
+            worker.next_nonce = worker.region_start;
+        const std::uint32_t start = worker.next_nonce;
+        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
+        dispatch_gpu_scan(worker, start);
+        return count;
+    };
+
+    std::vector<PendingGpu> pending;
+    pending.reserve(gpu_workers_.size());
+    for (auto& worker : gpu_workers_) {
+        std::uint64_t count = static_cast<std::uint64_t>(worker.engine->batch_size());
+        if (!scan_active(worker)) count = launch_next_scan(worker);
+        pending.push_back(PendingGpu{&worker, count, false});
+    }
+
+    std::size_t remaining = pending.size();
+    bool stale = false;
+    std::size_t stale_candidates = 0;
+
+    while (remaining != 0U) {
+        if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+        stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+
+        bool consumed_result = false;
+        for (auto& task : pending) {
+            if (task.completed || !gpu_scan_ready(*task.worker)) continue;
+
+            auto candidates = take_gpu_scan_result(*task.worker);
+            task.worker->hashes_done += task.count;
+            hashes_done_ += task.count;
+            task.completed = true;
+            --remaining;
+            consumed_result = true;
+
+            if (stale) {
+                stale_candidates += candidates.size();
+                continue;
+            }
+
+            task.worker->rotation_hashes_done += task.count;
+            rotation_hashes_done_ += task.count;
+
+            // Service completed GPU work before launching another CPU batch.
+            // This keeps fast devices fed regardless of CPU speed, GPU model,
+            // GPU count, or relative device performance.
+            if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
+                (void)launch_next_scan(*task.worker);
+            else
+                stale = true;
+
+            const std::string source = "GPU " + std::to_string(task.worker->device_id);
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+                stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+                if (stale) {
+                    stale_candidates += candidates.size() - index;
+                    break;
+                }
+                const auto& candidate = candidates[index];
+                std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+                if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
+            }
+        }
+
+        if (remaining != 0U && !stale) {
+            if (!mine_cpu_batch(socket_value)) { drain_gpu_scans(); return false; }
+            if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+            stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+        }
+
+        if (remaining != 0U && stale && !consumed_result)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    if (stale)
+        std::cout << timestamp() << "[hybrid] stale candidates suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << " | GPU candidates=" << stale_candidates << '\n';
+    return true;
+}
+#endif
+
+bool Client::submit_share(std::intptr_t socket_value, const std::string& extranonce2_hex, std::uint32_t nonce, const std::string& source)
+{
+    try {
+        std::array<std::uint8_t, 80> header{};
+        std::string rebuilt_extranonce2;
+        if (build_header(header, rebuilt_extranonce2, nonce) && rebuilt_extranonce2 == extranonce2_hex) {
+            const ghostrider::Work work{header.data(), header.size()};
+            const auto hash = ghostrider::hash_reference(work);
+            const auto network_target = compact_target_le(job_.nbits);
+            if (hash_meets_target(hash, network_target)) {
+                ++g_blocks_found;
+                std::cout << '\n' << timestamp() << kBlockColor << " ★★★ BLOCK FOUND ★★★ | source=" << source
+                          << " | job=" << job_.job_id << " | nonce=" << nonce_hex(nonce) << " | nbits=" << job_.nbits
+                          << " | total=" << g_blocks_found << ' ' << kColorReset << "\n\n";
+            }
+        }
+    } catch (const std::exception& e) { std::cerr << "[block-check] " << e.what() << '\n'; }
+
+    const SocketHandle socket_handle = static_cast<SocketHandle>(socket_value);
+    const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
+    const nlohmann::json submit = {{"id",request_id},{"method","mining.submit"},{"params",nlohmann::json::array({g_active_login_user,job_.job_id,extranonce2_hex,job_.ntime,nonce_hex(nonce)})}};
+    if (!send_all(socket_handle, json_line(submit))) { std::cerr << "[share] Failed to send candidate share\n"; return false; }
+    { std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex); g_pending_share_sources[request_id] = source; }
+    ++shares_submitted_;
+    std::cout << timestamp() << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << " #" << shares_submitted_
+              << " SRC: " << source_color(source) << source << kColorReset << " | job=" << job_.job_id
+              << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce)
+              << (g_active_login_user == kDevFeeAddress ? " | DEV FEE" : "") << '\n';
+    return true;
+}
+
+void Client::report_stats(bool force)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (mining_started_.time_since_epoch().count() == 0) return;
+    const double since_report = std::chrono::duration<double>(now - last_report_).count();
+    if (!force && since_report < kStatusIntervalSeconds) return;
+
+    const std::uint64_t window_hashes = hashes_done_ >= hashes_at_last_report_
+        ? hashes_done_ - hashes_at_last_report_ : 0;
+    const std::uint64_t cpu_window_hashes = cpu_hashes_done_ >= cpu_hashes_at_last_report_
+        ? cpu_hashes_done_ - cpu_hashes_at_last_report_ : 0;
+    const double total_hps = since_report > 0.0 ? static_cast<double>(window_hashes) / since_report : 0.0;
+    const double cpu_hps = since_report > 0.0 ? static_cast<double>(cpu_window_hashes) / since_report : 0.0;
+    const double uptime = std::chrono::duration<double>(now - mining_started_).count();
+    const double average_hps = uptime > 0.0 ? static_cast<double>(hashes_done_) / uptime : 0.0;
+    const double expected_hashes = difficulty_ > 0.0 ? difficulty_ * kStratumDiffOneHashes : 0.0;
+    const double eta = total_hps > 0.0 && expected_hashes > 0.0 ? expected_hashes / total_hps : std::numeric_limits<double>::infinity();
+    const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
+    const double acceptance = resolved_shares > 0 ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares) : 100.0;
+
+    constexpr const char* kRule = "--------------------------------------------------------------------------------------------------------";
+    constexpr const char* kTop =  "================================ 🌿 PROOF OF GRASS | STATUS UPDATE =================================";
+    std::cout << '\n' << kTop << '\n';
+    std::cout << std::left << std::setw(14) << "SOURCE" << std::setw(18) << "HASHRATE" << std::setw(17) << "HASHES" << std::setw(12) << "BATCH" << "ACCEPTED\n";
+    std::cout << kRule << '\n';
+
+    if (config_.miner.cpu_enabled) {
+        std::cout << kCpuColor << std::left << std::setw(14) << "CPU" << std::setw(18) << format_rate(cpu_hps)
+                  << std::setw(17) << cpu_window_hashes << std::setw(12) << "-" << g_source_accepted["CPU"] << kColorReset << '\n';
+    }
+#ifdef YERBAS_HAS_CUDA
+    if (config_.gpu.enabled && !gpu_workers_.empty()) {
+        for (auto& worker : gpu_workers_) {
+            const std::uint64_t gpu_window_hashes = worker.hashes_done >= worker.hashes_at_last_report
+                ? worker.hashes_done - worker.hashes_at_last_report : 0;
+            const double gpu_hps = since_report > 0.0 ? static_cast<double>(gpu_window_hashes) / since_report : 0.0;
+            std::ostringstream label; label << "GPU " << worker.device_id;
+            const std::string source = label.str();
+            std::cout << gpu_color(worker.device_id) << std::left << std::setw(14) << source
+                      << std::setw(18) << (gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle")
+                      << std::setw(17) << gpu_window_hashes << std::setw(12) << worker.engine->batch_size()
+                      << g_source_accepted[source] << kColorReset << '\n';
+        }
+    }
+#endif
+
+    std::cout << kRule << '\n';
+    std::cout << std::left << std::setw(14) << "TOTAL" << kGrassColor << std::setw(18) << format_rate(total_hps) << kColorReset;
+    std::cout << "ACCEPTED " << kAcceptColor << shares_accepted_ << kColorReset << "     REJECTED " << kRejectColor << shares_rejected_ << kColorReset
+              << "     BLOCKS " << kBlockColor << ' ' << g_blocks_found << ' ' << kColorReset << '\n';
+
+    std::ostringstream shares_text;
+    shares_text << shares_submitted_ << '/' << shares_accepted_ << '/' << shares_rejected_ << " (" << std::fixed << std::setprecision(1) << acceptance << "%)";
+    std::cout << std::left << std::setw(14) << "SHARES" << std::setw(18) << shares_text.str()
+              << "ACTIVE DIFF " << std::defaultfloat << std::setprecision(8) << difficulty_;
+    if (pending_target_ready_ && pending_difficulty_ready_) std::cout << "     PENDING " << std::defaultfloat << std::setprecision(8) << pending_difficulty_;
+    std::cout << "     ETA " << format_duration(eta) << "     UPTIME " << format_duration(uptime) << '\n';
+
+    std::cout << std::left << std::setw(14) << "AVG" << std::setw(18) << format_rate(average_hps)
+              << "EXPECTED/SHARE " << std::fixed << std::setprecision(0) << expected_hashes << '\n';
+    std::cout << kRule << '\n';
+    std::cout << kCpuColor << "■ CPU" << kColorReset << "  " << kGpuColor << "■ GPU" << kColorReset << "  "
+              << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << "  " << kAcceptBadge << " SHARE ACCEPTED " << kColorReset << "  "
+              << kRejectBadge << " SHARE REJECTED " << kColorReset << "  " << kBlockColor << " ★ BLOCK FOUND ★ " << kColorReset << '\n';
+    std::cout << "========================================================================================================\n\n";
+
+    last_report_ = now;
+    hashes_at_last_report_ = hashes_done_;
+    cpu_hashes_at_last_report_ = cpu_hashes_done_;
+#ifdef YERBAS_HAS_CUDA
+    for (auto& worker : gpu_workers_) worker.hashes_at_last_report = worker.hashes_done;
+#endif
+}
+
+} // namespace yerbas::stratum
