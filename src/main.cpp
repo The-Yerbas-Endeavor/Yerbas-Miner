@@ -97,6 +97,20 @@ void enable_windows_console_rendering()
 
     enable_vt(STD_OUTPUT_HANDLE);
     enable_vt(STD_ERROR_HANDLE);
+
+    // Classic Windows Console enables QuickEdit by default on many systems.
+    // Clicking in the window then enters text-selection mode and suspends console
+    // output, which makes a continuously running miner appear to stop. Disable
+    // QuickEdit for this process while leaving normal keyboard input available.
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (input != INVALID_HANDLE_VALUE && input != nullptr) {
+        DWORD mode = 0;
+        if (GetConsoleMode(input, &mode)) {
+            mode |= ENABLE_EXTENDED_FLAGS;
+            mode &= ~ENABLE_QUICK_EDIT_MODE;
+            SetConsoleMode(input, mode);
+        }
+    }
 }
 
 const char* windows_access_kind(ULONG_PTR kind)
