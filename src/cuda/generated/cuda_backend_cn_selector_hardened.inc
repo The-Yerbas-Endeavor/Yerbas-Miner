@@ -2,20 +2,20 @@
 //
 // This layer deliberately reuses the already parity-tested production kernels
 // from cuda_backend_cn_residency.inc, but replaces one-shot timing decisions with
-// repeated alternating A/B measurements. It is architecture-generic: no GPU name,
+// repeated alternating measurements. It is architecture-generic: no GPU name,
 // compute capability, or generation is used to force a kernel choice.
 //
-// Promotion rules:
-//   * exact full-scratchpad parity is mandatory;
-//   * one warm-up run is discarded for each implementation;
-//   * five measured passes are collected from identical cloned post-setup state;
-//   * the median candidate time must beat the median T-table baseline by >=5%.
+// Normal production keeps the small selector sample for fast startup. Explicit
+// YERBAS_CUDA_RETUNE=1 switches to a substantially larger, memory-aware sample
+// and lets the reference, T-table, tile64 and .cg implementations compete.
 
 namespace {
 
-constexpr int kCnHardenedSelectorRevision = 3;
+constexpr int kCnHardenedSelectorRevision = 4;
 constexpr int kCnHardenedPasses = 5;
 constexpr float kCnHardenedPromotionRatio = 0.95F;
+constexpr float kCnDeepPromotionRatio = 0.985F;
+constexpr std::size_t kCnDeepSampleCap = 1024U;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_hardened_mode{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_hardened_threads{};
 
@@ -27,6 +27,12 @@ float cn_hardened_median(std::array<float, N> values)
         return values[N / 2U];
     else
         return 0.5F * (values[N / 2U - 1U] + values[N / 2U]);
+}
+
+inline bool cn_hardened_deep_retune_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_RETUNE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
 template <std::uint8_t VariantIndex>
@@ -53,8 +59,7 @@ bool load_cn_hardened_cache(int device_id,
                             std::size_t batch_size)
 {
     if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return false;
-    const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
-    if (retune && *retune && std::string(retune) != "0") return false;
+    if (cn_hardened_deep_retune_requested()) return false;
 
     const auto path = cn_hardened_cache_path<VariantIndex>(device_id, props, batch_size);
     if (path.empty()) return false;
@@ -133,6 +138,32 @@ void save_cn_hardened_cache(int device_id,
 }
 
 template <std::uint8_t VariantIndex>
+std::size_t cn_hardened_sample_count(std::size_t count,
+                                     std::size_t free_bytes,
+                                     int warp)
+{
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    if (!cn_hardened_deep_retune_requested()) {
+        const std::size_t by_memory = cfg.page_size ? (free_bytes / 20U) / cfg.page_size : 0U;
+        return std::max<std::size_t>(
+            1U, std::min<std::size_t>(count, std::min<std::size_t>(32U, by_memory)));
+    }
+
+    // Deep retune may borrow up to 35% of currently free VRAM for an immutable
+    // post-setup clone. This makes the selector representative of production
+    // occupancy/cache behavior without assuming a particular GPU or VRAM size.
+    const std::size_t bytes_per_hash = cfg.page_size + sizeof(cryptonight::SplitContext);
+    const std::size_t budget = (free_bytes * 35U) / 100U;
+    std::size_t sample = bytes_per_hash ? budget / bytes_per_hash : 0U;
+    sample = std::min<std::size_t>(sample, count);
+    sample = std::min<std::size_t>(sample, kCnDeepSampleCap);
+
+    const std::size_t alignment = static_cast<std::size_t>(std::max(32, warp));
+    if (sample >= alignment) sample = (sample / alignment) * alignment;
+    return std::max<std::size_t>(1U, sample);
+}
+
+template <std::uint8_t VariantIndex>
 void cn_hardened_autoselect_once(cudaStream_t stream,
                                  int device_id,
                                  std::size_t count,
@@ -176,9 +207,9 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     std::size_t free_bytes = 0, total_bytes = 0;
     check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo hardened CN selector failed");
     (void)total_bytes;
-    const std::size_t by_memory = cfg.page_size ? (free_bytes / 20U) / cfg.page_size : 0U;
-    const std::size_t sample_count = std::max<std::size_t>(
-        1U, std::min<std::size_t>(count, std::min<std::size_t>(32U, by_memory)));
+    const std::size_t sample_count = cn_hardened_sample_count<VariantIndex>(count, free_bytes, warp);
+    const bool deep = cn_hardened_deep_retune_requested();
+    const float promotion_ratio = deep ? kCnDeepPromotionRatio : kCnHardenedPromotionRatio;
 
     std::uint8_t* clone = nullptr;
     cryptonight::SplitContext* clone_ctx = nullptr;
@@ -203,20 +234,23 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     };
 
     // Discard one warm-up execution for each implementation that can compete.
+    (void)timed(4, threads_ref);
     (void)timed(44, threads_t4);
     if (parity_tile) (void)timed(222, threads_tile);
     if (parity_cg) (void)timed(444, threads_cg);
 
+    std::array<float, kCnHardenedPasses> ref_times{};
     std::array<float, kCnHardenedPasses> baseline_times{};
     std::array<float, kCnHardenedPasses> tile_times{};
     std::array<float, kCnHardenedPasses> cg_times{};
     tile_times.fill(-1.0F);
     cg_times.fill(-1.0F);
 
-    // Alternate ordering to reduce temperature/clock/order bias. Every timing
-    // starts from an identical clone of the real post-setup scratchpad/context.
+    // Rotate ordering to reduce temperature/clock/order bias. Every timing starts
+    // from an identical clone of the real post-setup scratchpad/context.
     for (int pass = 0; pass < kCnHardenedPasses; ++pass) {
         if ((pass & 1) == 0) {
+            ref_times[pass] = timed(4, threads_ref);
             baseline_times[pass] = timed(44, threads_t4);
             if (parity_tile) tile_times[pass] = timed(222, threads_tile);
             if (parity_cg) cg_times[pass] = timed(444, threads_cg);
@@ -224,9 +258,11 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
             if (parity_cg) cg_times[pass] = timed(444, threads_cg);
             if (parity_tile) tile_times[pass] = timed(222, threads_tile);
             baseline_times[pass] = timed(44, threads_t4);
+            ref_times[pass] = timed(4, threads_ref);
         }
     }
 
+    const float ref_ms = cn_hardened_median(ref_times);
     const float baseline_ms = cn_hardened_median(baseline_times);
     const float tile_ms = parity_tile ? cn_hardened_median(tile_times) : -1.0F;
     const float cg_ms = parity_cg ? cn_hardened_median(cg_times) : -1.0F;
@@ -234,12 +270,17 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     int best_mode = 44;
     int best_threads = threads_t4;
     float best_ms = baseline_ms;
-    if (parity_tile && tile_ms < baseline_ms * kCnHardenedPromotionRatio && tile_ms < best_ms) {
+    if (ref_ms < baseline_ms * promotion_ratio && ref_ms < best_ms) {
+        best_mode = 4;
+        best_threads = threads_ref;
+        best_ms = ref_ms;
+    }
+    if (parity_tile && tile_ms < baseline_ms * promotion_ratio && tile_ms < best_ms) {
         best_mode = 222;
         best_threads = threads_tile;
         best_ms = tile_ms;
     }
-    if (parity_cg && cg_ms < baseline_ms * kCnHardenedPromotionRatio && cg_ms < best_ms) {
+    if (parity_cg && cg_ms < baseline_ms * promotion_ratio && cg_ms < best_ms) {
         best_mode = 444;
         best_threads = threads_cg;
         best_ms = cg_ms;
@@ -255,15 +296,19 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN hardened selector] GPU " << device_id
               << " | " << cfg.name
-              << " | sample=" << sample_count
+              << " | sample=" << sample_count << '/' << count
               << " passes=" << kCnHardenedPasses
-              << " threshold=5%"
-              << " | baseline-median=" << baseline_ms << " ms@" << threads_t4
+              << " tuning=" << (deep ? "deep-production" : "startup")
+              << " threshold=" << (deep ? "1.5%" : "5%")
+              << " | ref-median=" << ref_ms << " ms@" << threads_ref
+              << " | ttable-median=" << baseline_ms << " ms@" << threads_t4
+              << " parity=PASS"
               << " | tile64-median=" << tile_ms << " ms@" << threads_tile
               << " parity=" << (parity_tile ? "PASS" : "FAIL")
               << " | cg-median=" << cg_ms << " ms@" << threads_cg
               << " parity=" << (parity_cg ? "PASS" : "FAIL")
               << " | production=" << cn_residency_mode_name(best_mode)
+              << " | selected-ms=" << best_ms
               << std::defaultfloat << '\n';
 }
 
