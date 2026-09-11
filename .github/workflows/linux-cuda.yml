@@ -74,6 +74,23 @@ jobs:
           p.write_text(text.replace(old, new, 1))
           PY
 
+      - name: Apply Linux NVCC parity-array compatibility fix
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/cuda/generated/cuda_backend_gpu_faststart.inc')
+          text = p.read_text()
+          old = 'std::array<std::uint8_t, 2 * kStateBytes>'
+          occurrences = text.count(old)
+          if occurrences != 2:
+              raise SystemExit(f'Expected exactly 2 parity-array declarations, found {occurrences}')
+          text = text.replace(old, 'std::array<std::uint8_t, 128U>')
+          p.write_text(text)
+          PY
+
       - name: Configure broad-compatible CUDA release
         shell: bash
         run: |
