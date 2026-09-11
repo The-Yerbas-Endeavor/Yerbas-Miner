@@ -74,7 +74,7 @@ jobs:
           p.write_text(text.replace(old, new, 1))
           PY
 
-      - name: Apply Linux NVCC parity-array compatibility fix
+      - name: Apply Linux NVCC parity-buffer compatibility fix
         shell: bash
         run: |
           set -euxo pipefail
@@ -83,12 +83,31 @@ jobs:
 
           p = Path('src/cuda/generated/cuda_backend_gpu_faststart.inc')
           text = p.read_text()
-          old = 'std::array<std::uint8_t, 2 * kStateBytes>'
-          occurrences = text.count(old)
-          if occurrences != 2:
-              raise SystemExit(f'Expected exactly 2 parity-array declarations, found {occurrences}')
-          text = text.replace(old, 'std::array<std::uint8_t, 128U>')
-          p.write_text(text)
+          old = '''    std::array<std::uint8_t, 2 * kStateBytes> a{};
+    std::array<std::uint8_t, 2 * kStateBytes> b{};
+    (void)run_gpu_calibration_once(stream, d_job, d_nonces, states, scratchpads, contexts, job, baseline);
+    check_cuda(cudaMemcpyAsync(a.data(), states, a.size(), cudaMemcpyDeviceToHost, stream),
+               "GPU calibration baseline parity copy failed");
+    check_cuda(cudaStreamSynchronize(stream), "GPU calibration baseline parity sync failed");
+    (void)run_gpu_calibration_once(stream, d_job, d_nonces, states, scratchpads, contexts, job, candidate);
+    check_cuda(cudaMemcpyAsync(b.data(), states, b.size(), cudaMemcpyDeviceToHost, stream),
+               "GPU calibration candidate parity copy failed");
+    check_cuda(cudaStreamSynchronize(stream), "GPU calibration candidate parity sync failed");
+    return a == b;'''
+          new = '''    std::uint8_t a[2 * kStateBytes]{};
+    std::uint8_t b[2 * kStateBytes]{};
+    (void)run_gpu_calibration_once(stream, d_job, d_nonces, states, scratchpads, contexts, job, baseline);
+    check_cuda(cudaMemcpyAsync(a, states, sizeof(a), cudaMemcpyDeviceToHost, stream),
+               "GPU calibration baseline parity copy failed");
+    check_cuda(cudaStreamSynchronize(stream), "GPU calibration baseline parity sync failed");
+    (void)run_gpu_calibration_once(stream, d_job, d_nonces, states, scratchpads, contexts, job, candidate);
+    check_cuda(cudaMemcpyAsync(b, states, sizeof(b), cudaMemcpyDeviceToHost, stream),
+               "GPU calibration candidate parity copy failed");
+    check_cuda(cudaStreamSynchronize(stream), "GPU calibration candidate parity sync failed");
+    return std::memcmp(a, b, sizeof(a)) == 0;'''
+          if old not in text:
+              raise SystemExit('Expected parity-buffer block was not found')
+          p.write_text(text.replace(old, new, 1))
           PY
 
       - name: Configure broad-compatible CUDA release
