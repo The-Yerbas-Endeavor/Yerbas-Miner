@@ -74,6 +74,31 @@ struct StreamBufferRestore {
 };
 
 #ifdef _WIN32
+void enable_windows_console_rendering()
+{
+    // The miner writes UTF-8 glyphs and ANSI/VT escape sequences directly to
+    // stdout/stderr. Keep the direct, unbuffered console path, but explicitly put
+    // the Windows console host into the mode required to render them instead of
+    // displaying the escape bytes literally.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    const auto enable_vt = [](DWORD std_handle) {
+        HANDLE handle = GetStdHandle(std_handle);
+        if (handle == INVALID_HANDLE_VALUE || handle == nullptr) return;
+
+        DWORD mode = 0;
+        if (!GetConsoleMode(handle, &mode)) return; // redirected/file handle
+
+        mode |= ENABLE_PROCESSED_OUTPUT;
+        mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        SetConsoleMode(handle, mode);
+    };
+
+    enable_vt(STD_OUTPUT_HANDLE);
+    enable_vt(STD_ERROR_HANDLE);
+}
+
 const char* windows_access_kind(ULONG_PTR kind)
 {
     switch (kind) {
@@ -133,6 +158,7 @@ void pause_on_windows_error()
 int main(int argc, char** argv)
 {
 #ifdef _WIN32
+    enable_windows_console_rendering();
     SetUnhandledExceptionFilter(windows_unhandled_exception_filter);
 #endif
 
