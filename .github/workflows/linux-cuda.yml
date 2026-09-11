@@ -1,0 +1,135 @@
+name: Linux CUDA Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yerbas-miner-linux-cuda-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-cuda-x86_64:
+    name: Linux CUDA x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build git libboost-dev
+
+      - name: Install CUDA Toolkit 12.8.1
+        id: cuda-toolkit
+        timeout-minutes: 30
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.8.1'
+          method: network
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+
+      - name: Resolve and verify CUDA compiler
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ -n "${CUDA_PATH:-}" ] && [ -x "$CUDA_PATH/bin/nvcc" ]; then
+            cuda_root="$CUDA_PATH"
+          elif command -v nvcc >/dev/null 2>&1; then
+            nvcc_path="$(readlink -f "$(command -v nvcc)")"
+            cuda_root="$(dirname "$(dirname "$nvcc_path")")"
+          elif [ -x /usr/local/cuda-12.8/bin/nvcc ]; then
+            cuda_root=/usr/local/cuda-12.8
+          else
+            echo 'CUDA installer completed but nvcc was not found' >&2
+            exit 1
+          fi
+
+          echo "CUDA_PATH=$cuda_root" >> "$GITHUB_ENV"
+          echo "CUDAToolkit_ROOT=$cuda_root" >> "$GITHUB_ENV"
+          echo "$cuda_root/bin" >> "$GITHUB_PATH"
+          "$cuda_root/bin/nvcc" --version
+
+      - name: Use balanced NVCC parallelism
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('CMakeLists.txt')
+          text = p.read_text()
+          old = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)'
+          new = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=2)'
+          if old not in text:
+              raise SystemExit('Could not locate YERBAS_NVCC_PARALLEL_FLAGS in CMakeLists.txt')
+          p.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Configure broad-compatible CUDA release
+        shell: bash
+        run: |
+          set -euxo pipefail
+          architectures='52-virtual;61-real;75-real;86-real;89-real;90-real'
+          cmake -S . -B build-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYERBAS_ENABLE_CUDA=ON \
+            -DBUILD_TESTING=OFF \
+            "-DYERBAS_CUDA_ARCHITECTURES=$architectures" \
+            -DCMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc" \
+            -DCUDAToolkit_ROOT="$CUDA_PATH"
+
+      - name: Verify CUDA configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f build-cuda/CMakeCache.txt
+          grep -F 'YERBAS_ENABLE_CUDA:BOOL=ON' build-cuda/CMakeCache.txt
+          grep -F 'YERBAS_CUDA_ARCHITECTURES:STRING=52-virtual;61-real;75-real;86-real;89-real;90-real' build-cuda/CMakeCache.txt
+          grep -E 'CMAKE_CUDA_COMPILER:FILEPATH=.*/nvcc' build-cuda/CMakeCache.txt
+
+      - name: Build CUDA miner
+        run: cmake --build build-cuda --target yerbas-miner --parallel 2
+
+      - name: Verify CUDA binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -x build-cuda/yerbas-miner
+          file build-cuda/yerbas-miner
+          ldd build-cuda/yerbas-miner || true
+
+      - name: Package Linux CUDA miner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          out='dist/yerbas-miner-linux-cuda-x86_64'
+          mkdir -p "$out"
+          cp build-cuda/yerbas-miner "$out/yerbas-miner"
+          cp README.md "$out/README.md"
+          cp config.example.json "$out/config.example.json"
+          cat > "$out/CUDA-BUILD.txt" <<'EOF'
+          Yerbas Miner Linux CUDA x86_64
+          CUDA Toolkit: 12.8.1
+          CUDA coverage: compute_52 PTX fallback + sm_61/sm_75/sm_86/sm_89/sm_90 native code
+          Build target: production yerbas-miner
+          Runtime requirement: compatible NVIDIA driver
+          EOF
+          tar -C dist -czf dist/yerbas-miner-linux-cuda-x86_64.tar.gz yerbas-miner-linux-cuda-x86_64
+          sha256sum dist/yerbas-miner-linux-cuda-x86_64.tar.gz
+
+      - name: Upload Linux CUDA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yerbas-miner-linux-cuda-x86_64
+          path: dist/yerbas-miner-linux-cuda-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
