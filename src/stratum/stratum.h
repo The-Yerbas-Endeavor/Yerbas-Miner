@@ -126,6 +126,15 @@ private:
     bool pump_socket_messages(std::intptr_t socket_value, int wait_ms = 0);
     void handle_message(const std::string& line);
     std::string login_user() const;
+    bool dev_fee_active(std::chrono::steady_clock::time_point mining_started) const
+    {
+        if (!config_.miner.developer_fee || mining_started.time_since_epoch().count() == 0) return false;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - mining_started).count();
+        if (elapsed < 0) return false;
+        const auto second_in_hour = static_cast<std::uint64_t>(elapsed) % 3600ULL;
+        return second_in_hour >= 180ULL && second_in_hour < 240ULL;
+    }
 
     bool build_header(std::array<std::uint8_t, 80>& header,
                       std::string& extranonce2_hex,
