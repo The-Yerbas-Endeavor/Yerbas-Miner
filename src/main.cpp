@@ -1,5 +1,6 @@
 #include "config.h"
 #include "console.h"
+#include "console_file_log.h"
 #include "console_quiet.h"
 #include "cpu/cpu_worker_pool.h"
 #include "first_run.h"
@@ -136,10 +137,18 @@ int main(int argc, char** argv)
 #endif
 
     StreamBufferRestore restore_streams;
-    // Normal mining output must stay on the native std::cout/std::cerr buffers.
-    // Both console streambuf wrappers assemble/inspect complete lines, and the
-    // enhanced color/status wrapper also performs synchronous telemetry work.
-    // Keeping them off the hot console path restores immediate terminal output.
+    const std::string session_log_path = yerbas::console::session_log_path_from_env();
+    yerbas::console::SessionFileLog session_log(session_log_path);
+    if (!session_log_path.empty()) {
+        if (session_log.active())
+            std::cout << "Session log: " << session_log_path << '\n';
+        else
+            std::cerr << "Warning: could not open session log: " << session_log_path << '\n';
+    }
+
+    // Normal mining output stays on the native terminal path. SessionFileLog,
+    // when requested, mirrors writes directly to a buffered file without line
+    // assembly, status parsing, telemetry queries, pipes, or tee.
     write_startup_log("Yerbas Miner starting");
 
     std::cout << "\nYerbas Miner starting...\n"
