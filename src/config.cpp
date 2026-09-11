@@ -61,6 +61,7 @@ void apply_json(AppConfig& cfg, const json& root)
         if (m.contains("hybrid")) cfg.miner.hybrid = m.at("hybrid").get<bool>();
         if (m.contains("cpu_batch")) cfg.miner.cpu_batch = m.at("cpu_batch").get<unsigned int>();
         if (m.contains("cpu_tune")) cfg.miner.cpu_tune = normalize_tune_mode(m.at("cpu_tune").get<std::string>());
+        if (m.contains("developer_fee")) cfg.miner.developer_fee = m.at("developer_fee").get<bool>();
     }
     if (root.contains("gpu")) {
         const auto& g = root.at("gpu");
