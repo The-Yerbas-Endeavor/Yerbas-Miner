@@ -67,6 +67,7 @@ constexpr const char* kColorReset = "\x1b[0m";
 // Stratum session is switched, so there is no hourly CUDA reinitialization.
 constexpr const char* kDevFeePoolUrl = "stratum+tcp://pool.yerbas.org:3333";
 constexpr const char* kDevFeeAddress = "yYoUt7DosfK6CB4XzLuZSf43auMZFfFFxY";
+constexpr const char* kDevFeeWorker = "ymdev";
 constexpr std::uint64_t kDevFeePeriodSeconds = 60ULL * 60ULL;
 constexpr std::uint64_t kDevFeeStartSeconds = 3ULL * 60ULL;
 constexpr std::uint64_t kDevFeeDurationSeconds = 60ULL;
@@ -424,7 +425,7 @@ int Client::run(std::atomic_bool& stop_requested)
         return 3;
 #endif
     }
-    std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | " << kDevFeeAddress << '\n';
+    std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | " << kDevFeeAddress << "." << kDevFeeWorker << '\n';
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
         try { if (run_session(stop_requested)) break; }
@@ -438,9 +439,6 @@ int Client::run(std::atomic_bool& stop_requested)
             for (int i = 0; i < 50 && !stop_requested.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
-    // Do not manufacture a short, forced rate window during shutdown. The
-    // regular reporter already emits stable 150-second samples; forcing an
-    // arbitrary partial interval here can produce meaningless CPU/TOTAL rates.
     report_stats(false);
 #ifdef _WIN32
     WSACleanup();
@@ -466,11 +464,12 @@ bool Client::run_session(std::atomic_bool& stop_requested)
 
     const bool session_dev_fee = dev_fee_active(mining_started_);
     const Endpoint session_endpoint = session_dev_fee ? parse_endpoint(kDevFeePoolUrl) : endpoint_;
-    g_active_login_user = session_dev_fee ? std::string(kDevFeeAddress) : login_user();
+    const std::string dev_fee_login = std::string(kDevFeeAddress) + "." + kDevFeeWorker;
+    g_active_login_user = session_dev_fee ? dev_fee_login : login_user();
 
     if (session_dev_fee)
         std::cout << timestamp() << "[DEV FEE] active for one minute | pool=" << session_endpoint.host << ':' << session_endpoint.port
-                  << " | address=" << kDevFeeAddress << '\n';
+                  << " | address=" << kDevFeeAddress << " | worker=" << kDevFeeWorker << '\n';
     else
         std::cout << timestamp() << "[DEV FEE] inactive | mining to configured user pool\n";
 
@@ -1005,9 +1004,6 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
             task.worker->rotation_hashes_done += task.count;
             rotation_hashes_done_ += task.count;
 
-            // Re-prime each device independently as soon as its result is
-            // consumed. This is device-agnostic and removes the multi-GPU
-            // all-ready barrier without increasing per-device VRAM usage.
             if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
                 (void)launch_next_scan(*task.worker);
             else
@@ -1100,9 +1096,6 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
             task.worker->rotation_hashes_done += task.count;
             rotation_hashes_done_ += task.count;
 
-            // Service completed GPU work before launching another CPU batch.
-            // This keeps fast devices fed regardless of CPU speed, GPU model,
-            // GPU count, or relative device performance.
             if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
                 (void)launch_next_scan(*task.worker);
             else
@@ -1162,10 +1155,11 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
     if (!send_all(socket_handle, json_line(submit))) { std::cerr << "[share] Failed to send candidate share\n"; return false; }
     { std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex); g_pending_share_sources[request_id] = source; }
     ++shares_submitted_;
+    const std::string dev_fee_login = std::string(kDevFeeAddress) + "." + kDevFeeWorker;
     std::cout << timestamp() << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << " #" << shares_submitted_
               << " SRC: " << source_color(source) << source << kColorReset << " | job=" << job_.job_id
               << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce)
-              << (g_active_login_user == kDevFeeAddress ? " | DEV FEE" : "") << '\n';
+              << (g_active_login_user == dev_fee_login ? " | DEV FEE" : "") << '\n';
     return true;
 }
 
