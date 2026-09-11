@@ -19,6 +19,9 @@ struct MinerConfig {
     unsigned int cpu_batch{0};
     unsigned int cpu_lanes{1};
     std::string cpu_tune{"default"};
+    // Hidden config-only testing switch. Production default keeps the
+    // developer fee enabled; config.json may set "developer_fee": false.
+    bool developer_fee{true};
     // Explicit combined calibration flag. Forces fresh CPU tuning and pairs
     // with GPU autotune when --autotune is requested.
     bool autotune{false};
