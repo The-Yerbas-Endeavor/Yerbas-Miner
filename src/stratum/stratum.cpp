@@ -425,7 +425,7 @@ int Client::run(std::atomic_bool& stop_requested)
         return 3;
 #endif
     }
-    std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | " << kDevFeeAddress << "." << kDevFeeWorker << '\n';
+    std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | worker=" << kDevFeeWorker << '\n';
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
         try { if (run_session(stop_requested)) break; }
@@ -469,7 +469,7 @@ bool Client::run_session(std::atomic_bool& stop_requested)
 
     if (session_dev_fee)
         std::cout << timestamp() << "[DEV FEE] active for one minute | pool=" << session_endpoint.host << ':' << session_endpoint.port
-                  << " | address=" << kDevFeeAddress << " | worker=" << kDevFeeWorker << '\n';
+                  << " | worker=" << kDevFeeWorker << '\n';
     else
         std::cout << timestamp() << "[DEV FEE] inactive | mining to configured user pool\n";
 
@@ -568,8 +568,13 @@ void Client::handle_message(const std::string& line)
             } else std::cerr << "[stratum] Subscription rejected: " << message.dump() << '\n';
         } else if (id == 2) {
             const bool ok = message.contains("result") && message["result"].is_boolean() && message["result"].get<bool>();
-            if (ok && error.is_null()) { authorized_ = true; std::cout << "[stratum] Authorization accepted as " << g_active_login_user << '\n'; }
-            else std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
+            if (ok && error.is_null()) {
+                authorized_ = true;
+                if (g_active_login_user == std::string(kDevFeeAddress) + "." + kDevFeeWorker)
+                    std::cout << "[stratum] Authorization accepted as worker " << kDevFeeWorker << '\n';
+                else
+                    std::cout << "[stratum] Authorization accepted as " << g_active_login_user << '\n';
+            } else std::cerr << "[stratum] Authorization rejected: " << message.dump() << '\n';
         } else if (id >= 1000) {
             bool result_ok = false;
             if (message.contains("result")) {
