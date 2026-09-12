@@ -62,7 +62,6 @@ inline std::size_t adaptive_batch_from_budget(int device_id,
                                               std::size_t fallback)
 {
     constexpr std::size_t kAlignment = 128;
-    constexpr std::size_t kAbsoluteCap = 16384;
     constexpr std::size_t kPerHashOverhead = 4096;
 
     int previous_device = 0;
@@ -83,8 +82,12 @@ inline std::size_t adaptive_batch_from_budget(int device_id,
     const std::size_t memory_limit = memory_budget / bytes_per_hash;
     const std::size_t sm_limit = static_cast<std::size_t>(props.multiProcessorCount) * hashes_per_sm;
 
+    // Memory and SM concurrency are already hard runtime-derived limits. Do not
+    // add a fixed hash-count ceiling here: a static cap silently penalizes GPUs
+    // with substantially more memory or SM capacity than the hardware available
+    // when the miner was first tuned. The live BatchEngine still enforces exact
+    // allocation bounds before launch.
     std::size_t selected = memory_limit < sm_limit ? memory_limit : sm_limit;
-    if (selected > kAbsoluteCap) selected = kAbsoluteCap;
     selected = (selected / kAlignment) * kAlignment;
     if (selected < kAlignment) selected = kAlignment;
     return selected;
