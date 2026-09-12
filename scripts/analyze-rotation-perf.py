@@ -9,8 +9,10 @@ The miner already emits both:
     [rotation perf] fingerprint=<fingerprint> | ...
 
 This tool joins those records and computes hash-weighted throughput across all
-fingerprints that share the same ordered CN triple. It intentionally performs
-no hardware-specific classification or tuning.
+fingerprints that share the same ordered CN triple. Short-lived rotations can be
+excluded so job transitions do not dominate performance conclusions. It also
+reports per-variant presence correlations without making hardware-specific
+assumptions or pretending those correlations isolate a single algorithm's cost.
 """
 
 from __future__ import annotations
@@ -56,6 +58,15 @@ class Aggregate:
         self.min_hps = min(self.min_hps, total_hps)
         self.max_hps = max(self.max_hps, total_hps)
 
+    def merge(self, other: "Aggregate") -> None:
+        self.samples += other.samples
+        self.seconds += other.seconds
+        self.hashes += other.hashes
+        self.cpu_hashes += other.cpu_hashes
+        self.gpu_hashes += other.gpu_hashes
+        self.min_hps = min(self.min_hps, other.min_hps)
+        self.max_hps = max(self.max_hps, other.max_hps)
+
     @property
     def hps(self) -> float:
         return self.hashes / self.seconds if self.seconds > 0.0 else 0.0
@@ -84,11 +95,12 @@ def expand_inputs(items: Iterable[str]) -> list[Path]:
     return files
 
 
-def parse_files(paths: Iterable[Path]) -> tuple[dict[str, Aggregate], int, int]:
+def parse_files(paths: Iterable[Path], min_duration: float) -> tuple[dict[str, Aggregate], int, int, int]:
     by_order: dict[str, Aggregate] = defaultdict(Aggregate)
     fingerprint_order: dict[str, str] = {}
     perf_records = 0
     unmatched = 0
+    short_samples = 0
 
     for path in paths:
         # Fingerprints can recur across files, but the schedule mapping is stable.
@@ -112,13 +124,17 @@ def parse_files(paths: Iterable[Path]) -> tuple[dict[str, Aggregate], int, int]:
                     continue
 
                 seconds = float(perf.group(3))
+                if seconds < min_duration:
+                    short_samples += 1
+                    continue
+
                 hashes = int(perf.group(4))
                 total_hps = float(perf.group(5))
                 cpu_hps = float(perf.group(6))
                 gpu_hps = float(perf.group(7))
                 by_order[order].add(seconds, hashes, total_hps, cpu_hps, gpu_hps)
 
-    return dict(by_order), perf_records, unmatched
+    return dict(by_order), perf_records, unmatched, short_samples
 
 
 def fast_position(order: str) -> str:
@@ -134,17 +150,33 @@ def rate(value: float) -> str:
     return f"{value / 1000.0:.3f} kH/s" if value >= 1000.0 else f"{value:.2f} H/s"
 
 
+def print_aggregate(label: str, agg: Aggregate) -> None:
+    print(
+        f"{label:>13}: samples={agg.samples:4d} active={agg.seconds:8.1f}s "
+        f"avg={rate(agg.hps)} gpu={rate(agg.gpu_hps)} cpu={rate(agg.cpu_hps)}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("logs", nargs="+", help="log file path(s) or shell-style glob(s)")
     parser.add_argument("--min-samples", type=int, default=1, help="hide CN orders with fewer samples")
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=30.0,
+        help="ignore rotation samples shorter than this many seconds (default: 30; use 0 to disable)",
+    )
     args = parser.parse_args()
+
+    if args.min_duration < 0.0:
+        parser.error("--min-duration must be >= 0")
 
     paths = expand_inputs(args.logs)
     if not paths:
         parser.error("no readable log files matched")
 
-    by_order, perf_records, unmatched = parse_files(paths)
+    by_order, perf_records, unmatched, short_samples = parse_files(paths, args.min_duration)
     rows = [
         (order, aggregate)
         for order, aggregate in by_order.items()
@@ -152,7 +184,13 @@ def main() -> int:
     ]
     rows.sort(key=lambda item: item[1].hps)
 
-    print(f"files={len(paths)} perf_records={perf_records} matched={perf_records - unmatched} unmatched={unmatched}")
+    matched = perf_records - unmatched
+    retained = matched - short_samples
+    print(
+        f"files={len(paths)} perf_records={perf_records} matched={matched} "
+        f"retained={retained} short_filtered={short_samples} unmatched={unmatched} "
+        f"min_duration={args.min_duration:.1f}s"
+    )
     print()
     print("Ordered CryptoNight triple performance (slowest first)")
     print("samples   active_s    total_avg    gpu_avg      cpu_avg      min          max          fast_pos  CN order")
@@ -166,28 +204,33 @@ def main() -> int:
         )
 
     position_totals: dict[str, Aggregate] = defaultdict(Aggregate)
+    variant_totals: dict[str, Aggregate] = defaultdict(Aggregate)
+    fast_presence: dict[str, Aggregate] = defaultdict(Aggregate)
     for order, agg in by_order.items():
-        position = fast_position(order)
-        # Merge already-aggregated values without losing hash/time weighting.
-        merged = position_totals[position]
-        merged.samples += agg.samples
-        merged.seconds += agg.seconds
-        merged.hashes += agg.hashes
-        merged.cpu_hashes += agg.cpu_hashes
-        merged.gpu_hashes += agg.gpu_hashes
-        merged.min_hps = min(merged.min_hps, agg.min_hps)
-        merged.max_hps = max(merged.max_hps, agg.max_hps)
+        position_totals[fast_position(order)].merge(agg)
+        variants = {part.strip() for part in order.split("/") if part.strip()}
+        for variant in variants:
+            variant_totals[variant].merge(agg)
+        fast_presence["with CN-Fast" if "CN-Fast" in variants else "without CN-Fast"].merge(agg)
 
     print()
     print("CN-Fast position summary")
     for position in ("first", "middle", "last", "none"):
         agg = position_totals.get(position)
-        if not agg or agg.samples == 0:
-            continue
-        print(
-            f"{position:>6}: samples={agg.samples:4d} active={agg.seconds:8.1f}s "
-            f"avg={rate(agg.hps)} gpu={rate(agg.gpu_hps)} cpu={rate(agg.cpu_hps)}"
-        )
+        if agg and agg.samples:
+            print_aggregate(position, agg)
+
+    print()
+    print("Variant presence correlation (not isolated per-variant throughput)")
+    for variant, agg in sorted(variant_totals.items(), key=lambda item: item[1].hps):
+        print_aggregate(variant, agg)
+
+    print()
+    print("CN-Fast presence correlation")
+    for label in ("with CN-Fast", "without CN-Fast"):
+        agg = fast_presence.get(label)
+        if agg and agg.samples:
+            print_aggregate(label, agg)
 
     return 0
 
