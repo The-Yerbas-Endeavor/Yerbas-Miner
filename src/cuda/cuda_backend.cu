@@ -39,9 +39,9 @@
 
 namespace {
 
-constexpr int kCnProductionGeometryRevision = 1;
+constexpr int kCnProductionGeometryRevision = 2;
 constexpr int kCnProductionGeometryPasses = 3;
-constexpr int kCnProductionGeometryMaxCandidates = 6;
+constexpr int kCnProductionGeometryMaxCandidates = 12;
 
 struct CnProductionGeometryState {
     bool initialized{false};
@@ -69,6 +69,29 @@ bool cn_geometry_threads_valid_variant(int mode,
     if (threads < warp || threads > props.maxThreadsPerBlock ||
         (threads % warp) != 0)
         return false;
+
+    cudaFuncAttributes attrs{};
+    cudaError_t attr_rc = cudaSuccess;
+    if (mode == 222) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable2_tile64<VariantIndex>);
+    } else if (mode == 444) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable4_cg<VariantIndex>);
+    } else if (mode == 44) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
+    } else {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_cooperative<VariantIndex>);
+    }
+    if (attr_rc != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    if (attrs.maxThreadsPerBlock > 0 && threads > attrs.maxThreadsPerBlock)
+        return false;
+
     if (mode == 222) {
         int active = 0;
         const cudaError_t rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -228,12 +251,26 @@ void initialize_cn_production_geometry(int device_id,
             state.threads[state.candidate_count++] = threads;
     };
 
+    const int warp = std::max(32, props.warpSize);
+    const int max_threads = (props.maxThreadsPerBlock / warp) * warp;
+    const auto align_warp = [warp](int threads) {
+        return std::max(warp, (threads / warp) * warp);
+    };
+
+    // Build a device-derived search around the occupancy baseline and the
+    // usable thread-block range. This deliberately avoids GPU model tables.
     add(baseline_threads);
-    add(32);
-    add(128);
-    add(256);
-    add(512);
-    add(768);
+    add(warp);
+    add(2 * warp);
+    add(4 * warp);
+    add(8 * warp);
+    add(align_warp(max_threads / 2));
+    add(align_warp((max_threads * 5) / 8));
+    add(align_warp((max_threads * 3) / 4));
+    add(align_warp((max_threads * 7) / 8));
+    add(align_warp(max_threads - warp));
+    add(max_threads);
+    add(align_warp(baseline_threads + warp));
 
     if (state.candidate_count == 0) {
         state.threads[0] = std::max(32, std::min(baseline_threads, props.maxThreadsPerBlock));
@@ -327,14 +364,23 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
         stream, device_id, props, count, scratchpads, contexts);
     auto& selector = g_cn_production_selector[device_id][VariantIndex];
 
-    // mul32 passed exact parity but never reached the 5% promotion threshold in
-    // repeated real-batch tests. Keep the implementation available as a reference
-    // candidate, but retire its three full production timing passes.
-    if (!selector.selected && selector.cg_ok) {
-        selector.cg_ok = false;
-        std::cout << "[CUDA CN production selector] GPU " << device_id
-                  << " | " << cryptonight::config_value(VariantIndex).name
-                  << " | mul32=retired-from-production-timing\n";
+    // The cooperative 32x32 candidate is worth re-testing for CN-Fast after the
+    // dependency-chain rewrite. Other variants keep its retired status so retune
+    // overhead remains bounded and production behavior stays conservative.
+    if constexpr (VariantIndex != 2) {
+        if (!selector.selected && selector.cg_ok) {
+            selector.cg_ok = false;
+            std::cout << "[CUDA CN production selector] GPU " << device_id
+                      << " | " << cryptonight::config_value(VariantIndex).name
+                      << " | mul32=retired-from-production-timing\n";
+        }
+    } else {
+        if (!selector.selected && selector.cg_ok &&
+            selector.baseline_samples == 0 && selector.tile_samples == 0 &&
+            selector.cg_samples == 0) {
+            std::cout << "[CUDA CN production selector] GPU " << device_id
+                      << " | CN-Fast | mul32=enabled-for-production-timing\n";
+        }
     }
 
     // The existing production kernel selector still owns parity and kernel mode.
