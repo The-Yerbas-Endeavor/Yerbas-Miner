@@ -94,6 +94,10 @@ void configure_gpu_tuning_environment(const GpuConfig& gpu)
         set_environment_if_unset("YERBAS_GPU_AUTOTUNE", "1");
         set_environment_if_unset("YERBAS_GPU_VARIANT_AUTOTUNE", "1");
         set_environment_if_unset("YERBAS_CUDA_RETUNE", "1");
+        // Full tuning should also populate the per-device CryptoNight stagger
+        // cache. Normal gpu_tune=auto remains cache-first and never pays this
+        // benchmark cost unless a proven cache already exists.
+        set_environment_if_unset("YERBAS_CUDA_OVERLAP", "1");
         return;
     }
 
@@ -190,7 +194,7 @@ int Miner::run()
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
     std::cout << "GPU tuning: " << config_.gpu.gpu_tune;
     if (config_.gpu.gpu_tune == "full")
-        std::cout << " | bounded calibration=fresh | production retune=deep";
+        std::cout << " | bounded calibration=fresh | production retune=deep | overlap retune=enabled";
     else if (config_.gpu.autotune)
         std::cout << " | bounded calibration=fresh";
     else if (config_.gpu.gpu_tune == "auto")
@@ -200,7 +204,7 @@ int Miner::run()
     std::cout << '\n';
 
     if (config_.gpu.gpu_tune == "full")
-        std::cout << "[AUTOTUNE] GPU full tuning requested | exact production caches will be rebuilt as rotations appear\n";
+        std::cout << "[AUTOTUNE] GPU full tuning requested | exact production and overlap caches will be rebuilt as rotations appear\n";
     else if (config_.gpu.autotune)
         std::cout << "[AUTOTUNE] GPU bounded calibration will run during CUDA initialization\n";
 
