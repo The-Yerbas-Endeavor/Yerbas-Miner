@@ -11,9 +11,10 @@
 
 namespace {
 
-constexpr int kGpuVariantBatchRevision = 1;
+constexpr int kGpuVariantBatchRevision = 2;
 constexpr std::size_t kGpuVariantBatchCount = 6;
 constexpr double kGpuVariantBatchMinimumGain = 1.01;
+constexpr int kGpuVariantBatchConfirmPasses = 2;
 
 struct GpuVariantBatchPolicy {
     std::array<std::size_t, kGpuVariantBatchCount> batches{};
@@ -232,6 +233,7 @@ GpuVariantBatchPolicy tune_gpu_variant_batches(
               << " | variants=6 | candidates<=6/variant"
               << " | metric=synthetic-variant GhostRider H/s"
               << " | gate=+1.00%"
+              << " | confirmation=median-of-3 winner-vs-nominal"
               << " | class-policy=anchor"
               << " | memory-policy=allocated-byte-budget\n";
 
@@ -313,17 +315,72 @@ GpuVariantBatchPolicy tune_gpu_variant_batches(
                       << std::defaultfloat << '\n';
         }
 
+        double decision_nominal_hps = nominal_hps;
+        double decision_best_hps = best_hps;
+        bool confirmation_run = false;
+
+        // A full multi-pass sweep would make explicit tuning much too expensive.
+        // Instead, only a provisional promotion pays for two extra measurements
+        // of the winner and nominal. Alternate their order across the two passes,
+        // then compare median-of-three values including the original sweep sample.
+        // This removes most candidate-order/temperature noise while preserving a
+        // bounded startup cost.
+        if (best_batch != nominal && best_hps > 0.0 && nominal_hps > 0.0 &&
+            best_hps > nominal_hps * kGpuVariantBatchMinimumGain) {
+            confirmation_run = true;
+            std::array<double, 3> nominal_samples{{nominal_hps, 0.0, 0.0}};
+            std::array<double, 3> best_samples{{best_hps, 0.0, 0.0}};
+
+            for (int pass = 0; pass < kGpuVariantBatchConfirmPasses; ++pass) {
+                const bool nominal_first = (pass % 2) == 0;
+                for (int slot = 0; slot < 2; ++slot) {
+                    const bool measure_nominal = (slot == 0) == nominal_first;
+                    const std::size_t batch = measure_nominal ? nominal : best_batch;
+                    shape.batch = batch;
+                    const double hps = gpu_calibration_hps(
+                        stream, d_job, d_nonces, states, scratchpads, contexts, job, shape);
+                    if (measure_nominal)
+                        nominal_samples[static_cast<std::size_t>(pass) + 1U] = hps;
+                    else
+                        best_samples[static_cast<std::size_t>(pass) + 1U] = hps;
+
+                    std::cout << std::fixed << std::setprecision(2)
+                              << "[GPU " << device_id << "] GPU CN batch confirm"
+                              << " | variant=" << cfg.name
+                              << " | pass=" << (pass + 1) << '/' << kGpuVariantBatchConfirmPasses
+                              << " | batch=" << batch
+                              << " | role=" << (measure_nominal ? "nominal" : "winner")
+                              << " | throughput=" << hps << " H/s"
+                              << std::defaultfloat << '\n';
+                }
+            }
+
+            std::sort(nominal_samples.begin(), nominal_samples.end());
+            std::sort(best_samples.begin(), best_samples.end());
+            decision_nominal_hps = nominal_samples[1];
+            decision_best_hps = best_samples[1];
+
+            std::cout << std::fixed << std::setprecision(2)
+                      << "[GPU " << device_id << "] GPU CN batch confirmation"
+                      << " | variant=" << cfg.name
+                      << " | nominal=" << nominal << '@' << decision_nominal_hps << " H/s"
+                      << " | winner=" << best_batch << '@' << decision_best_hps << " H/s"
+                      << " | metric=median-of-3"
+                      << std::defaultfloat << '\n';
+        }
+
         std::size_t selected = nominal;
         bool promoted = false;
-        if (best_hps > 0.0 && nominal_hps > 0.0 && best_batch != nominal &&
-            best_hps > nominal_hps * kGpuVariantBatchMinimumGain) {
+        if (decision_best_hps > 0.0 && decision_nominal_hps > 0.0 &&
+            best_batch != nominal &&
+            decision_best_hps > decision_nominal_hps * kGpuVariantBatchMinimumGain) {
             selected = best_batch;
             promoted = true;
         }
         policy.batches[variant] = selected;
 
-        const double gain_pct = nominal_hps > 0.0
-            ? (best_hps / nominal_hps - 1.0) * 100.0 : 0.0;
+        const double gain_pct = decision_nominal_hps > 0.0
+            ? (decision_best_hps / decision_nominal_hps - 1.0) * 100.0 : 0.0;
         std::cout << std::fixed << std::setprecision(2)
                   << "[GPU " << device_id << "] GPU CN batch selected"
                   << " | variant=" << cfg.name
@@ -332,6 +389,7 @@ GpuVariantBatchPolicy tune_gpu_variant_batches(
                   << " | best-gain=" << (gain_pct >= 0.0 ? "+" : "") << gain_pct << '%'
                   << " | selected=" << selected
                   << " | decision=" << (promoted ? "promote" : "keep-nominal")
+                  << " | evidence=" << (confirmation_run ? "median-of-3" : "sweep")
                   << std::defaultfloat << '\n';
     }
 
