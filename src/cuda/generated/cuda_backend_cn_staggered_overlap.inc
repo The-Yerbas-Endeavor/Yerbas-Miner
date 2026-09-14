@@ -14,7 +14,7 @@
 namespace {
 
 constexpr float kCnStaggerPromotionRatio = 0.97F;
-constexpr int kCnStaggerSchedulerRevision = 1;
+constexpr int kCnStaggerSchedulerRevision = 2;
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_mode{};
 static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_reported{};
 
