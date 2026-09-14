@@ -1,4 +1,5 @@
 #include "cuda/generated/cuda_backend_gpu_variant_batch.inc"
+#include "cuda/generated/cuda_backend_gpu_variant_runtime.inc"
 
 struct BatchEngine::Impl {
     int device_id{-1};
@@ -185,6 +186,12 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     if (adaptive_batch >= impl_->batch_quantum)
         adaptive_batch = (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
     adaptive_batch = std::max<std::size_t>(1U, adaptive_batch);
+
+    // Every CN selector/cache is keyed by batch on disk. Mirror that contract in
+    // live memory as rotations move between Fast/Lite/heavier preferred counts.
+    // Partial explicit-retune progress is preserved and resumed when a batch
+    // returns, rather than being discarded or reused at the wrong count.
+    gpu_variant_activate_runtime_batch(impl_->device_id, adaptive_batch, used_variants);
 
     if (adaptive_batch != impl_->batch_size) {
         std::cout << "[GPU " << impl_->device_id << "] rotation-adaptive batch"
