@@ -64,14 +64,44 @@ void pause_before_exit()
 }
 #endif
 
-void set_gpu_autotune_environment(bool enabled)
+bool environment_is_set(const char* name)
 {
-    if (!enabled) return;
+    const char* value = std::getenv(name);
+    return value != nullptr && *value != '\0';
+}
+
+void set_environment_if_unset(const char* name, const char* value)
+{
+    if (environment_is_set(name)) return;
 #ifdef _WIN32
-    _putenv_s("YERBAS_GPU_AUTOTUNE", "1");
+    _putenv_s(name, value);
 #else
-    setenv("YERBAS_GPU_AUTOTUNE", "1", 1);
+    setenv(name, value, 0);
 #endif
+}
+
+void configure_gpu_tuning_environment(const GpuConfig& gpu)
+{
+    // Publish the operator-facing mode for diagnostics/future backend policy,
+    // while leaving explicitly supplied environment variables untouched so the
+    // existing developer controls remain authoritative overrides.
+    set_environment_if_unset("YERBAS_GPU_TUNE_MODE", gpu.gpu_tune.c_str());
+
+    if (gpu.gpu_tune == "full") {
+        // Full means the complete path we validated: refresh the bounded
+        // scratchpad/variant calibration and ignore exact selector/geometry
+        // caches so real production rotations can align themselves again.
+        set_environment_if_unset("YERBAS_GPU_AUTOTUNE", "1");
+        set_environment_if_unset("YERBAS_GPU_VARIANT_AUTOTUNE", "1");
+        set_environment_if_unset("YERBAS_CUDA_RETUNE", "1");
+        return;
+    }
+
+    // First-run/legacy --gpu-autotune stays intentionally bounded. It refreshes
+    // class/variant calibration without turning a first launch into the hours-
+    // long deep production rotation retune used by gpu_tune=full.
+    if (gpu.autotune)
+        set_environment_if_unset("YERBAS_GPU_AUTOTUNE", "1");
 }
 
 void set_cpu_retune_environment(bool enabled)
@@ -103,7 +133,7 @@ int Miner::run()
     config_.miner.cpu_lanes = 1;
 
     if (config_.miner.autotune) {
-        std::cout << "[AUTOTUNE] combined calibration requested | CPU=fresh | GPU=fresh\n";
+        std::cout << "[AUTOTUNE] combined calibration requested | CPU=fresh | GPU=bounded-fresh\n";
         set_cpu_retune_environment(true);
     }
 
@@ -141,7 +171,7 @@ int Miner::run()
     }
 
     cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
-    set_gpu_autotune_environment(config_.gpu.autotune);
+    configure_gpu_tuning_environment(config_.gpu);
 
     std::cout << "Yerbas Miner 0.5.2\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
@@ -158,8 +188,21 @@ int Miner::run()
               << " | tune " << config_.miner.cpu_tune << "\n";
     print_cpu_capabilities();
     std::cout << "Hybrid scheduler: " << (config_.miner.hybrid ? "enabled" : "disabled") << "\n";
-    if (config_.gpu.autotune)
-        std::cout << "[AUTOTUNE] GPU phase will run during CUDA initialization\n";
+    std::cout << "GPU tuning: " << config_.gpu.gpu_tune;
+    if (config_.gpu.gpu_tune == "full")
+        std::cout << " | bounded calibration=fresh | production retune=deep";
+    else if (config_.gpu.autotune)
+        std::cout << " | bounded calibration=fresh";
+    else if (config_.gpu.gpu_tune == "auto")
+        std::cout << " | cache-first";
+    else
+        std::cout << " | explicit benchmarking=off";
+    std::cout << '\n';
+
+    if (config_.gpu.gpu_tune == "full")
+        std::cout << "[AUTOTUNE] GPU full tuning requested | exact production caches will be rebuilt as rotations appear\n";
+    else if (config_.gpu.autotune)
+        std::cout << "[AUTOTUNE] GPU bounded calibration will run during CUDA initialization\n";
 
     stratum::Client stratum_client(config_);
     if (stop_requested()) {
