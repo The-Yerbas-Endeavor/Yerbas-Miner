@@ -45,6 +45,18 @@ std::string normalize_tune_mode(std::string value)
     return value;
 }
 
+std::string normalize_gpu_tune_mode(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "none" || value == "no" || value == "false" || value == "0") value = "off";
+    if (value == "yes" || value == "true" || value == "1") value = "full";
+    if (value != "off" && value != "auto" && value != "full")
+        throw std::runtime_error("GPU tune mode must be off, auto, or full");
+    return value;
+}
+
 void apply_json(AppConfig& cfg, const json& root)
 {
     if (root.contains("pool")) {
@@ -69,6 +81,10 @@ void apply_json(AppConfig& cfg, const json& root)
         if (g.contains("devices")) cfg.gpu.devices = g.at("devices").get<std::vector<int>>();
         if (g.contains("intensity")) cfg.gpu.intensity = g.at("intensity").get<int>();
         if (g.contains("skip_validation")) cfg.gpu.skip_validation = g.at("skip_validation").get<bool>();
+        if (g.contains("gpu_tune")) cfg.gpu.gpu_tune = normalize_gpu_tune_mode(g.at("gpu_tune").get<std::string>());
+        else if (g.contains("tune")) cfg.gpu.gpu_tune = normalize_gpu_tune_mode(g.at("tune").get<std::string>());
+        // Legacy config compatibility. The old boolean requested the bounded
+        // calibration pass, not the newer deep production retune.
         if (g.contains("autotune")) cfg.gpu.autotune = g.at("autotune").get<bool>();
     }
     if (root.contains("logging")) {
@@ -116,6 +132,7 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--no-hybrid") cfg.miner.hybrid = false;
         else if (arg == "--devices") cfg.gpu.devices = parse_devices(require_value(argc, argv, i, "--devices"));
         else if (arg == "--intensity") cfg.gpu.intensity = std::stoi(require_value(argc, argv, i, "--intensity"));
+        else if (arg == "--gpu-tune") cfg.gpu.gpu_tune = normalize_gpu_tune_mode(require_value(argc, argv, i, "--gpu-tune"));
         else if (arg == "--gpu-autotune") cfg.gpu.autotune = true;
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
@@ -126,6 +143,7 @@ AppConfig load_config(int argc, char** argv)
     }
 
     cfg.miner.cpu_tune = normalize_tune_mode(cfg.miner.cpu_tune);
+    cfg.gpu.gpu_tune = normalize_gpu_tune_mode(cfg.gpu.gpu_tune);
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
     return cfg;
 }
@@ -141,12 +159,13 @@ void print_config_help(const char* program)
         << "  --threads N         CPU thread ceiling (0 = all logical CPUs)\n"
         << "  --cpu-batch N       CPU batch when tuning is off / initial reference value\n"
         << "  --tune MODE         CPU tuning: off, simple, default, full\n"
-        << "  --autotune          Fresh CPU + GPU calibration with visible progress\n"
+        << "  --autotune          Fresh bounded CPU + GPU calibration with visible progress\n"
         << "  --no-tune           Start immediately with configured/default CPU settings\n"
         << "  --no-cpu            Disable CPU mining\n"
         << "  --no-hybrid         Do not combine CPU and GPU\n"
         << "  --devices 0,1       GPU device ids\n"
         << "  --intensity N       GPU intensity (0 = auto)\n"
+        << "  --gpu-tune MODE     GPU tuning policy: off, auto, full\n"
         << "  --gpu-autotune      Run one bounded GPU calibration and cache the result\n"
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
@@ -154,21 +173,28 @@ void print_config_help(const char* program)
         << "  --perf-log FILE     Append rotation performance records to CSV\n"
         << "  -h, --help          Show this help\n\n"
         << "Autotune:\n"
-        << "  --autotune forces one fresh CPU + GPU calibration pass. Progress is printed\n"
-        << "  to the console, winners are validated/cached, and later normal starts load\n"
-        << "  the cached policies immediately without benchmarking.\n\n"
+        << "  --autotune forces one fresh bounded CPU + GPU calibration pass. Progress is\n"
+        << "  printed, winners are validated/cached, and later normal starts load them\n"
+        << "  immediately without repeating the bounded calibration.\n\n"
         << "CPU tuning modes:\n"
         << "  off      no CPU benchmark; mine immediately with configured/default settings\n"
         << "  simple   quick production tuning\n"
         << "  default  balanced production tuning\n"
         << "  full     exhaustive production/rotation tuning where supported\n\n"
-        << "GPU tuning:\n"
-        << "  Normal startup never benchmarks. --gpu-autotune runs a short explicit\n"
-        << "  calibration, validates the winner, and saves it for later instant startup.\n\n"
+        << "GPU tuning modes:\n"
+        << "  off      never request GPU benchmarking; use saved/safe production settings\n"
+        << "  auto     default; load saved tuning and offer first-run calibration if absent\n"
+        << "  full     force fresh bounded calibration plus deep production retuning\n"
+        << "           as real GhostRider rotations are encountered\n\n"
+        << "Developer GPU tuning environment variables still override normal operator use:\n"
+        << "  YERBAS_GPU_AUTOTUNE=1          Force bounded scratchpad/variant calibration\n"
+        << "  YERBAS_CUDA_RETUNE=1           Ignore exact CUDA selector/geometry caches\n"
+        << "                                  and deep-retune production rotations\n"
+        << "  YERBAS_GPU_VARIANT_AUTOTUNE=1  Force CN-variant batch calibration\n\n"
         << "CPU autotune environment:\n"
         << "  YERBAS_CPU_RETUNE=1            Ignore cached CPU tuning and benchmark again\n"
         << "  YERBAS_CPU_DISABLE_AUTOTUNE=1  Force direct/no-tune CPU startup\n"
-        << "  YERBAS_DIAGNOSTICS=1          Show individual autotune benchmark results\n";
+        << "  YERBAS_DIAGNOSTICS=1           Show individual autotune benchmark results\n";
 }
 
 } // namespace yerbas
