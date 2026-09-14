@@ -16,6 +16,7 @@
     "enabled": true,
     "devices": [],
     "intensity": 0,
+    "gpu_tune": "auto",
     "skip_validation": false
   },
   "logging": {
