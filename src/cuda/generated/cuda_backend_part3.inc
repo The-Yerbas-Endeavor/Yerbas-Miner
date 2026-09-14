@@ -1,3 +1,5 @@
+#include "cuda/generated/cuda_backend_gpu_variant_batch.inc"
+
 struct BatchEngine::Impl {
     int device_id{-1};
     std::size_t batch_size{0};
@@ -6,6 +8,9 @@ struct BatchEngine::Impl {
     std::size_t scratchpad_budget_bytes{0};
     std::size_t batch_quantum{1};
     std::array<std::size_t, kGpuBatchClassCount> class_batches{};
+    std::array<std::size_t, kGpuVariantBatchCount> variant_batches{};
+    bool variant_batch_specialized{false};
+    bool variant_batch_from_cache{false};
     unsigned int fallback_threads{1};
     cudaStream_t stream{};
     DeviceJob* d_job{nullptr};
@@ -81,13 +86,26 @@ struct BatchEngine::Impl {
         cn_geometries = policy.cn_geometries;
         core_threads = policy.core_threads;
 
+        const auto variant_policy = build_gpu_variant_batch_policy(
+            device_id, class_batches, batch_capacity, scratchpad_budget_bytes,
+            batch_quantum, core_threads, stream, d_job, d_nonces, d_states,
+            d_cn_scratchpads, d_cn_contexts);
+        variant_batches = variant_policy.batches;
+        variant_batch_specialized = variant_policy.specialized;
+        variant_batch_from_cache = variant_policy.from_cache;
+
         std::cout << "[GPU " << device_id << "] adaptive batch capacity"
                   << " | calibrated=" << class_batches[0] << '/' << class_batches[1]
                   << '/' << class_batches[2] << '/' << class_batches[3]
                   << " | classes=2MiB/1MiB/512KiB/256KiB"
                   << " | max=" << batch_capacity
                   << " | scratchpad-budget=" << (scratchpad_budget_bytes / (1024U * 1024U)) << " MiB"
-                  << " | policy=rotation-aware\n";
+                  << " | policy=rotation-aware"
+                  << " | variant-policy="
+                  << (variant_batch_specialized
+                          ? (variant_batch_from_cache ? "cache" : "tuned")
+                          : "class-fallback")
+                  << '\n';
     }
 
     ~Impl()
@@ -117,10 +135,12 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     impl_->host_job = job;
 
     std::size_t max_page_size = 0;
+    std::array<bool, kGpuVariantBatchCount> used_variants{};
     for (const std::uint8_t encoded : job.stages) {
         if ((encoded & ghostrider::kCryptoNightStageFlag) == 0) continue;
         const std::uint8_t variant = static_cast<std::uint8_t>(encoded & 0x7fU);
         if (variant >= cryptonight::kVariantConfigs.size()) continue;
+        used_variants[variant] = true;
         max_page_size = std::max<std::size_t>(max_page_size,
                                               cryptonight::kVariantConfigs[variant].page_size);
     }
@@ -128,13 +148,37 @@ void BatchEngine::upload_job(const JobDescriptor& job)
 
     const std::size_t class_index = gpu_batch_class_index(max_page_size);
     std::size_t adaptive_batch = impl_->class_batches[class_index];
-    if (adaptive_batch == 0U || adaptive_batch > impl_->batch_capacity) {
-        adaptive_batch = gpu_memory_derived_class_batch(
-            impl_->base_batch_size, impl_->batch_capacity, max_page_size, impl_->batch_quantum);
+    bool using_variant_policy = impl_->variant_batch_specialized;
+
+    if (using_variant_policy) {
+        adaptive_batch = impl_->batch_capacity;
+        bool found_variant = false;
+        for (std::size_t variant = 0; variant < used_variants.size(); ++variant) {
+            if (!used_variants[variant]) continue;
+            const std::size_t preferred = impl_->variant_batches[variant];
+            if (preferred == 0U || preferred > impl_->batch_capacity) {
+                using_variant_policy = false;
+                break;
+            }
+            adaptive_batch = std::min(adaptive_batch, preferred);
+            found_variant = true;
+        }
+        if (!found_variant) using_variant_policy = false;
+    }
+
+    if (!using_variant_policy) {
+        adaptive_batch = impl_->class_batches[class_index];
+        if (adaptive_batch == 0U || adaptive_batch > impl_->batch_capacity) {
+            adaptive_batch = gpu_memory_derived_class_batch(
+                impl_->base_batch_size, impl_->batch_capacity,
+                max_page_size, impl_->batch_quantum);
+        }
     }
 
     // Final byte-budget guard. A corrupted/stale cache can never select more CN
-    // scratchpad bytes than were allocated for this engine.
+    // scratchpad bytes than were allocated for this engine. This also keeps a
+    // specialized per-variant preference safe when several variants share one
+    // GhostRider rotation: every one of the 18 stages still uses this same count.
     const std::size_t memory_safe_batch = std::max<std::size_t>(1U,
         std::min(impl_->batch_capacity, impl_->scratchpad_budget_bytes / max_page_size));
     adaptive_batch = std::min(adaptive_batch, memory_safe_batch);
@@ -147,8 +191,20 @@ void BatchEngine::upload_job(const JobDescriptor& job)
                   << " | class=" << kGpuBatchClassNames[class_index]
                   << " | scratchpad=" << (max_page_size / 1024U) << " KiB/hash"
                   << " | batch=" << impl_->batch_size << " -> " << adaptive_batch
-                  << " | calibrated=" << impl_->class_batches[class_index]
-                  << " | max=" << impl_->batch_capacity << '\n';
+                  << " | policy=" << (using_variant_policy ? "variant-min" : "class")
+                  << " | class-calibrated=" << impl_->class_batches[class_index];
+        if (using_variant_policy) {
+            std::cout << " | variants=";
+            bool first = true;
+            for (std::size_t variant = 0; variant < used_variants.size(); ++variant) {
+                if (!used_variants[variant]) continue;
+                if (!first) std::cout << '/';
+                first = false;
+                std::cout << cryptonight::kVariantConfigs[variant].name
+                          << ':' << impl_->variant_batches[variant];
+            }
+        }
+        std::cout << " | max=" << impl_->batch_capacity << '\n';
         impl_->batch_size = adaptive_batch;
     }
 
