@@ -76,11 +76,14 @@ inline void clear_decline_marker()
 
 inline void apply(AppConfig& cfg)
 {
-    // Explicit calibration flags always win and never prompt.
-    if (cfg.miner.autotune || cfg.gpu.autotune) return;
+    // Explicit calibration flags and explicit full GPU tuning always win and
+    // never prompt. "off" likewise means the operator has already decided not
+    // to request a first-run GPU benchmark.
+    if (cfg.miner.autotune || cfg.gpu.autotune || cfg.gpu.gpu_tune == "full") return;
 
     const bool cpu_profile = !cfg.miner.cpu_enabled || cache_has_prefix("cpu-policy-rev");
-    const bool gpu_profile = !cfg.gpu.enabled || cache_has_prefix("gpu-calibration-rev");
+    const bool gpu_profile = !cfg.gpu.enabled || cfg.gpu.gpu_tune == "off" ||
+                             cache_has_prefix("gpu-calibration-rev");
     if (cpu_profile && gpu_profile) return;
 
     // A remembered No means safe immediate startup, not a repeated prompt.
@@ -111,7 +114,7 @@ inline void apply(AppConfig& cfg)
     if (yes) {
         clear_decline_marker();
         cfg.miner.autotune = cfg.miner.cpu_enabled;
-        cfg.gpu.autotune = cfg.gpu.enabled;
+        cfg.gpu.autotune = cfg.gpu.enabled && cfg.gpu.gpu_tune == "auto";
         if (cfg.miner.cpu_enabled) cfg.miner.cpu_tune = "default";
         std::cout << "[First run] hardware autotuning selected\n\n";
     } else {
