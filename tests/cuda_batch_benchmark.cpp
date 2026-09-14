@@ -31,6 +31,12 @@ std::string stage_name(std::uint8_t encoded)
     return index < 15 ? kCoreNames[index] : "Core-?";
 }
 
+bool env_enabled(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 std::vector<std::size_t> default_sizes()
 {
     return {256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096};
@@ -63,6 +69,7 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    const bool force_cn_fast = env_enabled("YERBAS_BENCH_FORCE_CN_FAST");
     const auto sizes = benchmark_sizes(argc, argv);
     auto header = yerbas::test_vectors::MAINNET_GENESIS_HEADER;
     header[76] = header[77] = header[78] = header[79] = 0;
@@ -73,9 +80,20 @@ int main(int argc, char** argv)
     job.target_le.fill(0xff);
     job.stages = yerbas::ghostrider::stage_schedule(work);
 
+    if (force_cn_fast) {
+        constexpr std::uint8_t fast_stage = static_cast<std::uint8_t>(
+            yerbas::ghostrider::kCryptoNightStageFlag | 2U);
+        for (auto& stage : job.stages) {
+            if ((stage & yerbas::ghostrider::kCryptoNightStageFlag) != 0)
+                stage = fast_stage;
+        }
+    }
+
     std::cout << "Yerbas CUDA real-pipeline benchmark\n";
     yerbas::cuda::print_devices();
     std::cout << "Benchmark GPU: " << device_id << "\n";
+    if (force_cn_fast)
+        std::cout << "Schedule mode: forced CN-Fast production-selector exercise\n";
     std::cout << "Schedule:";
     for (std::size_t i = 0; i < job.stages.size(); ++i)
         std::cout << " " << i << ":" << stage_name(job.stages[i]);
@@ -90,12 +108,22 @@ int main(int argc, char** argv)
             engine.upload_job(job);
             const std::size_t actual = engine.batch_size();
 
-            // One untimed warmup removes first-launch/JIT effects from the profile.
-            engine.scan(0);
+            // A forced CN-Fast schedule contains three CN-Fast stages per scan.
+            // Three scans are sufficient to collect the production selector's
+            // 3x baseline, 3x tile64 and 3x split-multiply samples. The fourth
+            // untimed scan confirms the selected production path before timing.
+            const int warmup_scans = force_cn_fast ? 4 : 1;
+            for (int warmup = 0; warmup < warmup_scans; ++warmup) {
+                const std::uint32_t nonce = static_cast<std::uint32_t>(
+                    static_cast<std::uint64_t>(warmup) * actual);
+                engine.scan(nonce);
+            }
 
             yerbas::cuda::BatchProfile profile{};
             const auto wall_start = std::chrono::steady_clock::now();
-            engine.scan_profiled(static_cast<std::uint32_t>(actual), profile);
+            engine.scan_profiled(static_cast<std::uint32_t>(
+                                     static_cast<std::uint64_t>(warmup_scans) * actual),
+                                 profile);
             const auto wall_stop = std::chrono::steady_clock::now();
             const double wall_ms = std::chrono::duration<double, std::milli>(wall_stop - wall_start).count();
             const double hps = profile.total_gpu_ms > 0.0F
