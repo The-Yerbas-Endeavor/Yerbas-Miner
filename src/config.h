@@ -32,7 +32,13 @@ struct GpuConfig {
     std::vector<int> devices{};
     int intensity{0};
     bool skip_validation{false};
-    // Explicit one-shot calibration. Normal production startup never benchmarks.
+    // User-facing GPU tuning policy:
+    //   auto = use saved tuning; first-run calibration when needed
+    //   full = force fresh bounded calibration plus deep production retune
+    //   off  = never request GPU benchmarking; use saved/safe production state
+    std::string gpu_tune{"auto"};
+    // Internal/legacy one-shot bounded calibration request. First-run setup and
+    // --autotune use this without implicitly enabling the deep production retune.
     bool autotune{false};
 };
 
