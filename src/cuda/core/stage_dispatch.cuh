@@ -21,6 +21,35 @@
 
 namespace yerbas::cuda::core {
 
+// Keep each conventional GhostRider hash in its own device function. The
+// production stage algorithm is uniform across the entire launch, so inlining
+// all 15 implementations into one giant kernel only increases instruction-cache
+// and register/local-memory pressure. The tiny runtime switch remains inline,
+// while the selected algorithm executes through one compile-time specialization.
+// This preserves exact hash behavior and remains architecture/model agnostic.
+template <std::uint8_t Algorithm>
+__device__ __noinline__ void dispatch_core512_fixed(const std::uint8_t* input,
+                                                     std::size_t length,
+                                                     std::uint8_t out[64])
+{
+    static_assert(Algorithm <= 14, "invalid GhostRider conventional hash index");
+    if constexpr (Algorithm == 0) blake512(input, length, out);
+    else if constexpr (Algorithm == 1) bmw512(input, length, out);
+    else if constexpr (Algorithm == 2) groestl512(input, length, out);
+    else if constexpr (Algorithm == 3) jh512(input, length, out);
+    else if constexpr (Algorithm == 4) keccak512(input, length, out);
+    else if constexpr (Algorithm == 5) skein512(input, length, out);
+    else if constexpr (Algorithm == 6) luffa512(input, length, out);
+    else if constexpr (Algorithm == 7) cubehash512(input, length, out);
+    else if constexpr (Algorithm == 8) shavite512(input, length, out);
+    else if constexpr (Algorithm == 9) simd512(input, length, out);
+    else if constexpr (Algorithm == 10) echo512(input, length, out);
+    else if constexpr (Algorithm == 11) hamsi512(input, length, out);
+    else if constexpr (Algorithm == 12) fugue512(input, length, out);
+    else if constexpr (Algorithm == 13) shabal512(input, length, out);
+    else if constexpr (Algorithm == 14) whirlpool512(input, length, out);
+}
+
 // GhostRider core indexes match Yerbas Core HashSelection/coreHash ordering.
 // Every true case here is GPU-only; CPU hash fallback is intentionally absent.
 __device__ __forceinline__ bool dispatch_core512(std::uint8_t algorithm,
@@ -29,21 +58,21 @@ __device__ __forceinline__ bool dispatch_core512(std::uint8_t algorithm,
                                                  std::uint8_t out[64])
 {
     switch (algorithm) {
-    case 0: blake512(input, length, out); return true;
-    case 1: bmw512(input, length, out); return true;
-    case 2: groestl512(input, length, out); return true;
-    case 3: jh512(input, length, out); return true;
-    case 4: keccak512(input, length, out); return true;
-    case 5: skein512(input, length, out); return true;
-    case 6: luffa512(input, length, out); return true;
-    case 7: cubehash512(input, length, out); return true;
-    case 8: shavite512(input, length, out); return true;
-    case 9: simd512(input, length, out); return true;
-    case 10: echo512(input, length, out); return true;
-    case 11: hamsi512(input, length, out); return true;
-    case 12: fugue512(input, length, out); return true;
-    case 13: shabal512(input, length, out); return true;
-    case 14: whirlpool512(input, length, out); return true;
+    case 0: dispatch_core512_fixed<0>(input, length, out); return true;
+    case 1: dispatch_core512_fixed<1>(input, length, out); return true;
+    case 2: dispatch_core512_fixed<2>(input, length, out); return true;
+    case 3: dispatch_core512_fixed<3>(input, length, out); return true;
+    case 4: dispatch_core512_fixed<4>(input, length, out); return true;
+    case 5: dispatch_core512_fixed<5>(input, length, out); return true;
+    case 6: dispatch_core512_fixed<6>(input, length, out); return true;
+    case 7: dispatch_core512_fixed<7>(input, length, out); return true;
+    case 8: dispatch_core512_fixed<8>(input, length, out); return true;
+    case 9: dispatch_core512_fixed<9>(input, length, out); return true;
+    case 10: dispatch_core512_fixed<10>(input, length, out); return true;
+    case 11: dispatch_core512_fixed<11>(input, length, out); return true;
+    case 12: dispatch_core512_fixed<12>(input, length, out); return true;
+    case 13: dispatch_core512_fixed<13>(input, length, out); return true;
+    case 14: dispatch_core512_fixed<14>(input, length, out); return true;
     default: return false;
     }
 }
