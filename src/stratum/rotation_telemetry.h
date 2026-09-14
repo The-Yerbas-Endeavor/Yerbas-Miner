@@ -107,7 +107,12 @@ private:
         const auto flags = std::cout.flags();
         const auto precision = std::cout.precision();
         std::cout << "[rotation perf] fingerprint="
-                  << std::hex << std::setfill('0') << std::setw(16) << active_fingerprint_
+                  // Status-table output may leave std::cout in std::left mode.
+                  // Fingerprints are fixed-width hexadecimal identifiers, so
+                  // force right alignment before zero padding. Otherwise a
+                  // leading-zero fingerprint such as 0490... is rendered as
+                  // 490...0 and becomes a different-looking benchmark key.
+                  << std::right << std::hex << std::setfill('0') << std::setw(16) << active_fingerprint_
                   << std::dec << std::setfill(' ')
                   << " | sample=" << fingerprint_aggregate.samples
                   << " | duration=" << std::fixed << std::setprecision(2) << seconds << "s"
