@@ -1,10 +1,11 @@
 // Cooperative-multiply CryptoNight phase-2 candidate.
 //
-// Keep the historical mode-444 kernel symbol so the existing hardened selector
-// can parity-test and benchmark this candidate without changing production
-// routing or cache formats. This path remains architecture-generic: it shortens
-// the dependency chain, overlaps independent AES table work, and distributes the
-// exact 64x64->128 multiply across the four lanes of each hash subgroup.
+// Keep the historical mode-444 kernel symbol so the existing production selector
+// can parity-test and benchmark this candidate without changing routing or cache
+// formats. The baseline serializes both halves of the 64x64->128 multiply in
+// lane 0. This candidate follows the mature CUDA CryptoNight execution model:
+// lane 0 computes the high 64 bits while lane 1 computes the low 64 bits, then
+// each lane performs the matching accumulator add in parallel.
 //
 // The production selector still requires exact full-scratchpad parity and a
 // measured production-batch win before this kernel can be promoted.
@@ -84,8 +85,8 @@ __global__ void cryptonight_loop_stage_ttable4_cg(
         if constexpr (VariantIndex == 2) {
             // Issue all four independent shared-table reads from each lane's
             // local word before exchanging their ShiftRows contributions. This
-            // gives the scheduler more independent memory work while the
-            // dependency-heavy scratchpad chain is waiting.
+            // gives the scheduler more independent work while the dependency-
+            // heavy scratchpad chain is waiting.
             const std::uint32_t q0 = table0[static_cast<std::uint8_t>(own)];
             const std::uint32_t q1_local = table1[static_cast<std::uint8_t>(own >> 8U)];
             const std::uint32_t q2_local = table2[static_cast<std::uint8_t>(own >> 16U)];
@@ -112,8 +113,6 @@ __global__ void cryptonight_loop_stage_ttable4_cg(
         }
 
         // Variant-1 mutation touches byte 11, which lives in lane 2's high byte.
-        // Apply it directly in that lane instead of serializing the subgroup
-        // through lane 0 plus two explicit warp barriers.
         std::uint32_t first_store_word = cw ^ bw;
         if (lane == 2U) {
             const std::uint8_t tmp = static_cast<std::uint8_t>(first_store_word >> 24U);
@@ -144,9 +143,8 @@ __global__ void cryptonight_loop_stage_ttable4_cg(
         auto* slot2_words = reinterpret_cast<std::uint32_t*>(slot2);
         const std::uint32_t t_word = slot2_words[lane];
 
-        // CN-Fast can issue slot2 before fetching c1. The cooperative multiply
-        // needs t0_lo in lanes 0 and 2, so broadcast it only after the dependent
-        // global load has already been issued.
+        // Keep the extra operand shuffles behind the second dependent load.
+        // Both multiply lanes need the same 64-bit operands.
         const std::uint32_t t0_lo = __shfl_sync(mask, t_word, base);
         const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
         if constexpr (VariantIndex == 2) {
@@ -155,69 +153,46 @@ __global__ void cryptonight_loop_stage_ttable4_cg(
         const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
         const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
 
-        // Each lane computes one 32x32 limb of the exact 64x64->128 product.
-        // No architecture names or capability-specific paths are involved; the
-        // runtime selector decides whether this execution model wins.
-        const std::uint32_t mul_a = lane < 2U ? c0 : c1;
-        const std::uint32_t mul_b = (lane & 1U) == 0U ? t0_lo : t0_hi;
-        const std::uint64_t partial = static_cast<std::uint64_t>(mul_a) *
-                                      static_cast<std::uint64_t>(mul_b);
-        const std::uint32_t partial_lo = static_cast<std::uint32_t>(partial);
-        const std::uint32_t partial_hi = static_cast<std::uint32_t>(partial >> 32U);
+        const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
+                                    (static_cast<std::uint64_t>(c1) << 32U);
+        const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
+                                  (static_cast<std::uint64_t>(t0_hi) << 32U);
 
-        const std::uint32_t p00_lo = __shfl_sync(mask, partial_lo, base);
-        const std::uint32_t p00_hi = __shfl_sync(mask, partial_hi, base);
-        const std::uint32_t p01_lo = __shfl_sync(mask, partial_lo, base + 1U);
-        const std::uint32_t p01_hi = __shfl_sync(mask, partial_hi, base + 1U);
-        const std::uint32_t p10_lo = __shfl_sync(mask, partial_lo, base + 2U);
-        const std::uint32_t p10_hi = __shfl_sync(mask, partial_hi, base + 2U);
-        const std::uint32_t p11_lo = __shfl_sync(mask, partial_lo, base + 3U);
-        const std::uint32_t p11_hi = __shfl_sync(mask, partial_hi, base + 3U);
-
-        std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
+        // Split the expensive 64x64->128 product across two subgroup lanes.
+        // Lane 0 computes high64, lane 1 computes low64 concurrently. This is
+        // the same arithmetic as __umul64hi()+operator* in one lane, but removes
+        // the serial multiply pair from the dependency path.
+        std::uint64_t accumulated = 0U;
         if (lane == 0U) {
-            const std::uint64_t middle = static_cast<std::uint64_t>(p00_hi) +
-                                         static_cast<std::uint64_t>(p01_lo) +
-                                         static_cast<std::uint64_t>(p10_lo);
-            const std::uint64_t lo = static_cast<std::uint64_t>(p00_lo) |
-                                     (static_cast<std::uint64_t>(
-                                          static_cast<std::uint32_t>(middle)) << 32U);
-            const std::uint64_t p11 = static_cast<std::uint64_t>(p11_lo) |
-                                      (static_cast<std::uint64_t>(p11_hi) << 32U);
-            const std::uint64_t hi = p11 + static_cast<std::uint64_t>(p01_hi) +
-                                     static_cast<std::uint64_t>(p10_hi) +
-                                     (middle >> 32U);
-
+            const std::uint64_t hi = __umul64hi(c_low, t0v);
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
                                         (static_cast<std::uint64_t>(aw1) << 32U);
+            accumulated = olda0 + hi;
+            if constexpr (VariantIndex == 2) {
+                fast_aw1_shadow = static_cast<std::uint32_t>(accumulated >> 32U) ^ t0_hi;
+            }
+        } else if (lane == 1U) {
+            const std::uint64_t lo = c_low * t0v;
             const std::uint64_t olda1 = static_cast<std::uint64_t>(old_a2) |
                                         (static_cast<std::uint64_t>(old_a3) << 32U);
-            const std::uint64_t na0 = olda0 + hi;
-            const std::uint64_t na1 = olda1 + lo;
-            na0_lo = static_cast<std::uint32_t>(na0);
-            na0_hi = static_cast<std::uint32_t>(na0 >> 32U);
-            na1_lo = static_cast<std::uint32_t>(na1);
-            na1_hi = static_cast<std::uint32_t>(na1 >> 32U);
-
-            if constexpr (VariantIndex == 2) {
-                fast_aw1_shadow = na0_hi ^ t0_hi;
-            }
+            accumulated = olda1 + lo;
         }
 
-        na0_lo = __shfl_sync(mask, na0_lo, base);
-        na0_hi = __shfl_sync(mask, na0_hi, base);
-        na1_lo = __shfl_sync(mask, na1_lo, base);
-        na1_hi = __shfl_sync(mask, na1_hi, base);
+        const std::uint32_t accumulated_lo = static_cast<std::uint32_t>(accumulated);
+        const std::uint32_t accumulated_hi = static_cast<std::uint32_t>(accumulated >> 32U);
 
-        const std::uint32_t store_word = lane == 0U ? na0_lo :
-                                         lane == 1U ? na0_hi :
-                                         lane == 2U ? (na1_lo ^ tweak_lo) :
-                                                      (na1_hi ^ tweak_hi);
-        slot2_words[lane] = store_word;
-
-        const std::uint32_t na_word = lane == 0U ? na0_lo :
+        // Lane 0 already owns na0_lo. Only the three words consumed by the other
+        // lanes cross the subgroup: na0_hi from lane 0 and na1_lo/hi from lane 1.
+        const std::uint32_t na0_hi = __shfl_sync(mask, accumulated_hi, base);
+        const std::uint32_t na1_lo = __shfl_sync(mask, accumulated_lo, base + 1U);
+        const std::uint32_t na1_hi = __shfl_sync(mask, accumulated_hi, base + 1U);
+        const std::uint32_t na_word = lane == 0U ? accumulated_lo :
                                       lane == 1U ? na0_hi :
                                       lane == 2U ? na1_lo : na1_hi;
+        const std::uint32_t store_word = lane == 2U ? (na_word ^ tweak_lo) :
+                                         lane == 3U ? (na_word ^ tweak_hi) : na_word;
+        slot2_words[lane] = store_word;
+
         aw = na_word ^ t_word;
         bw = cw;
     }
