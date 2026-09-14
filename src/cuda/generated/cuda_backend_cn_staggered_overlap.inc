@@ -4,6 +4,12 @@
 // loops. Partition B setup overlaps partition A loop; partition A final overlaps
 // partition B loop. Runtime timing decides whether 33/67 or 50/50 staggered
 // execution beats the normal single-stream path. No GPU model rules are used.
+//
+// Production policy is cache-first. With YERBAS_CUDA_OVERLAP unset or "auto",
+// a previously proven stagger cache is used automatically, but a missing cache
+// never pauses mining to benchmark. YERBAS_CUDA_OVERLAP=1/on/true/tune/full
+// explicitly allows the three-way runtime benchmark. 0/off/false/no disables
+// stagger use entirely.
 
 namespace {
 
@@ -11,6 +17,23 @@ constexpr float kCnStaggerPromotionRatio = 0.97F;
 constexpr int kCnStaggerSchedulerRevision = 1;
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_mode{};
 static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_reported{};
+
+inline bool cn_stagger_disabled()
+{
+    const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
+    if (!value || !*value) return false;
+    const std::string v(value);
+    return v == "0" || v == "off" || v == "false" || v == "no";
+}
+
+inline bool cn_stagger_tuning_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
+    if (!value || !*value) return false;
+    const std::string v(value);
+    return v == "1" || v == "on" || v == "true" || v == "yes" ||
+           v == "tune" || v == "full" || v == "benchmark";
+}
 
 inline float cn_stagger_median3(float a, float b, float c)
 {
@@ -240,12 +263,28 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                                   const CnGeometry& geometry,
                                   const cudaDeviceProp& props)
 {
-    if (!cn_overlap_enabled() || count < 96U) return false;
+    if (cn_stagger_disabled() || count < 96U) return false;
     const bool use_ttable = geometry.aes_backend == 1;
     if (!cn_overlap_selectors_ready<VariantIndex>(device_id, use_ttable)) return false;
 
+    // The production phase-backend path reaches this function directly. Route
+    // diagnostics through the existing clean one-shot single-stream profiler
+    // once selectors are warm, fixing the previous legacy-only instrumentation.
+    if (device_id >= 0 && device_id < kCnPhaseProfileMaxDevices &&
+        cn_phase_diagnostics_enabled() &&
+        g_cn_phase_samples[device_id][VariantIndex] == 0U) {
+        launch_split_cryptonight_variant_phase_profiled_legacy<VariantIndex>(
+            stream, states, count, scratchpads, contexts, geometry);
+        return true;
+    }
+
     int& mode = g_cn_stagger_mode[device_id][VariantIndex];
     if (mode == 0 && !load_cn_stagger_cache<VariantIndex>(device_id, props, count)) {
+        // Normal production is cache-only: never burn nine full CN executions
+        // just because a new rotation/batch appeared. Explicit overlap tuning is
+        // the only path allowed to benchmark and create a missing cache.
+        if (!cn_stagger_tuning_requested()) return false;
+
         std::uint8_t* saved_states = nullptr;
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&saved_states), count * kStateBytes),
                    "cudaMalloc stagger saved states failed");
@@ -304,17 +343,22 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                   << std::defaultfloat << '\n';
     }
 
+    // A cached/tuned single result should take the ordinary production path so
+    // it pays no stagger event/stream overhead at all.
+    if (mode == 1) return false;
+
     launch_cn_staggered_mode<VariantIndex>(stream, device_id, mode, count,
                                            states, scratchpads, contexts, geometry, props);
     if (!g_cn_stagger_reported[device_id][VariantIndex]) {
         g_cn_stagger_reported[device_id][VariantIndex] = true;
-        const std::size_t first = mode == 1 ? count : cn_overlap_first_count(count, mode);
+        const std::size_t first = cn_overlap_first_count(count, mode);
         std::cout << "[CUDA CN stagger] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
-                  << " | mode=" << (mode == 1 ? "single" : "staggered")
-                  << " | batch=" << count;
-        if (mode != 1) std::cout << " | partitions=" << first << '+' << (count - first);
-        std::cout << " | loop-overlap=no | generic=yes\n";
+                  << " | mode=staggered"
+                  << " | batch=" << count
+                  << " | partitions=" << first << '+' << (count - first)
+                  << " | source=cache-or-tuned"
+                  << " | loop-overlap=no | generic=yes\n";
     }
     return true;
 }
