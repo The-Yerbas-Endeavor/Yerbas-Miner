@@ -49,7 +49,9 @@ Example:
   "gpu": {
     "enabled": true,
     "devices": [0],
-    "intensity": 0
+    "intensity": 0,
+    "gpu_tune": "auto",
+    "skip_validation": false
   },
   "logging": {
     "level": "info"
@@ -61,7 +63,7 @@ Example:
 
 ### CPU tuning modes
 
-CPU tuning is optional. The default example config uses `"cpu_tune": "off"`, which starts mining immediately with the configured/default CPU thread count and batch size.
+CPU tuning is optional. The default example config uses `"cpu_tune": "default"`; set it to `"off"` when immediate startup with the configured/default CPU thread count and batch size is preferred.
 
 Available modes:
 
@@ -84,6 +86,37 @@ Command-line equivalents:
 `threads` is a ceiling when tuning is enabled. `threads: 0` allows the tuner to use all logical CPUs; for example, `threads: 6` on a 12-thread machine limits the search to configurations using at most 6 CPU workers.
 
 The current production tuner selects CPU thread count and per-thread batch size by measuring full GhostRider throughput across representative schedules. True cpuminer-gr-style per-rotation `1way/2way/4way` CryptoNight selection requires genuine multi-lane CryptoNight kernels. Yerbas-Miner currently has experimental 2-way/4-way work behind parity and production-performance gates; wider execution is not selected unless it proves safe and faster than the 1-way production path.
+
+### GPU tuning modes
+
+`gpu_tune` provides the normal user-facing CUDA tuning policy. The recommended and shipped default is `"auto"`.
+
+```text
+auto   cache-first production mode. Saved hardware/class, per-variant batch,
+       phase backend, kernel-selector and geometry tuning is reused immediately.
+       On a new interactive machine with no GPU calibration profile, the normal
+       first-run flow can perform one bounded hardware calibration and save it.
+
+off    do not request GPU autotuning. Existing valid caches may still be reused;
+       otherwise the CUDA backend uses safe runtime-derived production settings.
+
+full   deliberately rebuild GPU tuning. Runs fresh bounded class/per-variant
+       calibration and enables the deep production selector/geometry retune as
+       real GhostRider rotations and batch sizes are encountered. This mode can
+       take a long time and is intended for deliberate retuning, not every start.
+```
+
+Use `full` after a meaningful hardware/driver/toolkit change, when validating a new CUDA optimization, or when intentionally rebuilding the tuning caches. Normal mining should use `auto`.
+
+Command-line equivalent:
+
+```bash
+./yerbas-miner --gpu-tune auto
+./yerbas-miner --gpu-tune full
+./yerbas-miner --gpu-tune off
+```
+
+The older `--gpu-autotune` option remains available as a bounded one-shot GPU calibration and does not implicitly enable the long deep production retune. Developer environment variables such as `YERBAS_GPU_AUTOTUNE`, `YERBAS_GPU_VARIANT_AUTOTUNE`, and `YERBAS_CUDA_RETUNE` remain available as explicit overrides for development/testing.
 
 Command-line options override values from the configuration file:
 
@@ -111,12 +144,15 @@ Common options:
 --no-tune
 --devices 0,1
 --intensity N
+--gpu-tune off|auto|full
+--gpu-autotune
 --no-gpu
+--skip-validation
 --log-level LEVEL
 --help
 ```
 
-Priority is command line, then JSON config, then built-in defaults.
+Priority is command line, then JSON config, then built-in defaults. Explicit developer tuning environment variables remain authoritative when they are set.
 
 ## Current status
 
@@ -131,6 +167,7 @@ Priority is command line, then JSON config, then built-in defaults.
 - JSON config file support
 - command-line configuration overrides
 - optional CPU production autotuning with direct no-tune startup
+- cache-first GPU production tuning with `auto`, `full`, and `off` modes
 - pool URL/user/password/worker settings
 - GPU device/intensity settings
 - Stratum endpoint parsing and configuration plumbing
