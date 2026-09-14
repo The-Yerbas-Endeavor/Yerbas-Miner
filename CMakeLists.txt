@@ -362,6 +362,28 @@ if(YERBAS_ENABLE_CUDA)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES}"
     )
+
+    add_executable(cuda-batch-benchmark
+        tests/cuda_batch_benchmark.cpp
+        src/cuda/cuda_backend.cu
+    )
+    target_include_directories(cuda-batch-benchmark PRIVATE
+        src
+        tests
+        "${YERBAS_CUDA_GENERATED_DIR}"
+        "${YERBAS_CORE_SRC}/crypto"
+        "${YERBAS_CORE_SRC}/cryptonote"
+    )
+    target_link_libraries(cuda-batch-benchmark PRIVATE yerbas-ghostrider-reference)
+    target_compile_options(cuda-batch-benchmark PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:${YERBAS_NVCC_PARALLEL_FLAGS}>
+    )
+    set_target_properties(cuda-batch-benchmark PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES}"
+    )
 endif()
 
 if(BUILD_TESTING)
