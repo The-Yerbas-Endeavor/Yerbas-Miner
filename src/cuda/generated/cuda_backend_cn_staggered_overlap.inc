@@ -11,16 +11,20 @@
 // explicitly allows the runtime benchmark. 0/off/false/no disables stagger use.
 //
 // Tuning is intentionally order-balanced. Every candidate receives a discarded
-// warm-up, then five measured passes rotate candidate order so each mode occupies
-// every ordinal position exactly once. This prevents GPU boost/JIT/stream warm-up
-// from making whichever candidate happens to run last look artificially faster.
+// warm-up, then one measured pass per candidate position rotates execution order
+// so each mode occupies every ordinal position exactly once. This prevents GPU
+// boost/JIT/stream warm-up from making a fixed position look artificially faster.
+//
+// The stagger schedule is asymmetric: partition A and B do not perform setup,
+// loop and final work in identical order. Therefore ratios above 50% are valid,
+// distinct candidates rather than mirrors of ratios below 50%.
 
 namespace {
 
 constexpr float kCnStaggerPromotionRatio = 0.97F;
-constexpr int kCnStaggerSchedulerRevision = 4;
-constexpr int kCnStaggerTunePasses = 5;
-constexpr std::array<int, 5> kCnStaggerModes{{1, 25, 33, 40, 50}};
+constexpr int kCnStaggerSchedulerRevision = 5;
+constexpr int kCnStaggerTunePasses = 8;
+constexpr std::array<int, 8> kCnStaggerModes{{1, 25, 33, 40, 50, 60, 67, 75}};
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_mode{};
 static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_reported{};
 
@@ -43,18 +47,7 @@ inline bool cn_stagger_tuning_requested()
 
 inline bool cn_stagger_split_mode(int mode)
 {
-    return mode == 25 || mode == 33 || mode == 40 || mode == 50;
-}
-
-inline const char* cn_stagger_mode_name(int mode)
-{
-    switch (mode) {
-    case 25: return "stagger25";
-    case 33: return "stagger33";
-    case 40: return "stagger40";
-    case 50: return "stagger50";
-    default: return "single";
-    }
+    return mode >= 20 && mode <= 80;
 }
 
 inline std::size_t cn_stagger_first_count(std::size_t count, int mode)
@@ -66,7 +59,7 @@ inline std::size_t cn_stagger_first_count(std::size_t count, int mode)
     return first;
 }
 
-inline float cn_stagger_median5(std::array<float, kCnStaggerTunePasses> values)
+inline float cn_stagger_median(std::array<float, kCnStaggerTunePasses> values)
 {
     // Tiny fixed-size insertion sort avoids depending on candidate execution order.
     for (std::size_t i = 1; i < values.size(); ++i) {
@@ -78,7 +71,8 @@ inline float cn_stagger_median5(std::array<float, kCnStaggerTunePasses> values)
         }
         values[j] = value;
     }
-    return values[values.size() / 2U];
+    const std::size_t upper = values.size() / 2U;
+    return (values[upper - 1U] + values[upper]) * 0.5F;
 }
 
 template <std::uint8_t VariantIndex>
@@ -336,16 +330,11 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                 states, scratchpads, contexts, geometry, props);
         };
 
-        // Discard one full execution of every candidate. This warms CUDA stream/
-        // event machinery, module/JIT state, caches and GPU clocks before any
-        // timing is allowed to influence the production decision.
         for (const int candidate_mode : kCnStaggerModes)
             (void)measure(candidate_mode);
 
         std::array<std::array<float, kCnStaggerTunePasses>, kCnStaggerModes.size()> samples{};
         for (int pass = 0; pass < kCnStaggerTunePasses; ++pass) {
-            // Rotate by one slot per pass. Across five passes every candidate is
-            // measured once in positions 1..5, removing fixed-order advantage.
             for (std::size_t position = 0; position < kCnStaggerModes.size(); ++position) {
                 const std::size_t candidate_index =
                     (position + static_cast<std::size_t>(pass)) % kCnStaggerModes.size();
@@ -356,7 +345,7 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
 
         std::array<float, kCnStaggerModes.size()> medians{};
         for (std::size_t i = 0; i < kCnStaggerModes.size(); ++i)
-            medians[i] = cn_stagger_median5(samples[i]);
+            medians[i] = cn_stagger_median(samples[i]);
 
         const float single_ms = medians[0];
         mode = 1;
@@ -372,6 +361,7 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
         cudaFree(saved_states);
         save_cn_stagger_cache<VariantIndex>(device_id, props, count);
 
+        const float gain = single_ms > 0.0F ? ((single_ms - best_ms) / single_ms) * 100.0F : 0.0F;
         std::cout << std::fixed << std::setprecision(3)
                   << "[CUDA CN stagger tuner] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
@@ -381,12 +371,18 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                   << " | stagger33=" << medians[2] << " ms"
                   << " | stagger40=" << medians[3] << " ms"
                   << " | stagger50=" << medians[4] << " ms"
+                  << " | stagger60=" << medians[5] << " ms"
+                  << " | stagger67=" << medians[6] << " ms"
+                  << " | stagger75=" << medians[7] << " ms"
                   << " | passes=" << kCnStaggerTunePasses
                   << " | warmup=1/candidate"
                   << " | order=rotated"
                   << " | threshold=3%"
-                  << " | production=" << cn_stagger_mode_name(mode)
-                  << std::defaultfloat << '\n';
+                  << " | gain=" << gain << "%"
+                  << " | production=";
+        if (mode == 1) std::cout << "single";
+        else std::cout << "stagger" << mode;
+        std::cout << std::defaultfloat << '\n';
     }
 
     if (mode == 1) return false;
