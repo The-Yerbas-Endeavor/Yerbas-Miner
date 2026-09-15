@@ -1,32 +1,36 @@
 // Generic staggered CryptoNight overlap scheduler.
 //
 // The established stagger path keeps the two memory-bound phase-2 loops
-// serialized while hiding setup/final work around them. Rev6 also benchmarks a
-// small set of concurrent-loop candidates. Those candidates run two independent
-// CN partitions on separate CUDA streams so the hardware scheduler can hide a
-// dependent scratchpad/multiply stall with work from another hash chain. Runtime
-// timing decides whether that helps; no GPU model or architecture rules are used.
+// serialized while hiding setup/final work around them. Rev6 added concurrent-
+// loop candidates. Rev7 keeps both policies and extends the upper-ratio search
+// through 80/20, 85/15 and 90/10 because measured winners can sit above 75%.
+// Runtime timing decides whether any split helps; no GPU model or architecture
+// rules are used.
 //
 // Production policy is cache-first. With YERBAS_CUDA_OVERLAP unset or "auto",
 // a previously proven stagger cache is used automatically, but a missing cache
 // never pauses mining to benchmark. YERBAS_CUDA_OVERLAP=1/on/true/tune/full
 // explicitly allows the runtime benchmark. 0/off/false/no disables stagger use.
 //
-// Tuning is intentionally order-balanced. Every candidate receives a discarded
-// warm-up, then one measured pass per candidate position rotates execution order
-// so each mode occupies every ordinal position exactly once. This prevents GPU
-// boost/JIT/stream warm-up from making a fixed position look artificially faster.
+// Tuning is intentionally order-rotated. Every candidate receives a discarded
+// warm-up, then several measured passes with candidate order rotated each pass.
+// This spreads boost/JIT/thermal position effects without making the expanded
+// refinement search excessively long.
 //
-// Serialized modes are encoded as their partition-A percentage (25..75).
-// Concurrent-loop modes use 100+ratio (125/150/175). The encoding is internal;
+// Serialized modes are encoded as their partition-A percentage (25..90).
+// Concurrent-loop modes use 100+ratio (125..190). The encoding is internal;
 // cache/reporting always exposes the actual split and loop-overlap policy.
 
 namespace {
 
 constexpr float kCnStaggerPromotionRatio = 0.97F;
-constexpr int kCnStaggerSchedulerRevision = 6;
-constexpr std::array<int, 11> kCnStaggerModes{{1, 25, 33, 40, 50, 60, 67, 75, 125, 150, 175}};
-constexpr int kCnStaggerTunePasses = static_cast<int>(kCnStaggerModes.size());
+constexpr int kCnStaggerSchedulerRevision = 7;
+constexpr std::array<int, 17> kCnStaggerModes{{
+    1,
+    25, 33, 40, 50, 60, 67, 75, 80, 85, 90,
+    125, 150, 175, 180, 185, 190
+}};
+constexpr int kCnStaggerTunePasses = 9;
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_mode{};
 static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_reported{};
 
@@ -60,7 +64,7 @@ inline int cn_stagger_ratio(int mode)
 inline bool cn_stagger_split_mode(int mode)
 {
     const int ratio = cn_stagger_ratio(mode);
-    return ratio >= 20 && ratio <= 80;
+    return ratio >= 20 && ratio <= 90;
 }
 
 inline std::size_t cn_stagger_first_count(std::size_t count, int mode)
@@ -418,9 +422,15 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                   << " | stagger60=" << medians[5] << " ms"
                   << " | stagger67=" << medians[6] << " ms"
                   << " | stagger75=" << medians[7] << " ms"
-                  << " | overlap25=" << medians[8] << " ms"
-                  << " | overlap50=" << medians[9] << " ms"
-                  << " | overlap75=" << medians[10] << " ms"
+                  << " | stagger80=" << medians[8] << " ms"
+                  << " | stagger85=" << medians[9] << " ms"
+                  << " | stagger90=" << medians[10] << " ms"
+                  << " | overlap25=" << medians[11] << " ms"
+                  << " | overlap50=" << medians[12] << " ms"
+                  << " | overlap75=" << medians[13] << " ms"
+                  << " | overlap80=" << medians[14] << " ms"
+                  << " | overlap85=" << medians[15] << " ms"
+                  << " | overlap90=" << medians[16] << " ms"
                   << " | passes=" << kCnStaggerTunePasses
                   << " | warmup=1/candidate"
                   << " | order=rotated"
