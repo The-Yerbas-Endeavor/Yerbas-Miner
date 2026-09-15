@@ -9,11 +9,18 @@
 // a previously proven stagger cache is used automatically, but a missing cache
 // never pauses mining to benchmark. YERBAS_CUDA_OVERLAP=1/on/true/tune/full
 // explicitly allows the runtime benchmark. 0/off/false/no disables stagger use.
+//
+// Tuning is intentionally order-balanced. Every candidate receives a discarded
+// warm-up, then five measured passes rotate candidate order so each mode occupies
+// every ordinal position exactly once. This prevents GPU boost/JIT/stream warm-up
+// from making whichever candidate happens to run last look artificially faster.
 
 namespace {
 
 constexpr float kCnStaggerPromotionRatio = 0.97F;
-constexpr int kCnStaggerSchedulerRevision = 3;
+constexpr int kCnStaggerSchedulerRevision = 4;
+constexpr int kCnStaggerTunePasses = 5;
+constexpr std::array<int, 5> kCnStaggerModes{{1, 25, 33, 40, 50}};
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_mode{};
 static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_reported{};
 
@@ -59,12 +66,19 @@ inline std::size_t cn_stagger_first_count(std::size_t count, int mode)
     return first;
 }
 
-inline float cn_stagger_median3(float a, float b, float c)
+inline float cn_stagger_median5(std::array<float, kCnStaggerTunePasses> values)
 {
-    if (a > b) std::swap(a, b);
-    if (b > c) std::swap(b, c);
-    if (a > b) std::swap(a, b);
-    return b;
+    // Tiny fixed-size insertion sort avoids depending on candidate execution order.
+    for (std::size_t i = 1; i < values.size(); ++i) {
+        const float value = values[i];
+        std::size_t j = i;
+        while (j > 0U && values[j - 1U] > value) {
+            values[j] = values[j - 1U];
+            --j;
+        }
+        values[j] = value;
+    }
+    return values[values.size() / 2U];
 }
 
 template <std::uint8_t VariantIndex>
@@ -298,7 +312,7 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
     int& mode = g_cn_stagger_mode[device_id][VariantIndex];
     if (mode == 0 && !load_cn_stagger_cache<VariantIndex>(device_id, props, count)) {
         // Normal production is cache-only. Explicit overlap tuning is the only
-        // path allowed to benchmark the five candidates and create a new cache.
+        // path allowed to benchmark candidates and create a new cache.
         if (!cn_stagger_tuning_requested()) return false;
 
         std::uint8_t* saved_states = nullptr;
@@ -309,50 +323,50 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                    "cudaMemcpy stagger save states failed");
         check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize stagger save failed");
 
-        auto reset = [&]() {
+        const auto reset = [&]() {
             check_cuda(cudaMemcpyAsync(states, saved_states, count * kStateBytes,
                                        cudaMemcpyDeviceToDevice, stream),
                        "cudaMemcpy stagger restore states failed");
             check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize stagger restore failed");
         };
+        const auto measure = [&](int candidate_mode) {
+            reset();
+            return time_cn_staggered_mode<VariantIndex>(
+                stream, device_id, candidate_mode, count,
+                states, scratchpads, contexts, geometry, props);
+        };
 
-        std::array<float, 3> single{}, stagger25{}, stagger33{}, stagger40{}, stagger50{};
-        for (int pass = 0; pass < 3; ++pass) {
-            reset();
-            single[pass] = time_cn_staggered_mode<VariantIndex>(stream, device_id, 1, count,
-                states, scratchpads, contexts, geometry, props);
-            reset();
-            stagger25[pass] = time_cn_staggered_mode<VariantIndex>(stream, device_id, 25, count,
-                states, scratchpads, contexts, geometry, props);
-            reset();
-            stagger33[pass] = time_cn_staggered_mode<VariantIndex>(stream, device_id, 33, count,
-                states, scratchpads, contexts, geometry, props);
-            reset();
-            stagger40[pass] = time_cn_staggered_mode<VariantIndex>(stream, device_id, 40, count,
-                states, scratchpads, contexts, geometry, props);
-            reset();
-            stagger50[pass] = time_cn_staggered_mode<VariantIndex>(stream, device_id, 50, count,
-                states, scratchpads, contexts, geometry, props);
+        // Discard one full execution of every candidate. This warms CUDA stream/
+        // event machinery, module/JIT state, caches and GPU clocks before any
+        // timing is allowed to influence the production decision.
+        for (const int candidate_mode : kCnStaggerModes)
+            (void)measure(candidate_mode);
+
+        std::array<std::array<float, kCnStaggerTunePasses>, kCnStaggerModes.size()> samples{};
+        for (int pass = 0; pass < kCnStaggerTunePasses; ++pass) {
+            // Rotate by one slot per pass. Across five passes every candidate is
+            // measured once in positions 1..5, removing fixed-order advantage.
+            for (std::size_t position = 0; position < kCnStaggerModes.size(); ++position) {
+                const std::size_t candidate_index =
+                    (position + static_cast<std::size_t>(pass)) % kCnStaggerModes.size();
+                samples[candidate_index][static_cast<std::size_t>(pass)] =
+                    measure(kCnStaggerModes[candidate_index]);
+            }
         }
 
-        const float single_ms = cn_stagger_median3(single[0], single[1], single[2]);
-        const float split25_ms = cn_stagger_median3(stagger25[0], stagger25[1], stagger25[2]);
-        const float split33_ms = cn_stagger_median3(stagger33[0], stagger33[1], stagger33[2]);
-        const float split40_ms = cn_stagger_median3(stagger40[0], stagger40[1], stagger40[2]);
-        const float split50_ms = cn_stagger_median3(stagger50[0], stagger50[1], stagger50[2]);
+        std::array<float, kCnStaggerModes.size()> medians{};
+        for (std::size_t i = 0; i < kCnStaggerModes.size(); ++i)
+            medians[i] = cn_stagger_median5(samples[i]);
 
+        const float single_ms = medians[0];
         mode = 1;
         float best_ms = single_ms;
-        const auto consider = [&](int candidate_mode, float candidate_ms) {
-            if (candidate_ms < single_ms * kCnStaggerPromotionRatio && candidate_ms < best_ms) {
-                mode = candidate_mode;
-                best_ms = candidate_ms;
+        for (std::size_t i = 1; i < kCnStaggerModes.size(); ++i) {
+            if (medians[i] < single_ms * kCnStaggerPromotionRatio && medians[i] < best_ms) {
+                mode = kCnStaggerModes[i];
+                best_ms = medians[i];
             }
-        };
-        consider(25, split25_ms);
-        consider(33, split33_ms);
-        consider(40, split40_ms);
-        consider(50, split50_ms);
+        }
 
         reset();
         cudaFree(saved_states);
@@ -362,11 +376,14 @@ bool launch_cn_staggered_if_ready(cudaStream_t stream,
                   << "[CUDA CN stagger tuner] GPU " << device_id
                   << " | " << cryptonight::config_value(VariantIndex).name
                   << " | batch=" << count
-                  << " | single=" << single_ms << " ms"
-                  << " | stagger25=" << split25_ms << " ms"
-                  << " | stagger33=" << split33_ms << " ms"
-                  << " | stagger40=" << split40_ms << " ms"
-                  << " | stagger50=" << split50_ms << " ms"
+                  << " | single=" << medians[0] << " ms"
+                  << " | stagger25=" << medians[1] << " ms"
+                  << " | stagger33=" << medians[2] << " ms"
+                  << " | stagger40=" << medians[3] << " ms"
+                  << " | stagger50=" << medians[4] << " ms"
+                  << " | passes=" << kCnStaggerTunePasses
+                  << " | warmup=1/candidate"
+                  << " | order=rotated"
                   << " | threshold=3%"
                   << " | production=" << cn_stagger_mode_name(mode)
                   << std::defaultfloat << '\n';
