@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -35,6 +36,25 @@ bool env_enabled(const char* name)
 {
     const char* value = std::getenv(name);
     return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+int forced_cn_variant()
+{
+    const char* value = std::getenv("YERBAS_BENCH_FORCE_CN_VARIANT");
+    if (value == nullptr || *value == '\0')
+        return env_enabled("YERBAS_BENCH_FORCE_CN_FAST") ? 2 : -1;
+
+    std::string v(value);
+    for (char& c : v)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (v == "0" || v == "dark" || v == "cn-dark") return 0;
+    if (v == "1" || v == "darklite" || v == "dark-lite" || v == "cn-darklite" || v == "cn-dark-lite") return 1;
+    if (v == "2" || v == "fast" || v == "cn-fast") return 2;
+    if (v == "3" || v == "lite" || v == "cn-lite") return 3;
+    if (v == "4" || v == "turtle" || v == "cn-turtle") return 4;
+    if (v == "5" || v == "turtlelite" || v == "turtle-lite" || v == "cn-turtlelite" || v == "cn-turtle-lite") return 5;
+    return -2;
 }
 
 std::vector<std::size_t> default_sizes()
@@ -69,7 +89,13 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    const bool force_cn_fast = env_enabled("YERBAS_BENCH_FORCE_CN_FAST");
+    const int forced_variant = forced_cn_variant();
+    if (forced_variant == -2) {
+        std::cerr << "Invalid YERBAS_BENCH_FORCE_CN_VARIANT. Use 0..5 or "
+                     "dark, darklite, fast, lite, turtle, turtlelite.\n";
+        return 4;
+    }
+    const bool force_cn = forced_variant >= 0;
     const auto sizes = benchmark_sizes(argc, argv);
     auto header = yerbas::test_vectors::MAINNET_GENESIS_HEADER;
     header[76] = header[77] = header[78] = header[79] = 0;
@@ -80,20 +106,22 @@ int main(int argc, char** argv)
     job.target_le.fill(0xff);
     job.stages = yerbas::ghostrider::stage_schedule(work);
 
-    if (force_cn_fast) {
-        constexpr std::uint8_t fast_stage = static_cast<std::uint8_t>(
-            yerbas::ghostrider::kCryptoNightStageFlag | 2U);
+    if (force_cn) {
+        const std::uint8_t forced_stage = static_cast<std::uint8_t>(
+            yerbas::ghostrider::kCryptoNightStageFlag |
+            static_cast<std::uint8_t>(forced_variant));
         for (auto& stage : job.stages) {
             if ((stage & yerbas::ghostrider::kCryptoNightStageFlag) != 0)
-                stage = fast_stage;
+                stage = forced_stage;
         }
     }
 
     std::cout << "Yerbas CUDA real-pipeline benchmark\n";
     yerbas::cuda::print_devices();
     std::cout << "Benchmark GPU: " << device_id << "\n";
-    if (force_cn_fast)
-        std::cout << "Schedule mode: forced CN-Fast production-selector exercise\n";
+    if (force_cn)
+        std::cout << "Schedule mode: forced " << kCnNames[forced_variant]
+                  << " production-selector exercise\n";
     std::cout << "Schedule:";
     for (std::size_t i = 0; i < job.stages.size(); ++i)
         std::cout << " " << i << ":" << stage_name(job.stages[i]);
@@ -108,11 +136,10 @@ int main(int argc, char** argv)
             engine.upload_job(job);
             const std::size_t actual = engine.batch_size();
 
-            // A forced CN-Fast schedule contains three CN-Fast stages per scan.
-            // Three scans are sufficient to collect the production selector's
-            // 3x baseline, 3x tile64 and 3x split-multiply samples. The fourth
-            // untimed scan confirms the selected production path before timing.
-            const int warmup_scans = force_cn_fast ? 4 : 1;
+            // A forced CN schedule contains three copies of the selected variant
+            // per scan. Four untimed scans are enough for the production selector
+            // and geometry paths to settle before the profiled scan.
+            const int warmup_scans = force_cn ? 4 : 1;
             for (int warmup = 0; warmup < warmup_scans; ++warmup) {
                 const std::uint32_t nonce = static_cast<std::uint32_t>(
                     static_cast<std::uint64_t>(warmup) * actual);
