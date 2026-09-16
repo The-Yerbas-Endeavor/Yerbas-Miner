@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr int kCnPhase2SelectorCacheRevision = 2;
+constexpr int kCnPhase2SelectorCacheRevision = 3;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_mode{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_threads{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_ttable4_parity{};
@@ -246,27 +246,33 @@ bool cn_validate_pair(cudaStream_t stream,
                       const cryptonight::SplitContext* contexts)
 {
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t validation_count = 2U;
+    constexpr std::size_t scratch_bytes = validation_count * cfg.page_size;
+    constexpr std::size_t context_bytes = validation_count * sizeof(cryptonight::SplitContext);
+
     std::uint8_t* ref = nullptr;
     std::uint8_t* candidate = nullptr;
     cryptonight::SplitContext* ref_ctx = nullptr;
     cryptonight::SplitContext* candidate_ctx = nullptr;
 
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref), cfg.page_size), "cudaMalloc CN parity ref failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate), cfg.page_size), "cudaMalloc CN parity candidate failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN parity ref ctx failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN parity candidate ctx failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref), scratch_bytes), "cudaMalloc CN parity ref failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate), scratch_bytes), "cudaMalloc CN parity candidate failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_ctx), context_bytes), "cudaMalloc CN parity ref ctx failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_ctx), context_bytes), "cudaMalloc CN parity candidate ctx failed");
 
-    check_cuda(cudaMemcpyAsync(ref, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref failed");
-    check_cuda(cudaMemcpyAsync(candidate, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate failed");
-    check_cuda(cudaMemcpyAsync(ref_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref ctx failed");
-    check_cuda(cudaMemcpyAsync(candidate_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate ctx failed");
+    check_cuda(cudaMemcpyAsync(ref, scratchpads, scratch_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref failed");
+    check_cuda(cudaMemcpyAsync(candidate, scratchpads, scratch_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate failed");
+    check_cuda(cudaMemcpyAsync(ref_ctx, contexts, context_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref ctx failed");
+    check_cuda(cudaMemcpyAsync(candidate_ctx, contexts, context_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate ctx failed");
 
-    cn_launch_mode<VariantIndex>(stream, reference_mode, reference_threads, 1U, ref, ref_ctx);
-    cn_launch_mode<VariantIndex>(stream, candidate_mode, candidate_threads, 1U, candidate, candidate_ctx);
+    cn_launch_mode<VariantIndex>(stream, reference_mode, reference_threads,
+                                 validation_count, ref, ref_ctx);
+    cn_launch_mode<VariantIndex>(stream, candidate_mode, candidate_threads,
+                                 validation_count, candidate, candidate_ctx);
 
-    std::vector<std::uint8_t> host_ref(cfg.page_size), host_candidate(cfg.page_size);
-    check_cuda(cudaMemcpyAsync(host_ref.data(), ref, cfg.page_size, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity ref result failed");
-    check_cuda(cudaMemcpyAsync(host_candidate.data(), candidate, cfg.page_size, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity candidate result failed");
+    std::vector<std::uint8_t> host_ref(scratch_bytes), host_candidate(scratch_bytes);
+    check_cuda(cudaMemcpyAsync(host_ref.data(), ref, scratch_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity ref result failed");
+    check_cuda(cudaMemcpyAsync(host_candidate.data(), candidate, scratch_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity candidate result failed");
     check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CN parity result failed");
 
     cudaFree(candidate_ctx);
