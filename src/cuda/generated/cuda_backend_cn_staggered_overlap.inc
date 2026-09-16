@@ -1,28 +1,33 @@
 // Generic staggered CryptoNight overlap scheduler.
 //
-// Rev8 restores fully position-balanced timing for the proven coarse scheduler
-// families and adds partition-specific phase-2 geometry. Each selected split may
-// use a different block size for partition A and B. Geometry is promoted only
-// when an alternating full-schedule confirmation beats the baseline pair by at
-// least 1%. Runtime timing decides every choice; there are no GPU model rules.
+// Rev9 keeps the fully position-balanced coarse scheduler from rev8, adds a
+// narrow ratio refinement around the winning coarse split, and hardens every
+// promotion with paired alternating A/B measurements. Partition-specific phase-2
+// geometry remains generic and per-device. A final paired check against ordinary
+// single-stream execution must still clear the original 3% production gate before
+// a rev9 cache is written. No GPU model or architecture rules are used.
 //
 // Production remains cache-first. With YERBAS_CUDA_OVERLAP unset or "auto", a
-// previously proven rev8 cache is used automatically, but a missing cache never
-// pauses mining to benchmark. Explicit overlap tuning is still required to
-// create a new cache.
+// previously proven rev9 cache is used automatically, but a missing cache never
+// pauses mining to benchmark. Explicit overlap tuning is required to create a
+// new cache.
 
 namespace {
 
 constexpr float kCnStaggerPromotionRatio = 0.97F;
+constexpr float kCnStaggerFinePromotionRatio = 0.995F;
 constexpr float kCnStaggerGeometryPromotionRatio = 0.99F;
-constexpr int kCnStaggerSchedulerRevision = 8;
+constexpr int kCnStaggerSchedulerRevision = 9;
 constexpr std::array<int, 11> kCnStaggerModes{{
     1, 25, 33, 40, 50, 60, 67, 75, 125, 150, 175
 }};
 constexpr int kCnStaggerTunePasses = static_cast<int>(kCnStaggerModes.size());
+constexpr int kCnStaggerFineConfirmPasses = 4;
+constexpr int kCnStaggerFineMaxCandidates = 5;
 constexpr int kCnStaggerGeometryPasses = 3;
-constexpr int kCnStaggerGeometryConfirmPasses = 5;
+constexpr int kCnStaggerGeometryConfirmPasses = 6;
 constexpr int kCnStaggerGeometryMaxCandidates = 8;
+constexpr int kCnStaggerFinalConfirmPasses = 6;
 
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_mode{};
 static std::array<std::array<int, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_threads_a{};
@@ -62,6 +67,13 @@ inline bool cn_stagger_split_mode(int mode)
     return ratio >= 20 && ratio <= 80;
 }
 
+inline int cn_stagger_make_mode(bool overlap, int ratio)
+{
+    if (ratio < 20) ratio = 20;
+    if (ratio > 80) ratio = 80;
+    return overlap ? 100 + ratio : ratio;
+}
+
 inline std::size_t cn_stagger_first_count(std::size_t count, int mode)
 {
     if (!cn_stagger_split_mode(mode)) return count;
@@ -93,6 +105,17 @@ float cn_stagger_median(std::array<float, N> values)
     }
 }
 
+inline void cn_stagger_print_mode(std::ostream& out, int mode)
+{
+    if (mode == 1) {
+        out << "single";
+    } else if (cn_stagger_loop_overlap(mode)) {
+        out << "overlap" << cn_stagger_ratio(mode);
+    } else {
+        out << "stagger" << cn_stagger_ratio(mode);
+    }
+}
+
 template <std::uint8_t VariantIndex>
 void launch_cn_setup_partition(cudaStream_t stream,
                                int device_id,
@@ -115,8 +138,7 @@ void launch_cn_setup_partition(cudaStream_t stream,
     const int blocks =
         static_cast<int>((total_threads + threads - 1U) / threads);
     cryptonight_setup_stage_cooperative8<VariantIndex, false>
-        <<<blocks, threads, 0, stream>>>(
-            states, count, scratchpads, contexts);
+        <<<blocks, threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(),
                "GhostRider CUDA staggered CN setup launch failed");
 }
@@ -168,8 +190,7 @@ void launch_cn_final_partition(cudaStream_t stream,
     const int blocks =
         static_cast<int>((total_threads + threads - 1U) / threads);
     cryptonight_final_stage_cooperative8<VariantIndex, false>
-        <<<blocks, threads, 0, stream>>>(
-            states, count, scratchpads, contexts);
+        <<<blocks, threads, 0, stream>>>(states, count, scratchpads, contexts);
     check_cuda(cudaGetLastError(),
                "GhostRider CUDA staggered CN final launch failed");
 }
@@ -222,7 +243,6 @@ void launch_cn_staggered_mode(cudaStream_t primary,
                "cudaEventCreate stagger ready failed");
     check_cuda(cudaEventCreateWithFlags(&done_b, cudaEventDisableTiming),
                "cudaEventCreate stagger done failed");
-
     check_cuda(cudaEventRecord(ready, primary),
                "cudaEventRecord stagger ready failed");
     check_cuda(cudaStreamWaitEvent(secondary, ready, 0),
@@ -251,12 +271,10 @@ void launch_cn_staggered_mode(cudaStream_t primary,
             geometry, props);
     } else {
         cudaEvent_t setup_a_done{}, loop_a_done{};
-        check_cuda(
-            cudaEventCreateWithFlags(&setup_a_done, cudaEventDisableTiming),
-            "cudaEventCreate stagger setup failed");
-        check_cuda(
-            cudaEventCreateWithFlags(&loop_a_done, cudaEventDisableTiming),
-            "cudaEventCreate stagger loop failed");
+        check_cuda(cudaEventCreateWithFlags(&setup_a_done, cudaEventDisableTiming),
+                   "cudaEventCreate stagger setup failed");
+        check_cuda(cudaEventCreateWithFlags(&loop_a_done, cudaEventDisableTiming),
+                   "cudaEventCreate stagger loop failed");
 
         launch_cn_setup_partition<VariantIndex>(
             primary, device_id, first, states, scratchpads, contexts,
@@ -296,7 +314,6 @@ void launch_cn_staggered_mode(cudaStream_t primary,
                "cudaEventRecord stagger done failed");
     check_cuda(cudaStreamWaitEvent(primary, done_b, 0),
                "cudaStreamWaitEvent stagger done failed");
-
     cudaEventDestroy(done_b);
     cudaEventDestroy(ready);
 }
@@ -331,8 +348,7 @@ bool load_cn_stagger_cache(
     const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
     if (retune && *retune && std::string(retune) != "0") return false;
 
-    const auto path =
-        cn_stagger_cache_path<VariantIndex>(device_id, props, count);
+    const auto path = cn_stagger_cache_path<VariantIndex>(device_id, props, count);
     if (path.empty()) return false;
 
     std::ifstream in(path);
@@ -345,8 +361,7 @@ bool load_cn_stagger_cache(
         return false;
 
     if (mode != 1) {
-        int production_mode =
-            g_cn_hardened_mode[device_id][VariantIndex];
+        int production_mode = g_cn_hardened_mode[device_id][VariantIndex];
         if (production_mode == 0) production_mode = 4;
         if (!cn_geometry_threads_valid_variant<VariantIndex>(
                 production_mode, threads_a, props) ||
@@ -368,8 +383,7 @@ void save_cn_stagger_cache(
     std::size_t count)
 {
     try {
-        const auto path =
-            cn_stagger_cache_path<VariantIndex>(device_id, props, count);
+        const auto path = cn_stagger_cache_path<VariantIndex>(device_id, props, count);
         if (path.empty()) return;
         std::filesystem::create_directories(path.parent_path());
         std::ofstream out(path, std::ios::trunc);
@@ -413,13 +427,100 @@ float time_cn_staggered_mode(
                "cudaEventRecord stagger timing stop failed");
     check_cuda(cudaEventSynchronize(stop),
                "cudaEventSynchronize stagger timing failed");
-
     float ms = 0.0F;
     check_cuda(cudaEventElapsedTime(&ms, start, stop),
                "cudaEventElapsedTime stagger timing failed");
     cudaEventDestroy(stop);
     cudaEventDestroy(start);
     return ms;
+}
+
+inline int build_cn_stagger_fine_modes(
+    int coarse_mode,
+    std::size_t count,
+    std::array<int, kCnStaggerFineMaxCandidates>& modes)
+{
+    if (!cn_stagger_split_mode(coarse_mode)) return 0;
+    constexpr std::array<int, kCnStaggerFineMaxCandidates> offsets{{-5, -3, 0, 3, 5}};
+    const bool overlap = cn_stagger_loop_overlap(coarse_mode);
+    const int base_ratio = cn_stagger_ratio(coarse_mode);
+    int mode_count = 0;
+
+    for (const int offset : offsets) {
+        const int candidate = cn_stagger_make_mode(overlap, base_ratio + offset);
+        const std::size_t first = cn_stagger_first_count(count, candidate);
+        bool duplicate = false;
+        for (int i = 0; i < mode_count; ++i) {
+            if (cn_stagger_first_count(count, modes[i]) == first) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate && mode_count < kCnStaggerFineMaxCandidates)
+            modes[mode_count++] = candidate;
+    }
+    return mode_count;
+}
+
+template <typename Measure>
+int tune_cn_stagger_fine_ratio(
+    int device_id,
+    std::size_t count,
+    int coarse_mode,
+    Measure&& measure)
+{
+    std::array<int, kCnStaggerFineMaxCandidates> fine_modes{};
+    const int fine_count = build_cn_stagger_fine_modes(
+        coarse_mode, count, fine_modes);
+    if (fine_count <= 1) return coarse_mode;
+
+    int best_mode = coarse_mode;
+    float best_ratio = 1.0F;
+
+    std::cout << "[CUDA CN stagger fine] GPU " << device_id
+              << " | coarse=";
+    cn_stagger_print_mode(std::cout, coarse_mode);
+
+    for (int i = 0; i < fine_count; ++i) {
+        const int candidate = fine_modes[i];
+        if (candidate == coarse_mode) {
+            std::cout << " | ";
+            cn_stagger_print_mode(std::cout, candidate);
+            std::cout << "=1.000000";
+            continue;
+        }
+
+        std::array<float, kCnStaggerFineConfirmPasses> ratios{};
+        for (int pass = 0; pass < kCnStaggerFineConfirmPasses; ++pass) {
+            float base_ms = 0.0F;
+            float candidate_ms = 0.0F;
+            if ((pass & 1) == 0) {
+                base_ms = measure(coarse_mode, 0, 0);
+                candidate_ms = measure(candidate, 0, 0);
+            } else {
+                candidate_ms = measure(candidate, 0, 0);
+                base_ms = measure(coarse_mode, 0, 0);
+            }
+            ratios[pass] = base_ms > 0.0F ? candidate_ms / base_ms : 1.0F;
+        }
+
+        const float paired_ratio = cn_stagger_median(ratios);
+        std::cout << " | ";
+        cn_stagger_print_mode(std::cout, candidate);
+        std::cout << '=' << std::fixed << std::setprecision(6) << paired_ratio;
+        if (paired_ratio < kCnStaggerFinePromotionRatio &&
+            paired_ratio < best_ratio) {
+            best_ratio = paired_ratio;
+            best_mode = candidate;
+        }
+    }
+
+    std::cout << " | threshold=0.5% | selected=";
+    cn_stagger_print_mode(std::cout, best_mode);
+    std::cout << " | paired-gain=" << std::fixed << std::setprecision(3)
+              << ((1.0F - best_ratio) * 100.0F) << "%"
+              << std::defaultfloat << '\n';
+    return best_mode;
 }
 
 template <std::uint8_t VariantIndex>
@@ -438,8 +539,7 @@ int build_cn_stagger_geometry_candidates(
     };
     const auto add = [&](int threads) {
         threads = align_warp(threads);
-        if (!cn_geometry_threads_valid_variant<VariantIndex>(
-                mode, threads, props))
+        if (!cn_geometry_threads_valid_variant<VariantIndex>(mode, threads, props))
             return;
         for (int i = 0; i < count; ++i)
             if (candidates[i] == threads) return;
@@ -464,24 +564,19 @@ void tune_cn_stagger_partition_geometry(
     int mode,
     Measure&& measure)
 {
-    int production_mode =
-        g_cn_hardened_mode[device_id][VariantIndex];
+    int production_mode = g_cn_hardened_mode[device_id][VariantIndex];
     if (production_mode == 0) production_mode = 4;
 
-    int baseline_threads =
-        g_cn_hardened_threads[device_id][VariantIndex];
+    int baseline_threads = g_cn_hardened_threads[device_id][VariantIndex];
     if (baseline_threads <= 0) baseline_threads = 128;
 
     std::array<int, kCnStaggerGeometryMaxCandidates> candidates{};
-    const int candidate_count =
-        build_cn_stagger_geometry_candidates<VariantIndex>(
-            production_mode, baseline_threads, props, candidates);
+    const int candidate_count = build_cn_stagger_geometry_candidates<VariantIndex>(
+        production_mode, baseline_threads, props, candidates);
 
     if (candidate_count <= 0) {
-        g_cn_stagger_threads_a[device_id][VariantIndex] =
-            baseline_threads;
-        g_cn_stagger_threads_b[device_id][VariantIndex] =
-            baseline_threads;
+        g_cn_stagger_threads_a[device_id][VariantIndex] = baseline_threads;
+        g_cn_stagger_threads_b[device_id][VariantIndex] = baseline_threads;
         return;
     }
 
@@ -492,8 +587,7 @@ void tune_cn_stagger_partition_geometry(
         (void)measure(mode, threads, baseline_threads);
         std::array<float, kCnStaggerGeometryPasses> samples{};
         for (int pass = 0; pass < kCnStaggerGeometryPasses; ++pass)
-            samples[pass] =
-                measure(mode, threads, baseline_threads);
+            samples[pass] = measure(mode, threads, baseline_threads);
         const float median = cn_stagger_median(samples);
         if (median < best_a_ms) {
             best_a_ms = median;
@@ -516,26 +610,26 @@ void tune_cn_stagger_partition_geometry(
         }
     }
 
+    std::array<float, kCnStaggerGeometryConfirmPasses> paired_ratios{};
     std::array<float, kCnStaggerGeometryConfirmPasses> baseline_samples{};
     std::array<float, kCnStaggerGeometryConfirmPasses> tuned_samples{};
     for (int pass = 0; pass < kCnStaggerGeometryConfirmPasses; ++pass) {
         if ((pass & 1) == 0) {
-            baseline_samples[pass] =
-                measure(mode, baseline_threads, baseline_threads);
-            tuned_samples[pass] =
-                measure(mode, best_a, best_b);
+            baseline_samples[pass] = measure(mode, baseline_threads, baseline_threads);
+            tuned_samples[pass] = measure(mode, best_a, best_b);
         } else {
-            tuned_samples[pass] =
-                measure(mode, best_a, best_b);
-            baseline_samples[pass] =
-                measure(mode, baseline_threads, baseline_threads);
+            tuned_samples[pass] = measure(mode, best_a, best_b);
+            baseline_samples[pass] = measure(mode, baseline_threads, baseline_threads);
         }
+        paired_ratios[pass] = baseline_samples[pass] > 0.0F
+            ? tuned_samples[pass] / baseline_samples[pass]
+            : 1.0F;
     }
 
     const float baseline_ms = cn_stagger_median(baseline_samples);
     const float tuned_ms = cn_stagger_median(tuned_samples);
-    const bool promoted =
-        tuned_ms < baseline_ms * kCnStaggerGeometryPromotionRatio;
+    const float paired_ratio = cn_stagger_median(paired_ratios);
+    const bool promoted = paired_ratio < kCnStaggerGeometryPromotionRatio;
     const int proposed_a = best_a;
     const int proposed_b = best_b;
 
@@ -547,29 +641,63 @@ void tune_cn_stagger_partition_geometry(
     g_cn_stagger_threads_a[device_id][VariantIndex] = best_a;
     g_cn_stagger_threads_b[device_id][VariantIndex] = best_b;
 
-    const float gain = baseline_ms > 0.0F
-        ? ((baseline_ms - tuned_ms) / baseline_ms) * 100.0F
-        : 0.0F;
-
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN stagger geometry] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
               << " | mode=";
-    if (cn_stagger_loop_overlap(mode))
-        std::cout << "overlap" << cn_stagger_ratio(mode);
-    else
-        std::cout << "stagger" << cn_stagger_ratio(mode);
-    std::cout << " | baseline=" << baseline_threads << '/'
-              << baseline_threads
+    cn_stagger_print_mode(std::cout, mode);
+    std::cout << " | baseline=" << baseline_threads << '/' << baseline_threads
               << " | proposed=" << proposed_a << '/' << proposed_b
               << " | selected=" << best_a << '/' << best_b
               << " | baseline-ms=" << baseline_ms
               << " | tuned-ms=" << tuned_ms
-              << " | gain=" << gain << "%"
+              << " | paired-ratio=" << std::setprecision(6) << paired_ratio
+              << std::setprecision(3)
+              << " | paired-gain=" << ((1.0F - paired_ratio) * 100.0F) << "%"
               << " | threshold=1%"
               << " | promoted=" << (promoted ? "yes" : "no")
               << " | candidates=" << candidate_count
               << std::defaultfloat << '\n';
+}
+
+template <typename Measure>
+bool confirm_cn_stagger_final_policy(
+    int device_id,
+    int mode,
+    int threads_a,
+    int threads_b,
+    Measure&& measure,
+    float* paired_ratio_out)
+{
+    std::array<float, kCnStaggerFinalConfirmPasses> ratios{};
+    for (int pass = 0; pass < kCnStaggerFinalConfirmPasses; ++pass) {
+        float single_ms = 0.0F;
+        float tuned_ms = 0.0F;
+        if ((pass & 1) == 0) {
+            single_ms = measure(1, 0, 0);
+            tuned_ms = measure(mode, threads_a, threads_b);
+        } else {
+            tuned_ms = measure(mode, threads_a, threads_b);
+            single_ms = measure(1, 0, 0);
+        }
+        ratios[pass] = single_ms > 0.0F ? tuned_ms / single_ms : 1.0F;
+    }
+
+    const float paired_ratio = cn_stagger_median(ratios);
+    if (paired_ratio_out) *paired_ratio_out = paired_ratio;
+    std::cout << std::fixed << std::setprecision(6)
+              << "[CUDA CN stagger final] GPU " << device_id
+              << " | policy=";
+    cn_stagger_print_mode(std::cout, mode);
+    std::cout << " | threads=" << threads_a << '/' << threads_b
+              << " | paired-ratio=" << paired_ratio
+              << std::setprecision(3)
+              << " | paired-gain=" << ((1.0F - paired_ratio) * 100.0F) << "%"
+              << " | threshold=3%"
+              << " | promoted="
+              << (paired_ratio < kCnStaggerPromotionRatio ? "yes" : "no")
+              << std::defaultfloat << '\n';
+    return paired_ratio < kCnStaggerPromotionRatio;
 }
 
 template <std::uint8_t VariantIndex>
@@ -585,50 +713,38 @@ bool launch_cn_staggered_if_ready(
 {
     if (cn_stagger_disabled() || count < 96U) return false;
     const bool use_ttable = geometry.aes_backend == 1;
-    if (!cn_overlap_selectors_ready<VariantIndex>(
-            device_id, use_ttable))
+    if (!cn_overlap_selectors_ready<VariantIndex>(device_id, use_ttable))
         return false;
 
-    if (device_id >= 0 &&
-        device_id < kCnPhaseProfileMaxDevices &&
+    if (device_id >= 0 && device_id < kCnPhaseProfileMaxDevices &&
         cn_phase_diagnostics_enabled() &&
         g_cn_phase_samples[device_id][VariantIndex] == 0U) {
-        launch_split_cryptonight_variant_phase_profiled_legacy<
-            VariantIndex>(
-                stream, states, count, scratchpads, contexts, geometry);
+        launch_split_cryptonight_variant_phase_profiled_legacy<VariantIndex>(
+            stream, states, count, scratchpads, contexts, geometry);
         return true;
     }
 
     int& mode = g_cn_stagger_mode[device_id][VariantIndex];
     if (mode == 0 &&
-        !load_cn_stagger_cache<VariantIndex>(
-            device_id, props, count)) {
+        !load_cn_stagger_cache<VariantIndex>(device_id, props, count)) {
         if (!cn_stagger_tuning_requested()) return false;
 
         std::uint8_t* saved_states = nullptr;
-        check_cuda(
-            cudaMalloc(
-                reinterpret_cast<void**>(&saved_states),
-                count * kStateBytes),
-            "cudaMalloc stagger saved states failed");
-        check_cuda(
-            cudaMemcpyAsync(
-                saved_states, states, count * kStateBytes,
-                cudaMemcpyDeviceToDevice, stream),
-            "cudaMemcpy stagger save states failed");
-        check_cuda(
-            cudaStreamSynchronize(stream),
-            "cudaStreamSynchronize stagger save failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&saved_states),
+                              count * kStateBytes),
+                   "cudaMalloc stagger saved states failed");
+        check_cuda(cudaMemcpyAsync(saved_states, states, count * kStateBytes,
+                                   cudaMemcpyDeviceToDevice, stream),
+                   "cudaMemcpy stagger save states failed");
+        check_cuda(cudaStreamSynchronize(stream),
+                   "cudaStreamSynchronize stagger save failed");
 
         const auto reset = [&]() {
-            check_cuda(
-                cudaMemcpyAsync(
-                    states, saved_states, count * kStateBytes,
-                    cudaMemcpyDeviceToDevice, stream),
-                "cudaMemcpy stagger restore states failed");
-            check_cuda(
-                cudaStreamSynchronize(stream),
-                "cudaStreamSynchronize stagger restore failed");
+            check_cuda(cudaMemcpyAsync(states, saved_states, count * kStateBytes,
+                                       cudaMemcpyDeviceToDevice, stream),
+                       "cudaMemcpy stagger restore states failed");
+            check_cuda(cudaStreamSynchronize(stream),
+                       "cudaStreamSynchronize stagger restore failed");
         };
 
         const auto measure = [&](int candidate_mode,
@@ -644,63 +760,81 @@ bool launch_cn_staggered_if_ready(
         for (const int candidate_mode : kCnStaggerModes)
             (void)measure(candidate_mode);
 
-        std::array<
-            std::array<float, kCnStaggerTunePasses>,
-            kCnStaggerModes.size()> samples{};
+        std::array<std::array<float, kCnStaggerTunePasses>,
+                   kCnStaggerModes.size()> samples{};
         for (int pass = 0; pass < kCnStaggerTunePasses; ++pass) {
-            for (std::size_t position = 0;
-                 position < kCnStaggerModes.size();
-                 ++position) {
+            for (std::size_t position = 0; position < kCnStaggerModes.size(); ++position) {
                 const std::size_t candidate_index =
                     (position + static_cast<std::size_t>(pass)) %
                     kCnStaggerModes.size();
-                samples[candidate_index]
-                       [static_cast<std::size_t>(pass)] =
+                samples[candidate_index][static_cast<std::size_t>(pass)] =
                     measure(kCnStaggerModes[candidate_index]);
             }
         }
 
         std::array<float, kCnStaggerModes.size()> medians{};
-        for (std::size_t i = 0;
-             i < kCnStaggerModes.size();
-             ++i)
+        for (std::size_t i = 0; i < kCnStaggerModes.size(); ++i)
             medians[i] = cn_stagger_median(samples[i]);
 
         const float single_ms = medians[0];
         mode = 1;
         float best_ms = single_ms;
-        for (std::size_t i = 1;
-             i < kCnStaggerModes.size();
-             ++i) {
-            if (medians[i] <
-                    single_ms * kCnStaggerPromotionRatio &&
+        for (std::size_t i = 1; i < kCnStaggerModes.size(); ++i) {
+            if (medians[i] < single_ms * kCnStaggerPromotionRatio &&
                 medians[i] < best_ms) {
                 mode = kCnStaggerModes[i];
                 best_ms = medians[i];
             }
         }
 
+        const int coarse_mode = mode;
+        if (mode != 1)
+            mode = tune_cn_stagger_fine_ratio(device_id, count, mode, measure);
+
         g_cn_stagger_threads_a[device_id][VariantIndex] = 0;
         g_cn_stagger_threads_b[device_id][VariantIndex] = 0;
-
         if (mode != 1) {
             tune_cn_stagger_partition_geometry<VariantIndex>(
                 device_id, props, mode, measure);
+
+            int& threads_a = g_cn_stagger_threads_a[device_id][VariantIndex];
+            int& threads_b = g_cn_stagger_threads_b[device_id][VariantIndex];
+            float final_ratio = 1.0F;
+            if (!confirm_cn_stagger_final_policy(
+                    device_id, mode, threads_a, threads_b, measure, &final_ratio)) {
+                int baseline_threads = g_cn_hardened_threads[device_id][VariantIndex];
+                if (baseline_threads <= 0) baseline_threads = 128;
+                if (threads_a != baseline_threads || threads_b != baseline_threads) {
+                    float fallback_ratio = 1.0F;
+                    if (confirm_cn_stagger_final_policy(
+                            device_id, mode, baseline_threads, baseline_threads,
+                            measure, &fallback_ratio)) {
+                        threads_a = baseline_threads;
+                        threads_b = baseline_threads;
+                    } else {
+                        mode = 1;
+                        threads_a = 0;
+                        threads_b = 0;
+                    }
+                } else {
+                    mode = 1;
+                    threads_a = 0;
+                    threads_b = 0;
+                }
+            }
         }
 
         reset();
         cudaFree(saved_states);
-        save_cn_stagger_cache<VariantIndex>(
-            device_id, props, count);
+        save_cn_stagger_cache<VariantIndex>(device_id, props, count);
 
-        const float gain = single_ms > 0.0F
+        const float coarse_gain = single_ms > 0.0F
             ? ((single_ms - best_ms) / single_ms) * 100.0F
             : 0.0F;
 
         std::cout << std::fixed << std::setprecision(3)
                   << "[CUDA CN stagger tuner] GPU " << device_id
-                  << " | "
-                  << cryptonight::config_value(VariantIndex).name
+                  << " | " << cryptonight::config_value(VariantIndex).name
                   << " | batch=" << count
                   << " | single=" << medians[0] << " ms"
                   << " | stagger25=" << medians[1] << " ms"
@@ -717,37 +851,24 @@ bool launch_cn_staggered_if_ready(
                   << " | warmup=1/candidate"
                   << " | order=fully-rotated"
                   << " | threshold=3%"
-                  << " | gain=" << gain << "%"
-                  << " | production=";
-
-        if (mode == 1) {
-            std::cout << "single";
-        } else if (cn_stagger_loop_overlap(mode)) {
-            std::cout << "overlap"
-                      << cn_stagger_ratio(mode);
-        } else {
-            std::cout << "stagger"
-                      << cn_stagger_ratio(mode);
-        }
-
+                  << " | coarse-gain=" << coarse_gain << "%"
+                  << " | coarse=";
+        cn_stagger_print_mode(std::cout, coarse_mode);
+        std::cout << " | production=";
+        cn_stagger_print_mode(std::cout, mode);
         if (mode != 1) {
             std::cout << " | threads="
-                      << g_cn_stagger_threads_a
-                             [device_id][VariantIndex]
+                      << g_cn_stagger_threads_a[device_id][VariantIndex]
                       << '/'
-                      << g_cn_stagger_threads_b
-                             [device_id][VariantIndex];
+                      << g_cn_stagger_threads_b[device_id][VariantIndex];
         }
         std::cout << std::defaultfloat << '\n';
     }
 
     if (mode == 1) return false;
 
-    const int threads_a =
-        g_cn_stagger_threads_a[device_id][VariantIndex];
-    const int threads_b =
-        g_cn_stagger_threads_b[device_id][VariantIndex];
-
+    const int threads_a = g_cn_stagger_threads_a[device_id][VariantIndex];
+    const int threads_b = g_cn_stagger_threads_b[device_id][VariantIndex];
     launch_cn_staggered_mode<VariantIndex>(
         stream, device_id, mode, count, states, scratchpads, contexts,
         geometry, props, threads_a, threads_b);
@@ -755,24 +876,17 @@ bool launch_cn_staggered_if_ready(
     if (!g_cn_stagger_reported[device_id][VariantIndex]) {
         g_cn_stagger_reported[device_id][VariantIndex] = true;
         const int ratio = cn_stagger_ratio(mode);
-        const std::size_t first =
-            cn_stagger_first_count(count, mode);
+        const std::size_t first = cn_stagger_first_count(count, mode);
         std::cout << "[CUDA CN stagger] GPU " << device_id
-                  << " | "
-                  << cryptonight::config_value(VariantIndex).name
+                  << " | " << cryptonight::config_value(VariantIndex).name
                   << " | mode=staggered"
-                  << " | ratio=" << ratio << '/'
-                  << (100 - ratio)
+                  << " | ratio=" << ratio << '/' << (100 - ratio)
                   << " | batch=" << count
-                  << " | partitions=" << first << '+'
-                  << (count - first)
-                  << " | threads=" << threads_a << '/'
-                  << threads_b
+                  << " | partitions=" << first << '+' << (count - first)
+                  << " | threads=" << threads_a << '/' << threads_b
                   << " | source=cache-or-tuned"
                   << " | loop-overlap="
-                  << (cn_stagger_loop_overlap(mode)
-                          ? "yes"
-                          : "no")
+                  << (cn_stagger_loop_overlap(mode) ? "yes" : "no")
                   << " | generic=yes\n";
     }
     return true;
@@ -791,17 +905,15 @@ void launch_split_cryptonight_variant_staggered(
     cudaDeviceProp props{};
     check_cuda(cudaGetDevice(&device_id),
                "cudaGetDevice CN stagger failed");
-    check_cuda(
-        cudaGetDeviceProperties(&props, device_id),
-        "cudaGetDeviceProperties CN stagger failed");
+    check_cuda(cudaGetDeviceProperties(&props, device_id),
+               "cudaGetDeviceProperties CN stagger failed");
     if (launch_cn_staggered_if_ready<VariantIndex>(
             stream, device_id, count, states, scratchpads, contexts,
             geometry, props))
         return;
 
-    launch_split_cryptonight_variant_phase_profiled_legacy<
-        VariantIndex>(
-            stream, states, count, scratchpads, contexts, geometry);
+    launch_split_cryptonight_variant_phase_profiled_legacy<VariantIndex>(
+        stream, states, count, scratchpads, contexts, geometry);
 }
 
 void launch_split_cryptonight_phase_profiled(
@@ -814,33 +926,13 @@ void launch_split_cryptonight_phase_profiled(
     const CnGeometry& geometry)
 {
     switch (variant) {
-    case 0:
-        launch_split_cryptonight_variant_staggered<0>(
-            stream, states, count, scratchpads, contexts, geometry);
-        break;
-    case 1:
-        launch_split_cryptonight_variant_staggered<1>(
-            stream, states, count, scratchpads, contexts, geometry);
-        break;
-    case 2:
-        launch_split_cryptonight_variant_staggered<2>(
-            stream, states, count, scratchpads, contexts, geometry);
-        break;
-    case 3:
-        launch_split_cryptonight_variant_staggered<3>(
-            stream, states, count, scratchpads, contexts, geometry);
-        break;
-    case 4:
-        launch_split_cryptonight_variant_staggered<4>(
-            stream, states, count, scratchpads, contexts, geometry);
-        break;
-    case 5:
-        launch_split_cryptonight_variant_staggered<5>(
-            stream, states, count, scratchpads, contexts, geometry);
-        break;
-    default:
-        throw std::runtime_error(
-            "GhostRider CryptoNight stage has invalid variant index");
+    case 0: launch_split_cryptonight_variant_staggered<0>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 1: launch_split_cryptonight_variant_staggered<1>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 2: launch_split_cryptonight_variant_staggered<2>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 3: launch_split_cryptonight_variant_staggered<3>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 4: launch_split_cryptonight_variant_staggered<4>(stream, states, count, scratchpads, contexts, geometry); break;
+    case 5: launch_split_cryptonight_variant_staggered<5>(stream, states, count, scratchpads, contexts, geometry); break;
+    default: throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
     }
 }
 
