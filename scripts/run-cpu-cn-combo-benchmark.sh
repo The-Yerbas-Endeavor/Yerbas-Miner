@@ -52,7 +52,8 @@ STATUS=$?
 set -e
 
 echo
-echo "================ BENCHMARK SUMMARY ================"ngrep -E '^\[CPU combo result\]|^Combinations tested|^Promoted candidates|^Equal-combo|^Projected CPU gain|^ERROR:|^Fatal:' "$LOG" || true
+echo "================ BENCHMARK SUMMARY ================"
+grep -E '^\[CPU combo result\]|^Combinations tested|^Promoted candidates|^Equal-combo|^Projected CPU gain|^ERROR:|^Fatal:' "$LOG" || true
 
 echo "Log: $LOG"
 exit "$STATUS"
