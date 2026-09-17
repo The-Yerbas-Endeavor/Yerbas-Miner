@@ -1,3 +1,4 @@
+YERBAS_CPU_COMBO_POLICY 1
 # Yerbas Miner CPU CN-combination candidate policy
 # Source: cpu-cn-combo-20260916-232940.log
 # Hardware-specific experimental evidence only; NOT production defaults.
@@ -13,7 +14,6 @@
 #   selected 719.9355 H/s
 #   projected CPU gain +14.5494%
 
-YERBAS_CPU_COMBO_POLICY 1
 BASE 6 16 unpinned 1 4 1 2 4 1
 
 # mask  widths(Dark DarkLite Fast Lite Turtle TurtleLite)  confirmed_gain
