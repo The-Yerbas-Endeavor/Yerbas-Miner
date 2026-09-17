@@ -2,6 +2,7 @@
 #include "console.h"
 #include "console_file_log.h"
 #include "console_quiet.h"
+#include "cpu/cpu_combo_benchmark.h"
 #include "cpu/cpu_worker_pool.h"
 #include "first_run.h"
 #include "miner.h"
@@ -206,6 +207,16 @@ int main(int argc, char** argv)
         // transient width/worker experiments seen in normal production logs.
         if (!cpu_runtime_learning_requested())
             yerbas::cpu::set_tuning_measurement_mode(true);
+
+        // Offline diagnostic: enumerate all 20 three-CryptoNight combinations
+        // and compare safe width policies against the cached production baseline.
+        // The benchmark exits before GPU initialization or pool connection and
+        // never writes a production policy/cache.
+        if (yerbas::cpu::cpu_combo_benchmark_requested()) {
+            const int result = yerbas::cpu::run_cpu_cn_combo_benchmark(config);
+            write_startup_log("CPU combo benchmark exited with code " + std::to_string(result));
+            return result;
+        }
 
         enable_cuda_profile_diagnostics();
 
