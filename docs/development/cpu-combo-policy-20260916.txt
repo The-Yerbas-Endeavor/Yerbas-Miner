@@ -1,0 +1,25 @@
+# Yerbas Miner CPU CN-combination candidate policy
+# Source: cpu-cn-combo-20260916-232940.log
+# Hardware-specific experimental evidence only; NOT production defaults.
+# Baseline: workers=6 batch=16 widths=1/4/1/2/4/1 affinity=unpinned throughput=432.70 H/s
+# Confirmation passes: 7
+# Promotion gate used here: >=3.00% confirmed gain with parity PASS
+#
+# Variant bit order:
+#   bit0 Dark, bit1 DarkLite, bit2 Fast, bit3 Lite, bit4 Turtle, bit5 TurtleLite
+#
+# SAFE equal-combination projection after falling back all losers to baseline:
+#   baseline 628.4935 H/s
+#   selected 719.9355 H/s
+#   projected CPU gain +14.5494%
+
+YERBAS_CPU_COMBO_POLICY 1
+BASE 6 16 unpinned 1 4 1 2 4 1
+
+# mask  widths(Dark DarkLite Fast Lite Turtle TurtleLite)  confirmed_gain
+RULE 11  1 2 1 2 4 1   3.77
+RULE 13  1 4 1 1 4 1  11.48
+RULE 19  2 4 1 2 4 1  24.53
+RULE 35  2 4 1 2 4 4  35.54
+RULE 49  2 4 1 2 1 4  25.39
+RULE 50  1 4 1 2 4 4  45.64
