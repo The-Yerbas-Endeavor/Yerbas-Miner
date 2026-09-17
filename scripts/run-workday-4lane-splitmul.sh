@@ -5,65 +5,73 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 CANDIDATE_REF="origin/feature/cn-4lane-splitmul"
-STABLE_REF="origin/stable/overnight-2026-09-15"
 BUILD_DIR="$ROOT/build-4lane-splitmul"
-STABLE_BUILD="$ROOT/build-stable"
 LOG_DIR="$ROOT/logs"
 
-# Preserve the user's normal production tuning cache. The experimental run gets
-# a private clone so selector experiments cannot contaminate production state.
-PROD_XDG_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}"
-PROD_CACHE="$PROD_XDG_ROOT/yerbas-miner"
+# Prefer the completed profile produced by the previous workday's long first-run
+# tuning session. Fall back to the user's normal production cache when needed.
+NORMAL_XDG_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}"
+NORMAL_CACHE="$NORMAL_XDG_ROOT/yerbas-miner"
+PREVIOUS_TUNED_CACHE="$ROOT/.bench-cache/4lane-splitmul/yerbas-miner"
 WORK_XDG_ROOT="$ROOT/.bench-cache/workday-4lane-splitmul"
 WORK_CACHE="$WORK_XDG_ROOT/yerbas-miner"
 
-mkdir -p "$LOG_DIR"
+has_complete_profile() {
+    local cache="$1"
+    [[ -d "$cache" ]] && \
+    compgen -G "$cache/cpu-policy-v6*" >/dev/null && \
+    compgen -G "$cache/gpu-calibration-v2*" >/dev/null && \
+    compgen -G "$cache/gpu-variant-batch-v2*" >/dev/null
+}
 
+mkdir -p "$LOG_DIR"
 git fetch origin
 
-if [[ ! -d "$PROD_CACHE" ]]; then
-    echo "ERROR: production tuning cache not found: $PROD_CACHE"
-    echo "Run the known-good miner once with gpu_tune=auto so the hardware profile exists."
-    exit 1
-fi
-
-# Refuse to create another accidental first-run session. These globs are the
-# current production hardware/class and per-variant tuning families.
-if ! compgen -G "$PROD_CACHE/cpu-policy-v6*" >/dev/null || \
-   ! compgen -G "$PROD_CACHE/gpu-calibration-v2*" >/dev/null || \
-   ! compgen -G "$PROD_CACHE/gpu-variant-batch-v2*" >/dev/null; then
-    echo "ERROR: production cache exists but the completed tuning profile is incomplete."
-    echo "Expected cpu-policy-v6, gpu-calibration-v2 and gpu-variant-batch-v2 entries."
+if has_complete_profile "$PREVIOUS_TUNED_CACHE"; then
+    SOURCE_CACHE="$PREVIOUS_TUNED_CACHE"
+    SOURCE_LABEL="previous completed workday autotune"
+elif has_complete_profile "$NORMAL_CACHE"; then
+    SOURCE_CACHE="$NORMAL_CACHE"
+    SOURCE_LABEL="normal production tuning cache"
+else
+    echo "ERROR: no completed tuning profile was found."
+    echo "Checked:"
+    echo "  $PREVIOUS_TUNED_CACHE"
+    echo "  $NORMAL_CACHE"
+    echo "Refusing to start a run that could stop at the first-run autotune prompt."
     exit 1
 fi
 
 echo
 printf '%s\n' "============================================================" \
               " CLEAN WORKDAY CANDIDATE TEST" \
-              " - clones existing production tuning" \
+              " - reuses completed CPU/GPU tuning" \
               " - retests only CN-Fast phase-2 selector" \
               " - requires >=8% candidate gain on BOTH GPUs" \
-              " - miner remains attached in foreground" \
+              " - starts the miner attached in foreground" \
               "============================================================"
+echo "Tuning source: $SOURCE_LABEL"
+echo "Cache source:  $SOURCE_CACHE"
 echo
 
 git switch --detach "$CANDIDATE_REF"
 
-# Incremental build. No clean rebuild unless the caller removed the directory.
+# Incremental build; avoid another unnecessary full clean CUDA rebuild.
 if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
     ./scripts/configure-linux-cuda.sh "$BUILD_DIR"
 fi
 cmake --build "$BUILD_DIR" --target cuda-batch-benchmark yerbas-miner -j"$(nproc)"
 
-# Clone all known CPU/GPU tuning state first. This is what prevents the first-run
-# autotune question while keeping the production cache itself read-only.
+# Clone the already-completed tuning profile. The original cache is never
+# modified by this experiment.
 rm -rf "$WORK_XDG_ROOT"
 mkdir -p "$WORK_XDG_ROOT"
-cp -a "$PROD_CACHE" "$WORK_CACHE"
+cp -a "$SOURCE_CACHE" "$WORK_CACHE"
 
-# Variant index 2 is CN-Fast. Invalidate only decisions whose implementation is
-# changed by this branch. Hardware calibration, per-variant batch sizing, setup/
-# final backends and all unrelated CN variants remain warm.
+# Variant index 2 is CN-Fast. Invalidate only selector/geometry decisions whose
+# implementation is changed by this branch. Hardware calibration, CPU policy,
+# per-variant batch sizing, setup/final backends and every other CN variant stay
+# warm. This is the key difference from the previous four-hour prompt incident.
 rm -f "$WORK_CACHE"/cn-production-rev2-v2-*.txt
 rm -f "$WORK_CACHE"/cn-phase2-rev2-v2-*.txt
 rm -f "$WORK_CACHE"/cn-block-rev1-v2-m444-*.txt
@@ -89,7 +97,8 @@ echo
 
 if grep -Eq 'baseline-parity=FAIL|mul32-parity=FAIL|FAILED|Fatal|CUDA error' \
    "${PRIME_PREFIX}"-gpu*.log; then
-    echo "Candidate failed correctness validation; stable miner will be used."
+    echo "Candidate failed correctness validation."
+    echo "The foreground run will use the parity-safe baseline selected by the cache."
     CANDIDATE_OK=0
 else
     CANDIDATE_OK="$(python3 - "$PRIME_PREFIX" <<'PY'
@@ -97,12 +106,16 @@ import pathlib, re, sys
 prefix = pathlib.Path(sys.argv[1])
 ok = True
 for gpu in (0, 1):
-    p = pathlib.Path(f"{prefix}-gpu{gpu}.log")
-    text = p.read_text(errors="replace")
-    vals = [float(x) for x in re.findall(r"mul32-vs-baseline=([+-]?[0-9.]+)%", text)]
+    path = pathlib.Path(f"{prefix}-gpu{gpu}.log")
+    text = path.read_text(errors="replace")
+    values = [float(x) for x in re.findall(r"mul32-vs-baseline=([+-]?[0-9.]+)%", text)]
     promoted = "production=4-lane-ttable-cg" in text
-    gain = vals[-1] if vals else float("-inf")
-    print(f"GPU {gpu}: split-multiply gain={gain:+.3f}% | promoted={'yes' if promoted else 'no'}", file=sys.stderr)
+    gain = values[-1] if values else float("-inf")
+    print(
+        f"GPU {gpu}: split-multiply gain={gain:+.3f}% | "
+        f"promoted={'yes' if promoted else 'no'}",
+        file=sys.stderr,
+    )
     if not promoted or gain < 8.0:
         ok = False
 print("1" if ok else "0")
@@ -110,38 +123,33 @@ PY
 )"
 fi
 
-# No developer tuning controls are allowed to leak into the workday miner.
+# Nothing from the forced benchmark may leak into the production run.
 unset YERBAS_BENCH_FORCE_CN_FAST || true
 unset YERBAS_BENCH_FORCE_CN_VARIANT || true
 unset YERBAS_CUDA_RETUNE || true
+unset YERBAS_CUDA_OVERLAP || true
 unset YERBAS_DIAGNOSTICS || true
 unset YERBAS_CUDA_PROFILE || true
 unset YERBAS_GPU_AUTOTUNE || true
 unset YERBAS_GPU_VARIANT_AUTOTUNE || true
 unset YERBAS_GPU_TUNE_MODE || true
 
+RUN_BIN="$BUILD_DIR/yerbas-miner"
+RUN_XDG_ROOT="$WORK_XDG_ROOT"
+
 if [[ "$CANDIDATE_OK" == "1" ]]; then
-    RUN_BIN="$BUILD_DIR/yerbas-miner"
-    RUN_XDG_ROOT="$WORK_XDG_ROOT"
     RUN_NAME="4lane-splitmul-clean-workday"
-    EXPECTED_MODE="4-lane-ttable-cg"
+    EXPECTED_MODE="4-lane-ttable-cg on both GPUs"
     echo
-    echo "GO: candidate cleared >=8% on both GPUs."
-    echo "Running candidate with cloned warm tuning profile."
+    echo "GO: split-multiply cleared >=8% on both GPUs."
+    echo "The workday run will exercise the promoted candidate."
 else
+    RUN_NAME="baseline-clean-workday"
+    EXPECTED_MODE="4-lane-ttable baseline"
     echo
-    echo "NO-GO: candidate missed the >=8%/both-GPU bar."
-    echo "Running the stable reference instead; no workday is wasted on a weak kernel."
-    git switch --detach "$STABLE_REF"
-    if [[ ! -x "$STABLE_BUILD/yerbas-miner" ]]; then
-        rm -rf "$STABLE_BUILD"
-        ./scripts/configure-linux-cuda.sh "$STABLE_BUILD"
-        cmake --build "$STABLE_BUILD" --target yerbas-miner -j"$(nproc)"
-    fi
-    RUN_BIN="$STABLE_BUILD/yerbas-miner"
-    RUN_XDG_ROOT="$PROD_XDG_ROOT"
-    RUN_NAME="stable-clean-workday"
-    EXPECTED_MODE="stable-reference"
+    echo "NO-GO: split-multiply missed the >=8%/both-GPU bar."
+    echo "The day will still produce a valuable clean pool-side BASELINE using"
+    echo "the same freshly completed CPU/GPU tuning profile, without retuning."
 fi
 
 LOG="$LOG_DIR/${RUN_NAME}-$(date +%Y%m%d-%H%M%S).log"
@@ -158,14 +166,18 @@ echo " Leave the terminal open. Press Ctrl+C to stop."
 echo " No first-run autotune prompt should appear."
 printf '%s\n\n' "============================================================"
 
-# Keep overlap at its ordinary cache-first policy for the actual production run.
-# The CN-Fast kernel selector itself has already been decided above.
+# The benchmark above has already written the CN-Fast decision into the cloned
+# cache. Normal auto/cache-first production policy is used from this point on.
+set +e
 XDG_CACHE_HOME="$RUN_XDG_ROOT" \
 script -q -f -e -c "$RUN_BIN" "$LOG"
-
 STATUS=$?
+set -e
 
 echo
-echo "================ POST-RUN CHECK ================"ngrep -E 'CryptoNight production selector cache loaded \| CN-Fast|AVG[[:space:]]|TOTAL[[:space:]].*ACCEPTED|Fatal|CUDA error|FAILED' "$LOG" | tail -30 || true
+echo "================ POST-RUN CHECK ================"
+grep -E \
+'CryptoNight production selector cache loaded \| CN-Fast|AVG[[:space:]]|TOTAL[[:space:]].*ACCEPTED|Fatal|CUDA error|FAILED' \
+"$LOG" | tail -30 || true
 echo "Log: $LOG"
 exit "$STATUS"
