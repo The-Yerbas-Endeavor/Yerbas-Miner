@@ -369,6 +369,31 @@ std::string cn_mask_names(std::uint32_t mask)
     return ss.str();
 }
 
+// Diagnostic-only GPU host-thread affinity. Format:
+//   YERBAS_GPU_HOST_CPU_MAP=0:6,1:7
+// where the left side is CUDA device id and the right side is logical CPU id.
+// Invalid/missing entries leave the worker unpinned.
+int gpu_host_cpu_for_device(int device_id)
+{
+    const char* value = std::getenv("YERBAS_GPU_HOST_CPU_MAP");
+    if (value == nullptr || *value == '\0') return -1;
+
+    std::istringstream in(value);
+    std::string entry;
+    while (std::getline(in, entry, ',')) {
+        const auto colon = entry.find(':');
+        if (colon == std::string::npos) continue;
+        try {
+            const int parsed_device = std::stoi(entry.substr(0, colon));
+            const int parsed_cpu = std::stoi(entry.substr(colon + 1));
+            if (parsed_device == device_id && parsed_cpu >= 0) return parsed_cpu;
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return -1;
+}
+
 } // namespace
 
 Endpoint parse_endpoint(const std::string& url)
@@ -845,7 +870,15 @@ void Client::start_gpu_worker(GpuWorker& worker)
     if (!worker.scan_state) worker.scan_state = std::make_unique<GpuScanState>();
     auto* state = worker.scan_state.get();
     auto* engine = worker.engine.get();
-    state->thread = std::thread([state, engine]() {
+    const int device_id = worker.device_id;
+    const int host_cpu = gpu_host_cpu_for_device(device_id);
+    state->thread = std::thread([state, engine, device_id, host_cpu]() {
+        if (host_cpu >= 0) {
+            const bool pinned = cpu::pin_current_thread_to_cpu(static_cast<unsigned int>(host_cpu));
+            std::cout << "[hybrid diagnostic] GPU " << device_id
+                      << " host scan thread CPU=" << host_cpu
+                      << " | pin=" << (pinned ? "PASS" : "FAILED") << '\n';
+        }
         for (;;) {
             std::uint32_t start_nonce = 0;
             {
