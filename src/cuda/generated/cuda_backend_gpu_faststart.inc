@@ -141,6 +141,69 @@ std::filesystem::path gpu_calibration_cache_path(int device_id,
     return cn_cache_directory() / name.str();
 }
 
+std::size_t gpu_calibration_cache_capacity_hint(const std::filesystem::path& path)
+{
+    const std::string name = path.filename().string();
+    const std::size_t cap_pos = name.find("-cap");
+    if (cap_pos == std::string::npos) return 0U;
+    const std::size_t begin = cap_pos + 4U;
+    const std::size_t end = name.find("-drv", begin);
+    if (end == std::string::npos || end <= begin) return 0U;
+    try {
+        return static_cast<std::size_t>(std::stoull(name.substr(begin, end - begin)));
+    } catch (...) {
+        return 0U;
+    }
+}
+
+std::vector<std::filesystem::path> gpu_calibration_cache_candidates(
+    int device_id,
+    const cudaDeviceProp& props,
+    std::size_t capacity)
+{
+    std::vector<std::filesystem::path> candidates;
+    const auto exact = gpu_calibration_cache_path(device_id, props, capacity);
+    if (exact.empty()) return candidates;
+    candidates.push_back(exact);
+
+    const std::string exact_name = exact.filename().string();
+    const std::size_t cap_pos = exact_name.find("-cap");
+    const std::size_t drv_pos = exact_name.find("-drv", cap_pos);
+    if (cap_pos == std::string::npos || drv_pos == std::string::npos) return candidates;
+
+    const std::string prefix = exact_name.substr(0, cap_pos + 4U);
+    const std::string suffix = exact_name.substr(drv_pos);
+
+    std::error_code ec;
+    std::filesystem::directory_iterator it(exact.parent_path(), ec);
+    const std::filesystem::directory_iterator end;
+    while (!ec && it != end) {
+        const auto candidate = it->path();
+        const std::string name = candidate.filename().string();
+        const bool prefix_match =
+            name.size() >= prefix.size() &&
+            name.compare(0, prefix.size(), prefix) == 0;
+        const bool suffix_match =
+            name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+        if (prefix_match && suffix_match && candidate != exact)
+            candidates.push_back(candidate);
+        it.increment(ec);
+    }
+
+    if (candidates.size() > 2U) {
+        std::stable_sort(candidates.begin() + 1, candidates.end(),
+            [capacity](const auto& a, const auto& b) {
+                const std::size_t ca = gpu_calibration_cache_capacity_hint(a);
+                const std::size_t cb = gpu_calibration_cache_capacity_hint(b);
+                const std::size_t da = ca > capacity ? ca - capacity : capacity - ca;
+                const std::size_t db = cb > capacity ? cb - capacity : capacity - cb;
+                return da < db;
+            });
+    }
+    return candidates;
+}
+
 void apply_calibration_shape(GpuTunePolicy& policy, const GpuCalibrationShape& shape)
 {
     policy.batch_size = shape.batch;
@@ -157,44 +220,72 @@ void apply_calibration_shape(GpuTunePolicy& policy, const GpuCalibrationShape& s
 bool load_gpu_calibration_cache(int device_id,
                                 const cudaDeviceProp& props,
                                 std::size_t capacity,
+                                std::size_t scratchpad_budget_bytes,
                                 int kernel_max,
                                 GpuTunePolicy& policy)
 {
-    const auto path = gpu_calibration_cache_path(device_id, props, capacity);
-    if (path.empty()) return false;
-    std::ifstream in(path);
-    if (!in) return false;
-
-    std::string magic;
-    int revision = 0;
-    GpuCalibrationShape shape{};
-    double hps = 0.0;
-    if (!(in >> magic >> revision >> shape.batch >> shape.core_threads >> shape.cn_threads)) return false;
-    for (auto& batch : policy.class_batches) if (!(in >> batch)) return false;
-    if (!(in >> hps)) return false;
+    const auto paths = gpu_calibration_cache_candidates(device_id, props, capacity);
+    if (paths.empty()) return false;
 
     const int warp = std::max(1, props.warpSize);
-    if (magic != "YERBAS_GPU_CALIBRATION" || revision != kGpuCalibrationRevision ||
-        shape.batch == 0 || shape.batch > capacity ||
-        shape.core_threads < warp || shape.core_threads > kernel_max ||
-        shape.core_threads > props.maxThreadsPerBlock || (shape.core_threads % warp) != 0 ||
-        shape.cn_threads < warp || shape.cn_threads > props.maxThreadsPerBlock ||
-        (shape.cn_threads % warp) != 0) return false;
-    for (const auto batch : policy.class_batches)
-        if (batch == 0U || batch > capacity) return false;
+    for (const auto& path : paths) {
+        std::ifstream in(path);
+        if (!in) continue;
 
-    apply_calibration_shape(policy, shape);
-    policy.batch_size = policy.class_batches[0];
-    policy.throughput_hps = hps;
-    policy.from_cache = true;
-    std::cout << "[GPU " << device_id << "] GPU calibration cache loaded"
-              << " | batches=" << policy.class_batches[0] << '/' << policy.class_batches[1]
-              << '/' << policy.class_batches[2] << '/' << policy.class_batches[3]
-              << " | classes=2MiB/1MiB/512KiB/256KiB"
-              << " | core=" << shape.core_threads
-              << " | CN=" << shape.cn_threads << '/' << shape.cn_threads << '/' << shape.cn_threads
-              << " | startup-benchmark=off\n";
-    return true;
+        std::string magic;
+        int revision = 0;
+        GpuCalibrationShape shape{};
+        GpuTunePolicy candidate{};
+        double hps = 0.0;
+        if (!(in >> magic >> revision >> shape.batch >> shape.core_threads >> shape.cn_threads))
+            continue;
+        bool parsed = true;
+        for (auto& batch : candidate.class_batches)
+            parsed = parsed && static_cast<bool>(in >> batch);
+        if (!parsed || !(in >> hps)) continue;
+
+        if (magic != "YERBAS_GPU_CALIBRATION" ||
+            revision != kGpuCalibrationRevision ||
+            shape.batch == 0 || shape.batch > capacity ||
+            shape.batch > scratchpad_budget_bytes / kGpuBatchClassPageBytes[0] ||
+            shape.core_threads < warp || shape.core_threads > kernel_max ||
+            shape.core_threads > props.maxThreadsPerBlock || (shape.core_threads % warp) != 0 ||
+            shape.cn_threads < warp || shape.cn_threads > props.maxThreadsPerBlock ||
+            (shape.cn_threads % warp) != 0)
+            continue;
+
+        bool safe = true;
+        for (std::size_t cls = 0; cls < candidate.class_batches.size(); ++cls) {
+            const std::size_t batch = candidate.class_batches[cls];
+            const std::size_t page = kGpuBatchClassPageBytes[cls];
+            if (batch == 0U || batch > capacity ||
+                batch > scratchpad_budget_bytes / std::max<std::size_t>(1U, page)) {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe) continue;
+
+        apply_calibration_shape(candidate, shape);
+        candidate.batch_size = candidate.class_batches[0];
+        candidate.throughput_hps = hps;
+        candidate.from_cache = true;
+        policy = candidate;
+
+        const std::size_t cached_capacity =
+            gpu_calibration_cache_capacity_hint(path);
+        std::cout << "[GPU " << device_id << "] GPU calibration cache loaded"
+                  << " | batches=" << policy.class_batches[0] << '/' << policy.class_batches[1]
+                  << '/' << policy.class_batches[2] << '/' << policy.class_batches[3]
+                  << " | classes=2MiB/1MiB/512KiB/256KiB"
+                  << " | core=" << shape.core_threads
+                  << " | CN=" << shape.cn_threads << '/' << shape.cn_threads << '/' << shape.cn_threads;
+        if (cached_capacity != 0U && cached_capacity != capacity)
+            std::cout << " | capacity-reuse=" << cached_capacity << "->" << capacity;
+        std::cout << " | startup-benchmark=off\n";
+        return true;
+    }
+    return false;
 }
 
 void save_gpu_calibration_cache(int device_id,
@@ -534,7 +625,9 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
     }
 
     GpuTunePolicy cached{};
-    if (load_gpu_calibration_cache(device_id, props, capacity, kernel_max, cached))
+    if (load_gpu_calibration_cache(device_id, props, capacity,
+                                   requested_batch * kGpuBatchClassPageBytes[0],
+                                   kernel_max, cached))
         return cached;
 
     const int core_threads = faststart_core_threads(props, kernel_max);
