@@ -56,6 +56,69 @@ std::filesystem::path gpu_variant_batch_cache_path(int device_id,
     return cn_cache_directory() / name.str();
 }
 
+std::size_t gpu_variant_batch_cache_capacity_hint(const std::filesystem::path& path)
+{
+    const std::string name = path.filename().string();
+    const std::size_t cap_pos = name.find("-cap");
+    if (cap_pos == std::string::npos) return 0U;
+    const std::size_t begin = cap_pos + 4U;
+    const std::size_t end = name.find("-drv", begin);
+    if (end == std::string::npos || end <= begin) return 0U;
+    try {
+        return static_cast<std::size_t>(std::stoull(name.substr(begin, end - begin)));
+    } catch (...) {
+        return 0U;
+    }
+}
+
+std::vector<std::filesystem::path> gpu_variant_batch_cache_candidates(
+    int device_id,
+    const cudaDeviceProp& props,
+    std::size_t capacity)
+{
+    std::vector<std::filesystem::path> candidates;
+    const auto exact = gpu_variant_batch_cache_path(device_id, props, capacity);
+    if (exact.empty()) return candidates;
+    candidates.push_back(exact);
+
+    const std::string exact_name = exact.filename().string();
+    const std::size_t cap_pos = exact_name.find("-cap");
+    const std::size_t drv_pos = exact_name.find("-drv", cap_pos);
+    if (cap_pos == std::string::npos || drv_pos == std::string::npos) return candidates;
+
+    const std::string prefix = exact_name.substr(0, cap_pos + 4U);
+    const std::string suffix = exact_name.substr(drv_pos);
+
+    std::error_code ec;
+    std::filesystem::directory_iterator it(exact.parent_path(), ec);
+    const std::filesystem::directory_iterator end;
+    while (!ec && it != end) {
+        const auto candidate = it->path();
+        const std::string name = candidate.filename().string();
+        const bool prefix_match =
+            name.size() >= prefix.size() &&
+            name.compare(0, prefix.size(), prefix) == 0;
+        const bool suffix_match =
+            name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+        if (prefix_match && suffix_match && candidate != exact)
+            candidates.push_back(candidate);
+        it.increment(ec);
+    }
+
+    if (candidates.size() > 2U) {
+        std::stable_sort(candidates.begin() + 1, candidates.end(),
+            [capacity](const auto& a, const auto& b) {
+                const std::size_t ca = gpu_variant_batch_cache_capacity_hint(a);
+                const std::size_t cb = gpu_variant_batch_cache_capacity_hint(b);
+                const std::size_t da = ca > capacity ? ca - capacity : capacity - ca;
+                const std::size_t db = cb > capacity ? cb - capacity : capacity - cb;
+                return da < db;
+            });
+    }
+    return candidates;
+}
+
 std::array<std::size_t, kGpuVariantBatchCount> gpu_variant_batch_defaults(
     const std::array<std::size_t, kGpuBatchClassCount>& class_batches,
     std::size_t capacity,
@@ -86,53 +149,65 @@ bool load_gpu_variant_batch_cache(
     const std::array<std::size_t, kGpuBatchClassCount>& class_batches,
     GpuVariantBatchPolicy& policy)
 {
-    const auto path = gpu_variant_batch_cache_path(device_id, props, capacity);
-    if (path.empty()) return false;
-    std::ifstream in(path);
-    if (!in) return false;
+    const auto paths = gpu_variant_batch_cache_candidates(device_id, props, capacity);
+    if (paths.empty()) return false;
 
-    std::string magic;
-    int revision = 0;
-    std::size_t cached_capacity = 0;
-    std::size_t cached_budget = 0;
-    std::array<std::size_t, kGpuBatchClassCount> cached_classes{};
-    std::array<std::size_t, kGpuVariantBatchCount> cached_variants{};
+    for (const auto& path : paths) {
+        std::ifstream in(path);
+        if (!in) continue;
 
-    if (!(in >> magic >> revision >> cached_capacity >> cached_budget)) return false;
-    for (auto& value : cached_classes) if (!(in >> value)) return false;
-    for (auto& value : cached_variants) if (!(in >> value)) return false;
+        std::string magic;
+        int revision = 0;
+        std::size_t cached_capacity = 0;
+        std::size_t cached_budget = 0;
+        std::array<std::size_t, kGpuBatchClassCount> cached_classes{};
+        std::array<std::size_t, kGpuVariantBatchCount> cached_variants{};
 
-    if (magic != "YERBAS_GPU_VARIANT_BATCH" ||
-        revision != kGpuVariantBatchRevision ||
-        cached_capacity != capacity ||
-        cached_budget != scratchpad_budget_bytes ||
-        cached_classes != class_batches)
-        return false;
+        if (!(in >> magic >> revision >> cached_capacity >> cached_budget)) continue;
+        bool parsed = true;
+        for (auto& value : cached_classes)
+            parsed = parsed && static_cast<bool>(in >> value);
+        for (auto& value : cached_variants)
+            parsed = parsed && static_cast<bool>(in >> value);
+        if (!parsed) continue;
 
-    for (std::size_t variant = 0; variant < cached_variants.size(); ++variant) {
-        const auto& cfg = cryptonight::kVariantConfigs[variant];
-        const std::size_t safe_max = gpu_align_batch(
-            std::min(capacity,
-                     scratchpad_budget_bytes / std::max<std::size_t>(1U, cfg.page_size)),
-            capacity, quantum);
-        const std::size_t value = cached_variants[variant];
-        if (value == 0U || value > safe_max || value > capacity)
-            return false;
-        if (value >= quantum && (value % quantum) != 0U)
-            return false;
+        if (magic != "YERBAS_GPU_VARIANT_BATCH" ||
+            revision != kGpuVariantBatchRevision ||
+            cached_capacity == 0U || cached_budget == 0U ||
+            cached_classes != class_batches)
+            continue;
+
+        bool safe = true;
+        for (std::size_t variant = 0; variant < cached_variants.size(); ++variant) {
+            const auto& cfg = cryptonight::kVariantConfigs[variant];
+            const std::size_t safe_max = gpu_align_batch(
+                std::min(capacity,
+                         scratchpad_budget_bytes / std::max<std::size_t>(1U, cfg.page_size)),
+                capacity, quantum);
+            const std::size_t value = cached_variants[variant];
+            if (value == 0U || value > safe_max || value > capacity ||
+                (value >= quantum && (value % quantum) != 0U)) {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe) continue;
+
+        policy.batches = cached_variants;
+        policy.specialized = true;
+        policy.from_cache = true;
+
+        std::cout << "[GPU " << device_id << "] GPU CN-variant batch cache loaded | batches=";
+        for (std::size_t variant = 0; variant < policy.batches.size(); ++variant) {
+            if (variant) std::cout << '/';
+            std::cout << cryptonight::kVariantConfigs[variant].name << ':' << policy.batches[variant];
+        }
+        if (cached_capacity != capacity || cached_budget != scratchpad_budget_bytes)
+            std::cout << " | capacity-reuse=" << cached_capacity << "->" << capacity;
+        std::cout << " | startup-benchmark=off\n";
+        return true;
     }
-
-    policy.batches = cached_variants;
-    policy.specialized = true;
-    policy.from_cache = true;
-
-    std::cout << "[GPU " << device_id << "] GPU CN-variant batch cache loaded | batches=";
-    for (std::size_t variant = 0; variant < policy.batches.size(); ++variant) {
-        if (variant) std::cout << '/';
-        std::cout << cryptonight::kVariantConfigs[variant].name << ':' << policy.batches[variant];
-    }
-    std::cout << " | startup-benchmark=off\n";
-    return true;
+    return false;
 }
 
 void save_gpu_variant_batch_cache(
