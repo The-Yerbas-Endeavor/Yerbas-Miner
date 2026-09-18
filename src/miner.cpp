@@ -117,6 +117,42 @@ void set_cpu_retune_environment(bool enabled)
     setenv("YERBAS_CPU_RETUNE", "1", 1);
 #endif
 }
+
+void apply_hybrid_diagnostic_overrides(AppConfig& config, unsigned int hw_threads)
+{
+    // Opt-in controls used by the hybrid contention experiments. They are
+    // deliberately applied after normal autotune so the qualified CN widths,
+    // lane policy and cache remain intact while worker count/affinity are
+    // varied one dimension at a time.
+    if (const char* value = std::getenv("YERBAS_CPU_WORKERS_OVERRIDE");
+        value != nullptr && *value != '\0') {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 1UL && parsed <= hw_threads) {
+            config.miner.threads = static_cast<unsigned int>(parsed);
+            std::cout << "[hybrid diagnostic] CPU worker override=" << config.miner.threads
+                      << " | qualified CN widths retained\n";
+        } else {
+            std::cerr << "[hybrid diagnostic] ignoring invalid YERBAS_CPU_WORKERS_OVERRIDE="
+                      << value << " | valid range=1.." << hw_threads << '\n';
+        }
+    }
+
+    if (const char* value = std::getenv("YERBAS_CPU_AFFINITY_OVERRIDE");
+        value != nullptr && *value != '\0') {
+        const std::string policy(value);
+        if (policy == "unpinned") {
+            cpu::set_runtime_affinity_policy(cpu::AffinityPolicy::Unpinned);
+            std::cout << "[hybrid diagnostic] CPU affinity override=unpinned\n";
+        } else if (policy == "physical-first") {
+            cpu::set_runtime_affinity_policy(cpu::AffinityPolicy::PhysicalFirst);
+            std::cout << "[hybrid diagnostic] CPU affinity override=physical-first\n";
+        } else {
+            std::cerr << "[hybrid diagnostic] ignoring invalid YERBAS_CPU_AFFINITY_OVERRIDE="
+                      << policy << " | expected unpinned or physical-first\n";
+        }
+    }
+}
 }
 
 Miner::Miner(AppConfig config)
@@ -174,6 +210,7 @@ int Miner::run()
         }
     }
 
+    apply_hybrid_diagnostic_overrides(config_, hw_threads);
     cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
     configure_gpu_tuning_environment(config_.gpu);
 
