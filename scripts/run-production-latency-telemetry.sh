@@ -22,6 +22,15 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
 fi
 
+echo
+echo "Inspecting compiled CN phase-2 SASS/resource usage from this same binary..."
+if command -v cuobjdump >/dev/null 2>&1; then
+    bash tools/inspect-cn-phase2-sass.sh "$BIN" ||         echo "WARNING: SASS inspection failed; continuing with latency telemetry."
+else
+    echo "WARNING: cuobjdump not found; skipping SASS inspection."
+fi
+echo
+
 unset YERBAS_CPU_RETUNE || true
 unset YERBAS_CPU_RUNTIME_LEARN || true
 unset YERBAS_CUDA_RETUNE || true
