@@ -245,6 +245,10 @@ private:
     RotationHashCounter rotation_hashes_done_{RotationHashCounter::Kind::Total};
     RotationHashCounter rotation_cpu_hashes_done_{RotationHashCounter::Kind::Cpu};
 
+    // Production-latency diagnostics are opt-in and never alter scheduling.
+    // The timestamp lets us measure the actual lifetime of each Stratum job.
+    std::chrono::steady_clock::time_point active_job_received_at_{};
+
 #ifdef YERBAS_HAS_CUDA
     struct GpuScanState {
         std::mutex mutex;
@@ -255,8 +259,28 @@ private:
         bool busy{false};
         bool result_ready{false};
         std::uint32_t start_nonce{0};
+        std::uint64_t job_generation{0};
+        std::string job_id;
+        std::uint64_t hash_count{0};
+        std::uint32_t cn_mask{0};
+        RotationFingerprint rotation_fingerprint{};
+        std::chrono::steady_clock::time_point dispatched_at{};
+        std::chrono::steady_clock::time_point started_at{};
+        std::chrono::steady_clock::time_point finished_at{};
         std::vector<cuda::Candidate> candidates;
         std::exception_ptr error;
+    };
+
+    struct GpuScanResult {
+        std::vector<cuda::Candidate> candidates;
+        std::uint64_t job_generation{0};
+        std::string job_id;
+        std::uint64_t hash_count{0};
+        std::uint32_t cn_mask{0};
+        RotationFingerprint rotation_fingerprint{};
+        double queue_ms{0.0};
+        double scan_ms{0.0};
+        double wall_ms{0.0};
     };
 
     struct GpuWorker {
@@ -269,18 +293,35 @@ private:
         std::uint64_t hashes_done{0};
         std::uint64_t hashes_at_last_report{0};
         std::uint64_t rotation_hashes_done{0};
+
+        // Opt-in production-latency accounting. Updated only by the Stratum
+        // scheduling thread so no atomics are needed.
+        std::uint64_t telemetry_batches_launched{0};
+        std::uint64_t telemetry_batches_completed{0};
+        std::uint64_t telemetry_batches_stale{0};
+        std::uint64_t telemetry_hashes_launched{0};
+        std::uint64_t telemetry_hashes_completed{0};
+        std::uint64_t telemetry_hashes_useful{0};
+        std::uint64_t telemetry_hashes_stale{0};
+        double telemetry_scan_ms{0.0};
+        double telemetry_useful_scan_ms{0.0};
+        double telemetry_stale_scan_ms{0.0};
     };
 
     void start_gpu_worker(GpuWorker& worker);
     void stop_gpu_workers() noexcept;
     void dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce);
     bool gpu_scan_ready(GpuWorker& worker);
-    std::vector<cuda::Candidate> take_gpu_scan_result(GpuWorker& worker);
+    GpuScanResult take_gpu_scan_result(GpuWorker& worker);
+    void record_gpu_scan_telemetry(GpuWorker& worker,
+                                   const GpuScanResult& result,
+                                   bool stale);
     void drain_gpu_scans() noexcept;
 
     std::vector<GpuWorker> gpu_workers_;
     JobLoadedFlag gpu_job_loaded_{};
     bool gpu_pipeline_ready_{false};
+    std::uint32_t gpu_active_cn_mask_{0};
 #endif
 };
 
