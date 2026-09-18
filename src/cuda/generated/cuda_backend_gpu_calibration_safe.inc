@@ -270,7 +270,9 @@ GpuTunePolicy build_gpu_tune_policy(int device_id,
     }
 
     GpuTunePolicy cached{};
-    if (load_gpu_calibration_cache(device_id, props, capacity, kernel_max, cached))
+    if (load_gpu_calibration_cache(device_id, props, capacity,
+                                   requested_batch * kGpuBatchClassPageBytes[0],
+                                   kernel_max, cached))
         return cached;
 
     const int core_threads = faststart_core_threads(props, kernel_max);
