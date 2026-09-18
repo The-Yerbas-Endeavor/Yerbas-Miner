@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -345,6 +346,29 @@ std::string format_duration(double seconds)
     return ss.str();
 }
 
+bool production_latency_telemetry_enabled()
+{
+    static const bool enabled = []() {
+        const char* value = std::getenv("YERBAS_PRODUCTION_LATENCY_TELEMETRY");
+        return value != nullptr && *value != '\0' && std::string(value) != "0";
+    }();
+    return enabled;
+}
+
+std::string cn_mask_names(std::uint32_t mask)
+{
+    std::ostringstream ss;
+    bool first = true;
+    for (std::uint8_t variant = 0; variant < 6U; ++variant) {
+        if ((mask & (1U << variant)) == 0U) continue;
+        if (!first) ss << '/';
+        first = false;
+        ss << ghostrider::cryptonight_name(variant);
+    }
+    if (first) return "none";
+    return ss.str();
+}
+
 } // namespace
 
 Endpoint parse_endpoint(const std::string& url)
@@ -426,6 +450,8 @@ int Client::run(std::atomic_bool& stop_requested)
 #endif
     }
     std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | worker=" << kDevFeeWorker << '\n';
+    if (production_latency_telemetry_enabled())
+        std::cout << "[latency] production telemetry enabled | scheduling unchanged | per-batch accounting active\n";
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
         try { if (run_session(stop_requested)) break; }
@@ -615,7 +641,17 @@ void Client::handle_message(const std::string& line)
             next.job_id = params[0].get<std::string>(); next.prevhash = params[1].get<std::string>(); next.coinb1 = params[2].get<std::string>(); next.coinb2 = params[3].get<std::string>();
             for (const auto& branch : params[4]) next.merkle_branch.push_back(branch.get<std::string>());
             next.version = params[5].get<std::string>(); next.nbits = params[6].get<std::string>(); next.ntime = params[7].get<std::string>(); next.clean_jobs = params[8].get<bool>(); next.valid = true;
+
+            const auto notify_received_at = std::chrono::steady_clock::now();
+            const std::string prior_job_id = job_.job_id;
+            const double prior_job_lifetime_ms =
+                active_job_received_at_.time_since_epoch().count() == 0
+                    ? 0.0
+                    : std::chrono::duration<double, std::milli>(
+                          notify_received_at - active_job_received_at_).count();
+
             job_ = std::move(next);
+            active_job_received_at_ = notify_received_at;
             activate_pending_target();
 #ifdef YERBAS_HAS_CUDA
             nonce_ = (gpu_pipeline_ready_ && config_.gpu.enabled && !gpu_workers_.empty()) ? kHybridCpuStart : 0U;
@@ -626,6 +662,16 @@ void Client::handle_message(const std::string& line)
             if (job_.clean_jobs) ++extranonce2_counter_;
             update_rotation_epoch();
             ++received_jobs_;
+            if (production_latency_telemetry_enabled()) {
+                std::ostringstream latency;
+                latency << "[latency job] new_job=" << job_.job_id
+                        << " generation=" << MiningJob::generation()
+                        << " prior_job=" << (prior_job_id.empty() ? "none" : prior_job_id)
+                        << " prior_lifetime_ms=" << std::fixed << std::setprecision(3)
+                        << prior_job_lifetime_ms
+                        << " clean=" << (job_.clean_jobs ? "yes" : "no");
+                std::cout << latency.str() << '\n';
+            }
             std::cout << "[stratum] New job #" << received_jobs_ << " id=" << job_.job_id << " branches=" << job_.merkle_branch.size() << " clean=" << (job_.clean_jobs ? "yes" : "no");
             if (target_ready_) std::cout << " | active_diff=" << std::defaultfloat << std::setprecision(8) << difficulty_;
             std::cout << '\n';
@@ -809,6 +855,7 @@ void Client::start_gpu_worker(GpuWorker& worker)
                 start_nonce = state->start_nonce;
                 state->work_pending = false;
                 state->busy = true;
+                state->started_at = std::chrono::steady_clock::now();
             }
 
             std::vector<cuda::Candidate> candidates;
@@ -821,6 +868,7 @@ void Client::start_gpu_worker(GpuWorker& worker)
 
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
+                state->finished_at = std::chrono::steady_clock::now();
                 state->candidates = std::move(candidates);
                 state->error = error;
                 state->busy = false;
@@ -852,8 +900,20 @@ void Client::dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce)
     std::unique_lock<std::mutex> lock(state.mutex);
     state.cv.wait(lock, [&state]() { return !state.busy && !state.work_pending && !state.result_ready; });
     state.start_nonce = start_nonce;
+    state.job_generation = MiningJob::generation();
+    state.job_id = job_.job_id;
+    state.hash_count = static_cast<std::uint64_t>(worker.engine->batch_size());
+    state.cn_mask = gpu_active_cn_mask_;
+    state.rotation_fingerprint = active_rotation_fingerprint_;
+    state.dispatched_at = std::chrono::steady_clock::now();
+    state.started_at = {};
+    state.finished_at = {};
     state.error = nullptr;
     state.work_pending = true;
+    if (production_latency_telemetry_enabled()) {
+        ++worker.telemetry_batches_launched;
+        worker.telemetry_hashes_launched += state.hash_count;
+    }
     lock.unlock();
     state.cv.notify_one();
 }
@@ -865,19 +925,81 @@ bool Client::gpu_scan_ready(GpuWorker& worker)
     return state.result_ready;
 }
 
-std::vector<cuda::Candidate> Client::take_gpu_scan_result(GpuWorker& worker)
+Client::GpuScanResult Client::take_gpu_scan_result(GpuWorker& worker)
 {
     auto& state = *worker.scan_state;
     std::unique_lock<std::mutex> lock(state.mutex);
     state.cv.wait(lock, [&state]() { return state.result_ready; });
-    auto candidates = std::move(state.candidates);
+
+    GpuScanResult result;
+    result.candidates = std::move(state.candidates);
+    result.job_generation = state.job_generation;
+    result.job_id = state.job_id;
+    result.hash_count = state.hash_count;
+    result.cn_mask = state.cn_mask;
+    result.rotation_fingerprint = state.rotation_fingerprint;
+
+    if (state.started_at.time_since_epoch().count() != 0 &&
+        state.dispatched_at.time_since_epoch().count() != 0) {
+        result.queue_ms = std::chrono::duration<double, std::milli>(
+            state.started_at - state.dispatched_at).count();
+    }
+    if (state.finished_at.time_since_epoch().count() != 0 &&
+        state.started_at.time_since_epoch().count() != 0) {
+        result.scan_ms = std::chrono::duration<double, std::milli>(
+            state.finished_at - state.started_at).count();
+    }
+    if (state.finished_at.time_since_epoch().count() != 0 &&
+        state.dispatched_at.time_since_epoch().count() != 0) {
+        result.wall_ms = std::chrono::duration<double, std::milli>(
+            state.finished_at - state.dispatched_at).count();
+    }
+
     const std::exception_ptr error = state.error;
     state.error = nullptr;
     state.result_ready = false;
     lock.unlock();
     state.cv.notify_all();
     if (error) std::rethrow_exception(error);
-    return candidates;
+    return result;
+}
+
+void Client::record_gpu_scan_telemetry(GpuWorker& worker,
+                                       const GpuScanResult& result,
+                                       bool stale)
+{
+    if (!production_latency_telemetry_enabled()) return;
+
+    ++worker.telemetry_batches_completed;
+    worker.telemetry_hashes_completed += result.hash_count;
+    worker.telemetry_scan_ms += result.scan_ms;
+    if (stale) {
+        ++worker.telemetry_batches_stale;
+        worker.telemetry_hashes_stale += result.hash_count;
+        worker.telemetry_stale_scan_ms += result.scan_ms;
+    } else {
+        worker.telemetry_hashes_useful += result.hash_count;
+        worker.telemetry_useful_scan_ms += result.scan_ms;
+    }
+
+    const double useful_pct = worker.telemetry_hashes_completed == 0
+        ? 100.0
+        : 100.0 * static_cast<double>(worker.telemetry_hashes_useful) /
+          static_cast<double>(worker.telemetry_hashes_completed);
+
+    std::ostringstream line;
+    line << "[latency batch] GPU " << worker.device_id
+         << " job=" << result.job_id
+         << " generation=" << result.job_generation
+         << " rotation=" << std::hex << result.rotation_fingerprint << std::dec
+         << " CN=" << cn_mask_names(result.cn_mask)
+         << " hashes=" << result.hash_count
+         << " queue_ms=" << std::fixed << std::setprecision(3) << result.queue_ms
+         << " scan_ms=" << result.scan_ms
+         << " wall_ms=" << result.wall_ms
+         << " stale=" << (stale ? "yes" : "no")
+         << " useful_device_pct=" << std::setprecision(2) << useful_pct;
+    std::cout << line.str() << '\n';
 }
 
 void Client::drain_gpu_scans() noexcept
@@ -934,6 +1056,12 @@ void Client::upload_gpu_job()
     descriptor.header = header; descriptor.target_le = target_le_;
     const ghostrider::Work work{descriptor.header.data(), descriptor.header.size()};
     descriptor.stages = ghostrider::stage_schedule(work);
+    gpu_active_cn_mask_ = 0U;
+    for (const std::uint8_t stage : descriptor.stages) {
+        if ((stage & ghostrider::kCryptoNightStageFlag) == 0U) continue;
+        const auto variant = static_cast<unsigned int>(stage & 0x7fU);
+        if (variant < 6U) gpu_active_cn_mask_ |= (1U << variant);
+    }
     const std::uint64_t gpu_space = static_cast<std::uint64_t>(kHybridCpuStart);
     const std::uint64_t region_size = gpu_space / std::max<std::size_t>(1, gpu_workers_.size());
     for (std::size_t i = 0; i < gpu_workers_.size(); ++i) {
@@ -994,14 +1122,24 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
         for (auto& task : pending) {
             if (task.completed || !gpu_scan_ready(*task.worker)) continue;
 
-            auto candidates = take_gpu_scan_result(*task.worker);
+            auto scan_result = take_gpu_scan_result(*task.worker);
+            auto candidates = std::move(scan_result.candidates);
             task.worker->hashes_done += task.count;
             hashes_done_ += task.count;
             task.completed = true;
             --remaining;
             consumed_result = true;
 
-            if (stale) {
+            const bool result_stale =
+                stale ||
+                scan_result.job_generation != work_generation ||
+                scan_result.job_id != work_job_id ||
+                MiningJob::generation() != work_generation ||
+                job_.job_id != work_job_id;
+            record_gpu_scan_telemetry(*task.worker, scan_result, result_stale);
+
+            if (result_stale) {
+                stale = true;
                 stale_candidates += candidates.size();
                 continue;
             }
@@ -1086,14 +1224,24 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         for (auto& task : pending) {
             if (task.completed || !gpu_scan_ready(*task.worker)) continue;
 
-            auto candidates = take_gpu_scan_result(*task.worker);
+            auto scan_result = take_gpu_scan_result(*task.worker);
+            auto candidates = std::move(scan_result.candidates);
             task.worker->hashes_done += task.count;
             hashes_done_ += task.count;
             task.completed = true;
             --remaining;
             consumed_result = true;
 
-            if (stale) {
+            const bool result_stale =
+                stale ||
+                scan_result.job_generation != work_generation ||
+                scan_result.job_id != work_job_id ||
+                MiningJob::generation() != work_generation ||
+                job_.job_id != work_job_id;
+            record_gpu_scan_telemetry(*task.worker, scan_result, result_stale);
+
+            if (result_stale) {
+                stale = true;
                 stale_candidates += candidates.size();
                 continue;
             }
@@ -1228,6 +1376,38 @@ void Client::report_stats(bool force)
 
     std::cout << std::left << std::setw(14) << "AVG" << std::setw(18) << format_rate(average_hps)
               << "EXPECTED/SHARE " << std::fixed << std::setprecision(0) << expected_hashes << '\n';
+#ifdef YERBAS_HAS_CUDA
+    if (production_latency_telemetry_enabled()) {
+        for (const auto& worker : gpu_workers_) {
+            const double useful_pct = worker.telemetry_hashes_completed == 0
+                ? 100.0
+                : 100.0 * static_cast<double>(worker.telemetry_hashes_useful) /
+                  static_cast<double>(worker.telemetry_hashes_completed);
+            const double stale_pct = worker.telemetry_hashes_completed == 0
+                ? 0.0
+                : 100.0 * static_cast<double>(worker.telemetry_hashes_stale) /
+                  static_cast<double>(worker.telemetry_hashes_completed);
+            const double avg_scan_ms = worker.telemetry_batches_completed == 0
+                ? 0.0
+                : worker.telemetry_scan_ms /
+                  static_cast<double>(worker.telemetry_batches_completed);
+            std::ostringstream latency;
+            latency << "[latency summary] GPU " << worker.device_id
+                    << " batches=" << worker.telemetry_batches_completed
+                    << '/' << worker.telemetry_batches_launched
+                    << " stale_batches=" << worker.telemetry_batches_stale
+                    << " hashes_completed=" << worker.telemetry_hashes_completed
+                    << " useful=" << worker.telemetry_hashes_useful
+                    << " stale=" << worker.telemetry_hashes_stale
+                    << " useful_pct=" << std::fixed << std::setprecision(2) << useful_pct
+                    << " stale_pct=" << stale_pct
+                    << " avg_scan_ms=" << std::setprecision(3) << avg_scan_ms
+                    << " stale_scan_s=" << std::setprecision(3)
+                    << worker.telemetry_stale_scan_ms / 1000.0;
+            std::cout << latency.str() << '\n';
+        }
+    }
+#endif
     std::cout << kRule << '\n';
     std::cout << kCpuColor << "■ CPU" << kColorReset << "  " << kGpuColor << "■ GPU" << kColorReset << "  "
               << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << "  " << kAcceptBadge << " SHARE ACCEPTED " << kColorReset << "  "
