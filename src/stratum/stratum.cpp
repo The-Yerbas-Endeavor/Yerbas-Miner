@@ -509,6 +509,7 @@ bool Client::run_session(std::atomic_bool& stop_requested)
     pending_difficulty_ready_ = false;
     pending_difficulty_ = 0.0;
     socket_pending_.clear();
+    active_job_received_at_ = {};
 #ifdef YERBAS_HAS_CUDA
     gpu_job_loaded_ = false;
 #endif
@@ -1040,13 +1041,66 @@ void Client::drain_gpu_scans() noexcept
     for (auto& worker : gpu_workers_) {
         if (!worker.scan_state) continue;
         auto& state = *worker.scan_state;
-        std::unique_lock<std::mutex> lock(state.mutex);
-        state.cv.wait(lock, [&state]() { return state.result_ready || (!state.busy && !state.work_pending); });
-        state.candidates.clear();
-        state.error = nullptr;
-        state.result_ready = false;
-        lock.unlock();
+
+        GpuScanResult abandoned;
+        bool had_result = false;
+        {
+            std::unique_lock<std::mutex> lock(state.mutex);
+            state.cv.wait(lock, [&state]() {
+                return state.result_ready || (!state.busy && !state.work_pending);
+            });
+
+            if (state.result_ready) {
+                abandoned.job_generation = state.job_generation;
+                abandoned.job_id = state.job_id;
+                abandoned.hash_count = state.hash_count;
+                abandoned.cn_mask = state.cn_mask;
+                abandoned.rotation_fingerprint = state.rotation_fingerprint;
+                abandoned.candidates = std::move(state.candidates);
+
+                if (state.started_at.time_since_epoch().count() != 0 &&
+                    state.dispatched_at.time_since_epoch().count() != 0) {
+                    abandoned.queue_ms = std::chrono::duration<double, std::milli>(
+                        state.started_at - state.dispatched_at).count();
+                }
+                if (state.finished_at.time_since_epoch().count() != 0 &&
+                    state.started_at.time_since_epoch().count() != 0) {
+                    abandoned.scan_ms = std::chrono::duration<double, std::milli>(
+                        state.finished_at - state.started_at).count();
+                }
+                if (state.finished_at.time_since_epoch().count() != 0 &&
+                    state.dispatched_at.time_since_epoch().count() != 0) {
+                    abandoned.wall_ms = std::chrono::duration<double, std::milli>(
+                        state.finished_at - state.dispatched_at).count();
+                }
+                had_result = true;
+            }
+
+            state.candidates.clear();
+            state.error = nullptr;
+            state.result_ready = false;
+        }
         state.cv.notify_all();
+
+        // A drained completed scan is abandoned work: its candidates are never
+        // submitted. Count it as stale/wasted for latency diagnostics even when
+        // the Stratum generation itself did not change (for example dev-fee
+        // session switching). This does not alter the miner's normal hash
+        // counters or scheduling.
+        if (had_result && abandoned.hash_count != 0U &&
+            production_latency_telemetry_enabled()) {
+            try {
+                record_gpu_scan_telemetry(worker, abandoned, true);
+                std::cout << "[latency drain] GPU " << worker.device_id
+                          << " job=" << abandoned.job_id
+                          << " hashes=" << abandoned.hash_count
+                          << " scan_ms=" << std::fixed << std::setprecision(3)
+                          << abandoned.scan_ms
+                          << " reason=abandoned-before-submit\n";
+            } catch (...) {
+                // Telemetry must never make a production drain path throw.
+            }
+        }
     }
 }
 
