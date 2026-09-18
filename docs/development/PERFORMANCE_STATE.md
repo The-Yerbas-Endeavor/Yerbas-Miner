@@ -229,3 +229,29 @@ If it instead shows the stale `1/1/1/1/2/1`, `physical-first`, `393.09 H/s` poli
 - Do not spend 20-minute CUDA builds on tiny geometry/stagger ideas.
 - Foreground miner runs are preferred for long validation.
 - No Docker.
+
+
+## Final CPU combo production A/B
+
+Policy-ON log: `cpu-combo-production-ab-20260917-001052.log`
+
+Policy-OFF log: `cpu-combo-production-baseline-20260917-092041(1).log`
+
+Both runs used the same fresh CPU baseline:
+- workers 6
+- batch 16
+- widths 1/4/1/2/4/1
+- affinity unpinned
+- cached throughput 432.70 H/s
+
+Final production evidence:
+- Policy ON completed-rotation telemetry over ~8.40h: ~1757.0 H/s total, ~371.1 CPU, ~1385.9 GPU.
+- Policy OFF completed-rotation telemetry over ~9.92h: ~1729.2 H/s total, ~348.3 CPU, ~1380.9 GPU.
+- Observed ON-OFF delta: ~+27.8 H/s total, of which ~+22.8 H/s is CPU and ~+5 H/s is GPU/session noise.
+- Applying the offline-confirmed six rule gains to the actual OFF rotation mix predicts ~+23.2 H/s CPU, almost exactly matching the observed +22.8 H/s CPU delta.
+- Therefore the combo policy is real and works as designed, but its practical whole-miner gain is only about +20 to +30 H/s.
+- Preserve it as a stackable CPU optimization; do not spend more long-run cycles trying to make this six-rule policy the >=100 H/s breakthrough.
+
+Current direction:
+- Return to a genuinely new high-ceiling structural optimization.
+- Before another multiply rewrite, inspect the prior cooperative 32-bit multiply implementation and compiled SASS/resource behavior so we do not repeat old work.
