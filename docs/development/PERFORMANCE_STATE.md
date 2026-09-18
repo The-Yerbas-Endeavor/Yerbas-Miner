@@ -255,3 +255,27 @@ Final production evidence:
 Current direction:
 - Return to a genuinely new high-ceiling structural optimization.
 - Before another multiply rewrite, inspect the prior cooperative 32-bit multiply implementation and compiled SASS/resource behavior so we do not repeat old work.
+
+
+## Current campaign: production latency, hybrid contention, and SASS
+
+Active branch: `feature/production-latency-telemetry`.
+
+The six-rule CPU combo policy is now classified as a real ~+20 to +30 H/s
+stackable whole-miner improvement, not the >=100 H/s breakthrough.
+
+Immediate order of work:
+
+1. Measure GPU work invalidated by Stratum job changes with
+   `YERBAS_PRODUCTION_LATENCY_TELEMETRY=1`. Scheduling stays unchanged.
+2. If stale GPU work is large enough, test latency-bounded/adaptive batch sizing.
+   If it is <3%, kill that direction quickly.
+3. Use the prepared hybrid worker/host-affinity probes to test 4/5/6 CPU workers
+   and GPU host-thread placement using whole-system H/s.
+4. Inspect compiled CN phase-2 SASS/resource behavior before designing any new
+   multiply/dependency rewrite. Historical cooperative 32-bit multiply commit
+   `31531906909efb04960d21bc3385f4083d1dbc48` already implemented the obvious
+   four-lane partial-product idea.
+
+Detailed resume file:
+`docs/development/PRODUCTION_LATENCY_STATE.md`.
