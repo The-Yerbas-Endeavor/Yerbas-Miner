@@ -19,51 +19,76 @@ At about 8h30m:
 - accepted/rejected/blocks: 4874 / 2 / 4
 - exact completed-rotation weighted telemetry over ~8.40h: ~1757.0 H/s total, ~371.1 H/s CPU, ~1385.9 H/s GPU
 
-The policy-ON run did not demonstrate the required +100 H/s whole-miner gain versus the established ~1.86-1.87 kH/s stable reference.
-
 ## Policy-OFF baseline run
 
-Log snapshot: `cpu-combo-production-baseline-20260917-092041.log`
+Final log: `cpu-combo-production-baseline-20260917-092041(1).log`
 
 Same already-built binary, combo policy OFF.
 
-Startup is clean and comparable on CPU:
+Startup was clean and comparable:
 - workers=6
 - batch=16
 - widths=1/4/1/2/4/1
 - affinity=unpinned
 - cached throughput=432.70 H/s
+- both GPUs started from populated calibration/variant caches
 
-Both GPUs started from populated calibration/variant caches.
+At about 10h19m:
+- miner AVG: ~1.81 kH/s
+- accepted/rejected/blocks: 7762 / 3 / 11 at the last full status block
+- exact completed-rotation weighted telemetry over ~9.92h: ~1729.2 H/s total, ~348.3 H/s CPU, ~1380.9 H/s GPU
 
-Current uploaded snapshot covers only about 29 minutes, so it is NOT sufficient for a whole-miner long-run verdict.
+## A/B result
 
-Snapshot telemetry:
-- ~17 completed rotations
-- ~0.485h completed-rotation time
-- exact weighted telemetry: ~1693.2 H/s total, ~378.1 H/s CPU, ~1315.1 H/s GPU
-- latest status near 28m: miner AVG ~1.78 kH/s, 324 accepted, 1 rejected, 1 block
+Whole completed-rotation telemetry:
+- policy ON total: ~1757.0 H/s
+- policy OFF total: ~1729.2 H/s
+- observed delta: ~+27.8 H/s
 
-## Early same-combination signal
+Component telemetry:
+- CPU ON: ~371.1 H/s
+- CPU OFF: ~348.3 H/s
+- CPU delta: ~+22.8 H/s
+- GPU ON: ~1385.9 H/s
+- GPU OFF: ~1380.9 H/s
+- GPU delta: ~+5.0 H/s
 
-The short baseline already overlaps two of the six policy combinations.
+The six combo rules therefore appear to be a real CPU improvement, but the practical whole-miner gain is only about +20 to +30 H/s, far below the project requirement of +100 H/s sustained.
 
-For Dark + DarkLite + Lite (policy mask 11):
-- policy ON, completed rotations >=20s: ~533.6 H/s CPU across ~1618s
-- policy OFF: ~515.6 H/s CPU across ~814s
-- observed CPU delta: about +3.5% with policy ON
+A useful cross-check is that applying the offline-confirmed gains to the actual policy-OFF rotation mix predicts about +23.2 H/s CPU. That closely matches the observed +22.8 H/s CPU delta in the production runs. This strongly supports that the combo policy is working as designed and that its magnitude is now understood.
 
-This closely matches the offline benchmark's confirmed +3.77% rule, which is useful evidence that the policy hook is actually applying a real gain.
+## Per-combination production evidence
 
-For Dark + Fast + Lite (policy mask 13):
-- policy ON: ~266.9 H/s CPU across ~2892s
-- policy OFF: ~203.9 H/s CPU across only ~96s
-- observed CPU delta is large (~+31%), but the OFF sample is too short to trust yet.
+The six experimental rules are:
+- Dark + DarkLite + Lite: offline +3.77%
+- Dark + Fast + Lite: offline +11.48%
+- Dark + DarkLite + Turtle: offline +24.53%
+- Dark + DarkLite + TurtleLite: offline +35.54%
+- Dark + Turtle + TurtleLite: offline +25.39%
+- DarkLite + Turtle + TurtleLite: offline +45.64%
 
-The other four promoted combinations have not appeared enough in the short OFF snapshot to validate them.
+Production coverage was uneven, but the better-covered rules generally showed positive CPU movement. Dark + DarkLite + Lite was especially clean: roughly +4% CPU production uplift, matching the offline +3.77% result closely.
 
-## Immediate action
+The very large offline percentages do not translate to a large whole-miner gain because those combinations occupy only part of runtime. In the final policy-OFF log, the six promoted combinations accounted for about 26.7% of completed-rotation time.
 
-If the policy-OFF miner is still running, leave it running in the foreground. Do not rebuild or retune. Capture/upload a later snapshot or final log after several more hours so all six policy combinations have meaningful OFF samples.
+## Decision
 
-Do not merge or kill the combo policy until the same-binary ON/OFF comparison has enough per-combination coverage.
+- The combo-policy mechanism is VALID.
+- The combo-policy direction is NOT the missing +100 H/s.
+- Preserve the six-rule policy as an optional/retained CPU optimization layer.
+- Do not spend more long-run validation time trying to turn this specific six-rule set into the primary performance breakthrough.
+- Future work should return to higher-ceiling structural optimization, while keeping this measured ~+23 H/s CPU gain available to stack with future GPU gains.
+
+## Next action
+
+Return to structural GPU/CN phase-2 work or another architectural lever with realistic >=100 H/s whole-miner potential.
+
+Do not repeat:
+- 2-lane split multiply
+- dual-state / 8-lane interleave
+- ordinary 4-lane 64-bit split multiply
+- shuffle-first AES/T-table
+- multi-GPU contention work
+- tiny geometry/stagger/cache tweaks
+
+Before implementing another multiply redesign, inspect prior cooperative 32-bit multiply work and compiled SASS/resource behavior so the next structural candidate is genuinely new.
