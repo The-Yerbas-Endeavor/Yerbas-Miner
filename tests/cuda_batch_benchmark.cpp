@@ -119,9 +119,12 @@ int main(int argc, char** argv)
     std::cout << "Yerbas CUDA real-pipeline benchmark\n";
     yerbas::cuda::print_devices();
     std::cout << "Benchmark GPU: " << device_id << "\n";
-    if (force_cn)
+    if (force_cn) {
         std::cout << "Schedule mode: forced " << kCnNames[forced_variant]
                   << " production-selector exercise\n";
+        if (env_enabled("YERBAS_CN_GEOMETRY_RETUNE"))
+            std::cout << "Geometry mode: full real-batch CN block-size sweep\n";
+    }
     std::cout << "Schedule:";
     for (std::size_t i = 0; i < job.stages.size(); ++i)
         std::cout << " " << i << ":" << stage_name(job.stages[i]);
@@ -137,9 +140,11 @@ int main(int argc, char** argv)
             const std::size_t actual = engine.batch_size();
 
             // A forced CN schedule contains three copies of the selected variant
-            // per scan. Four untimed scans are enough for the production selector
-            // and geometry paths to settle before the profiled scan.
-            const int warmup_scans = force_cn ? 4 : 1;
+            // per scan. Four untimed scans are enough for the production kernel
+            // selector. A geometry-only retune needs enough real-batch launches
+            // to finish the full 3-pass block-size candidate sweep as well.
+            const bool geometry_retune = env_enabled("YERBAS_CN_GEOMETRY_RETUNE");
+            const int warmup_scans = force_cn ? (geometry_retune ? 15 : 4) : 1;
             for (int warmup = 0; warmup < warmup_scans; ++warmup) {
                 const std::uint32_t nonce = static_cast<std::uint32_t>(
                     static_cast<std::uint64_t>(warmup) * actual);
