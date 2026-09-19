@@ -92,16 +92,12 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, bool SharedResultExchange = false>
+template <std::uint8_t VariantIndex, bool Lane0WideLoad = false>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
 {
     __shared__ std::uint32_t tables[1024];
-    // Candidate mode 445 exchanges one 32-bit result per participating thread.
-    // The false instantiation keeps a single dummy word so the declaration
-    // remains compile-time sized while adding only 4 bytes to the baseline.
-    __shared__ std::uint32_t result_exchange[SharedResultExchange ? 1024 : 1];
     cryptonight::init_shared_aes_ttables(tables);
     __syncthreads();
 
@@ -190,10 +186,32 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint32_t byte_offset2 = c0 & byte_address_mask;
         std::uint8_t* slot2 = scratch + static_cast<std::size_t>(byte_offset2);
 
-        const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
+        std::uint32_t t_word = 0U;
+        std::uint64_t lane0_t0v = 0U;
+        if constexpr (Lane0WideLoad) {
+            // slot2 is 16-byte aligned. Lane 0 consumes both low 32-bit words
+            // in the multiply path, so let it fetch them as one aligned 64-bit
+            // value and remove the lane-1 -> lane-0 shuffle from that dependency
+            // chain. Lanes 1..3 keep their normal word loads for their A updates.
+            if (lane == 0U) {
+                lane0_t0v = reinterpret_cast<const std::uint64_t*>(slot2)[0];
+                t_word = static_cast<std::uint32_t>(lane0_t0v);
+            } else {
+                t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
+            }
+        } else {
+            t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
+        }
+
         const std::uint32_t t0_lo = lane == 0U ? t_word : 0U;
         const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
-        const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
+        std::uint32_t t0_hi = 0U;
+        if constexpr (Lane0WideLoad) {
+            if (lane == 0U)
+                t0_hi = static_cast<std::uint32_t>(lane0_t0v >> 32U);
+        } else {
+            t0_hi = __shfl_sync(mask, t_word, base + 1U);
+        }
         const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
         const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
 
@@ -201,8 +219,10 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         if (lane == 0U) {
             const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
                                         (static_cast<std::uint64_t>(c1) << 32U);
-            const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
-                                      (static_cast<std::uint64_t>(t0_hi) << 32U);
+            const std::uint64_t t0v = Lane0WideLoad
+                ? lane0_t0v
+                : (static_cast<std::uint64_t>(t0_lo) |
+                   (static_cast<std::uint64_t>(t0_hi) << 32U));
             const std::uint64_t lo = c_low * t0v;
             const std::uint64_t hi = __umul64hi(c_low, t0v);
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
@@ -219,30 +239,13 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // Next iteration's lane-1 A word is exactly na0_hi ^ t0_hi.
             aw1_shadow = na0_hi ^ t0_hi;
         }
-        std::uint32_t na_word = 0U;
-        if constexpr (SharedResultExchange) {
-            // The baseline broadcasts four different result words with four
-            // subgroup shuffles, even though each destination lane consumes
-            // only one. Let lane 0 publish the four words once to warp-local
-            // shared storage, then have each lane read only its own result.
-            const unsigned int exchange_base = threadIdx.x & ~3U;
-            if (lane == 0U) {
-                result_exchange[exchange_base + 0U] = na0_lo;
-                result_exchange[exchange_base + 1U] = na0_hi;
-                result_exchange[exchange_base + 2U] = na1_lo;
-                result_exchange[exchange_base + 3U] = na1_hi;
-            }
-            __syncwarp(mask);
-            na_word = result_exchange[exchange_base + lane];
-        } else {
-            na0_lo = __shfl_sync(mask, na0_lo, base);
-            na0_hi = __shfl_sync(mask, na0_hi, base);
-            na1_lo = __shfl_sync(mask, na1_lo, base);
-            na1_hi = __shfl_sync(mask, na1_hi, base);
-            na_word = lane == 0U ? na0_lo :
-                      lane == 1U ? na0_hi :
-                      lane == 2U ? na1_lo : na1_hi;
-        }
+        na0_lo = __shfl_sync(mask, na0_lo, base);
+        na0_hi = __shfl_sync(mask, na0_hi, base);
+        na1_lo = __shfl_sync(mask, na1_lo, base);
+        na1_hi = __shfl_sync(mask, na1_hi, base);
+        const std::uint32_t na_word = lane == 0U ? na0_lo :
+                                      lane == 1U ? na0_hi :
+                                      lane == 2U ? na1_lo : na1_hi;
 
         std::uint32_t store_word = na_word;
         if (lane == 2U) store_word ^= tweak_lo;
