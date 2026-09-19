@@ -9,6 +9,7 @@
 //   44  promoted four-lane T-table/coalesced baseline
 //   222 two-lane T-table + 64-byte shared tile
 //   444 four-lane T-table/coalesced + cache-global (.cg) scratchpad traffic
+//   445 four-lane T-table/coalesced + split 32-bit 64x64 multiply
 
 namespace {
 
@@ -17,7 +18,8 @@ static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_mode{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_threads{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_ttable4_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_tile64_parity{};
-static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{}; // mode 444: local-table-first candidate
+static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{};
+static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_splitmul_parity{}; // mode 444: local-table-first candidate
 
 template <typename Kernel>
 int cn_occupancy_block_size(Kernel kernel, int warp, int max_threads)
@@ -112,7 +114,7 @@ bool load_cn_phase2_selector_cache(int device_id,
     if (!(in >> magic >> revision >> variant >> mode >> threads) ||
         magic != "YERBAS_CN_PHASE2" || revision != kCnPhase2SelectorCacheRevision ||
         variant != static_cast<unsigned int>(VariantIndex) ||
-        (mode != 4 && mode != 44 && mode != 222 && mode != 444) ||
+        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0) {
         return false;
     }
@@ -135,6 +137,7 @@ bool load_cn_phase2_selector_cache(int device_id,
     g_cn_ttable4_parity[device_id][VariantIndex] = mode == 4 ? -1 : 1;
     g_cn_tile64_parity[device_id][VariantIndex] = mode == 222 ? 1 : 0;
     g_cn_cg_parity[device_id][VariantIndex] = mode == 444 ? 1 : 0;
+    g_cn_splitmul_parity[device_id][VariantIndex] = mode == 445 ? 1 : 0;
 
     std::cout << "[GPU " << device_id << "] CryptoNight phase2 cache loaded | "
               << cryptonight::config_value(VariantIndex).name
@@ -151,7 +154,7 @@ void save_cn_phase2_selector_cache(int device_id,
     if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return;
     const int mode = g_cn_residency_mode[device_id][VariantIndex];
     const int threads = g_cn_residency_threads[device_id][VariantIndex];
-    if ((mode != 4 && mode != 44 && mode != 222 && mode != 444) || threads <= 0) return;
+    if ((mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) || threads <= 0) return;
 
     try {
         const auto path = cn_phase2_selector_cache_path<VariantIndex>(device_id, props, batch_size);
@@ -201,6 +204,9 @@ void cn_launch_mode(cudaStream_t stream,
         cryptonight_loop_stage_ttable2_tile64<VariantIndex><<<
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
+    } else if (mode == 445) {
+        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
     } else if (mode == 444) {
         cryptonight_loop_stage_ttable4_cg<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
@@ -298,6 +304,9 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
+    const int threads_split = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
+        warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
     const bool parity_t4 = cn_validate_pair<VariantIndex>(
@@ -319,6 +328,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         stream, 44, 32, 444, 32, scratchpads, contexts);
     g_cn_tile64_parity[device_id][VariantIndex] = parity_tile ? 1 : -1;
     g_cn_cg_parity[device_id][VariantIndex] = parity_cg ? 1 : -1;
+    g_cn_splitmul_parity[device_id][VariantIndex] = parity_split ? 1 : -1;
 
     std::size_t free_bytes = 0, total_bytes = 0;
     check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo CN selector failed");
@@ -354,6 +364,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
     int best_threads = threads_t4;
     float tile_ms = -1.0F;
     float cg_ms = -1.0F;
+    float split_ms = -1.0F;
 
     if (parity_tile) {
         reset();
@@ -374,6 +385,17 @@ void cn_residency_autoselect_once(cudaStream_t stream,
             best_ms = cg_ms;
             best_mode = 444;
             best_threads = threads_cg;
+        }
+    }
+
+    if (parity_split) {
+        reset();
+        split_ms = cn_time_mode<VariantIndex>(
+            stream, 445, threads_split, sample_count, clone, clone_ctx);
+        if (split_ms < best_ms * 0.98F) {
+            best_ms = split_ms;
+            best_mode = 445;
+            best_threads = threads_split;
         }
     }
 
