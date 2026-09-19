@@ -9,7 +9,7 @@ namespace {
 
 constexpr int kCnBlockTuneRevision = 2;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 7;
+constexpr int kCnProductionSelectorRevision = 8;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
@@ -19,21 +19,21 @@ struct CnProductionSelectorState {
     bool selected{false};
     bool tile_ok{false};
     bool cg_ok{false};
-    bool wide_ok{false};
+    bool shadow_ok{false};
     std::size_t count{0};
     int threads_ref{128};
     int threads_t4{128};
     int threads_tile{128};
     int threads_cg{128};
-    int threads_wide{128};
+    int threads_shadow{128};
     int baseline_samples{0};
     int tile_samples{0};
     int cg_samples{0};
-    int wide_samples{0};
+    int shadow_samples{0};
     std::array<float, kCnProductionSelectorPasses> baseline_ms{};
     std::array<float, kCnProductionSelectorPasses> tile_ms{};
     std::array<float, kCnProductionSelectorPasses> cg_ms{};
-    std::array<float, kCnProductionSelectorPasses> wide_ms{};
+    std::array<float, kCnProductionSelectorPasses> shadow_ms{};
 };
 
 static std::array<std::array<CnProductionSelectorState, 6>, kCn2LaneMaxDevices>
@@ -209,7 +209,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
-    state.threads_wide = cn_occupancy_block_size(
+    state.threads_shadow = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
         warp, props.maxThreadsPerBlock);
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
@@ -234,7 +234,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     state.cg_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    state.wide_ok = cn_validate_pair<VariantIndex>(
+    state.shadow_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 445, 32, scratchpads, contexts);
     state.initialized = true;
 
@@ -250,7 +250,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
-              << " | lane0wide64-parity=" << (state.wide_ok ? "PASS" : "FAIL")
+              << " | shadow128-parity=" << (state.shadow_ok ? "PASS" : "FAIL")
               << " | sampling=real-production-batch"
               << " | stagger=held-until-selected\n";
 }
@@ -260,7 +260,7 @@ inline int cn_production_trial_mode(const CnProductionSelectorState& state)
     if (state.baseline_samples < kCnProductionSelectorPasses) return 44;
     if (state.tile_ok && state.tile_samples < kCnProductionSelectorPasses) return 222;
     if (state.cg_ok && state.cg_samples < kCnProductionSelectorPasses) return 444;
-    if (state.wide_ok && state.wide_samples < kCnProductionSelectorPasses) return 445;
+    if (state.shadow_ok && state.shadow_samples < kCnProductionSelectorPasses) return 445;
     return 44;
 }
 
@@ -268,7 +268,7 @@ inline int cn_production_trial_threads(const CnProductionSelectorState& state, i
 {
     if (mode == 222) return state.threads_tile;
     if (mode == 444) return state.threads_cg;
-    if (mode == 445) return state.threads_wide;
+    if (mode == 445) return state.threads_shadow;
     if (mode == 44) return state.threads_t4;
     return state.threads_ref;
 }
@@ -294,10 +294,10 @@ void record_cn_production_sample(int device_id,
         state.cg_ms[state.cg_samples++] = elapsed_ms;
         candidate = "prefetch";
         sample = state.cg_samples;
-    } else if (mode == 445 && state.wide_samples < kCnProductionSelectorPasses) {
-        state.wide_ms[state.wide_samples++] = elapsed_ms;
-        candidate = "lane0wide64";
-        sample = state.wide_samples;
+    } else if (mode == 445 && state.shadow_samples < kCnProductionSelectorPasses) {
+        state.shadow_ms[state.shadow_samples++] = elapsed_ms;
+        candidate = "shadow128";
+        sample = state.shadow_samples;
     }
 
     std::cout << std::fixed << std::setprecision(3)
@@ -308,24 +308,24 @@ void record_cn_production_sample(int device_id,
               << " | elapsed=" << elapsed_ms << " ms"
               << " | progress=" << state.baseline_samples << '/'
               << state.tile_samples << '/' << state.cg_samples << '/'
-              << state.wide_samples
+              << state.shadow_samples
               << std::defaultfloat << '\n';
 
     const bool done = state.baseline_samples >= kCnProductionSelectorPasses &&
         (!state.tile_ok || state.tile_samples >= kCnProductionSelectorPasses) &&
         (!state.cg_ok || state.cg_samples >= kCnProductionSelectorPasses) &&
-        (!state.wide_ok || state.wide_samples >= kCnProductionSelectorPasses);
+        (!state.shadow_ok || state.shadow_samples >= kCnProductionSelectorPasses);
     if (!done) return;
 
     const float baseline = cn_hardened_median(state.baseline_ms);
     const float tile = state.tile_ok ? cn_hardened_median(state.tile_ms) : -1.0F;
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
-    const float wide = state.wide_ok ? cn_hardened_median(state.wide_ms) : -1.0F;
+    const float wide = state.shadow_ok ? cn_hardened_median(state.shadow_ms) : -1.0F;
     const float tile_delta = state.tile_ok && baseline > 0.0F
         ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
     const float prefetch_delta = state.cg_ok && baseline > 0.0F
         ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
-    const float wide_delta = state.wide_ok && baseline > 0.0F
+    const float shadow_delta = state.shadow_ok && baseline > 0.0F
         ? ((baseline - wide) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
@@ -340,9 +340,9 @@ void record_cn_production_sample(int device_id,
         best_threads = state.threads_cg;
         best_ms = cg;
     }
-    if (state.wide_ok && wide < baseline * kCnProductionPromotionRatio && wide < best_ms) {
+    if (state.shadow_ok && wide < baseline * kCnProductionPromotionRatio && wide < best_ms) {
         best_mode = 445;
-        best_threads = state.threads_wide;
+        best_threads = state.threads_shadow;
         best_ms = wide;
     }
 
@@ -361,8 +361,8 @@ void record_cn_production_sample(int device_id,
               << " | tile64-vs-baseline=" << tile_delta << "%"
               << " | prefetch-median=" << cg << " ms@" << state.threads_cg
               << " | prefetch-vs-baseline=" << prefetch_delta << "%"
-              << " | lane0wide64-median=" << wide << " ms@" << state.threads_wide
-              << " | lane0wide64-vs-baseline=" << wide_delta << "%"
+              << " | shadow128-median=" << wide << " ms@" << state.threads_shadow
+              << " | shadow128-vs-baseline=" << shadow_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
