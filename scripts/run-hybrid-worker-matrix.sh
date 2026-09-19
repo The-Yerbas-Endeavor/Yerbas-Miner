@@ -108,3 +108,9 @@ unset YERBAS_CPU_AFFINITY_OVERRIDE
 
 echo
 echo "Matrix complete: $LOG_DIR"
+
+# If this matrix used a stronger qualified default-mode CPU policy from one of
+# the benchmark cache roots, make that policy available to ordinary production
+# startup too. The helper only promotes when the candidate's recorded H/s is
+# higher than the normal cache and preserves the previous production cache.
+bash scripts/promote-qualified-cpu-cache.sh || true
