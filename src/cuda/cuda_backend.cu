@@ -75,6 +75,9 @@ bool cn_geometry_threads_valid_variant(int mode,
     if (mode == 222) {
         attr_rc = cudaFuncGetAttributes(
             &attrs, cryptonight_loop_stage_ttable2_tile64<VariantIndex>);
+    } else if (mode == 445) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>);
     } else if (mode == 444) {
         attr_rc = cudaFuncGetAttributes(
             &attrs, cryptonight_loop_stage_ttable4_cg<VariantIndex>);
