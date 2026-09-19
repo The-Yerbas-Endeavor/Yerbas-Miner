@@ -11,7 +11,7 @@
 
 namespace {
 
-constexpr int kCnHardenedSelectorRevision = 9;
+constexpr int kCnHardenedSelectorRevision = 10;
 constexpr int kCnHardenedPasses = 5;
 constexpr float kCnHardenedPromotionRatio = 0.95F;
 constexpr float kCnDeepPromotionRatio = 0.985F;
@@ -185,8 +185,8 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
-    const int threads_shadow = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
+    const int threads_t2 = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable2<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
@@ -206,7 +206,7 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     const bool parity_cg = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    const bool parity_shadow = cn_validate_pair<VariantIndex>(
+    const bool parity_t2 = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 445, 32, scratchpads, contexts);
 
     std::size_t free_bytes = 0, total_bytes = 0;
@@ -243,16 +243,16 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     (void)timed(44, threads_t4);
     if (parity_tile) (void)timed(222, threads_tile);
     if (parity_cg) (void)timed(444, threads_cg);
-    if (parity_shadow) (void)timed(445, threads_shadow);
+    if (parity_t2) (void)timed(445, threads_t2);
 
     std::array<float, kCnHardenedPasses> ref_times{};
     std::array<float, kCnHardenedPasses> baseline_times{};
     std::array<float, kCnHardenedPasses> tile_times{};
     std::array<float, kCnHardenedPasses> cg_times{};
-    std::array<float, kCnHardenedPasses> shadow_times{};
+    std::array<float, kCnHardenedPasses> t2_times{};
     tile_times.fill(-1.0F);
     cg_times.fill(-1.0F);
-    shadow_times.fill(-1.0F);
+    t2_times.fill(-1.0F);
 
     // Rotate ordering to reduce temperature/clock/order bias. Every timing starts
     // from an identical clone of the real post-setup scratchpad/context.
@@ -262,9 +262,9 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
             baseline_times[pass] = timed(44, threads_t4);
             if (parity_tile) tile_times[pass] = timed(222, threads_tile);
             if (parity_cg) cg_times[pass] = timed(444, threads_cg);
-            if (parity_shadow) shadow_times[pass] = timed(445, threads_shadow);
+            if (parity_t2) t2_times[pass] = timed(445, threads_t2);
         } else {
-            if (parity_shadow) shadow_times[pass] = timed(445, threads_shadow);
+            if (parity_t2) t2_times[pass] = timed(445, threads_t2);
             if (parity_cg) cg_times[pass] = timed(444, threads_cg);
             if (parity_tile) tile_times[pass] = timed(222, threads_tile);
             baseline_times[pass] = timed(44, threads_t4);
@@ -276,7 +276,7 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     const float baseline_ms = cn_hardened_median(baseline_times);
     const float tile_ms = parity_tile ? cn_hardened_median(tile_times) : -1.0F;
     const float cg_ms = parity_cg ? cn_hardened_median(cg_times) : -1.0F;
-    const float shadow_ms = parity_shadow ? cn_hardened_median(shadow_times) : -1.0F;
+    const float t2_ms = parity_t2 ? cn_hardened_median(t2_times) : -1.0F;
 
     int best_mode = 44;
     int best_threads = threads_t4;
@@ -296,10 +296,10 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
         best_threads = threads_cg;
         best_ms = cg_ms;
     }
-    if (parity_shadow && shadow_ms < baseline_ms * promotion_ratio && shadow_ms < best_ms) {
+    if (parity_t2 && t2_ms < baseline_ms * promotion_ratio && t2_ms < best_ms) {
         best_mode = 445;
-        best_threads = threads_shadow;
-        best_ms = shadow_ms;
+        best_threads = threads_t2;
+        best_ms = t2_ms;
     }
 
     cudaFree(clone_ctx);
@@ -323,8 +323,8 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
               << " parity=" << (parity_tile ? "PASS" : "FAIL")
               << " | prefetch-median=" << cg_ms << " ms@" << threads_cg
               << " parity=" << (parity_cg ? "PASS" : "FAIL")
-              << " | shadow128-median=" << shadow_ms << " ms@" << threads_shadow
-              << " parity=" << (parity_shadow ? "PASS" : "FAIL")
+              << " | ttable2plain-median=" << t2_ms << " ms@" << threads_t2
+              << " parity=" << (parity_t2 ? "PASS" : "FAIL")
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected-ms=" << best_ms
               << std::defaultfloat << '\n';
