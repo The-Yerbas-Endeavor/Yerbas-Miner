@@ -137,7 +137,10 @@ bool load_cn_production_geometry_cache(int device_id,
                                        int baseline_threads)
 {
     const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
-    if (retune && *retune && std::string(retune) != "0") return false;
+    const char* geometry_retune = std::getenv("YERBAS_CN_GEOMETRY_RETUNE");
+    if ((retune && *retune && std::string(retune) != "0") ||
+        (geometry_retune && *geometry_retune && std::string(geometry_retune) != "0"))
+        return false;
     const auto path = cn_production_geometry_cache_path<VariantIndex>(
         device_id, props, count, mode);
     if (path.empty()) return false;
@@ -202,8 +205,12 @@ void save_cn_production_geometry_cache(int device_id,
 
 bool cn_production_geometry_retune_requested()
 {
-    const char* value = std::getenv("YERBAS_CUDA_RETUNE");
-    return value != nullptr && *value != '\0' && std::string(value) != "0";
+    const auto enabled = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value != nullptr && *value != '\0' && std::string(value) != "0";
+    };
+    return enabled("YERBAS_CUDA_RETUNE") ||
+           enabled("YERBAS_CN_GEOMETRY_RETUNE");
 }
 
 template <std::uint8_t VariantIndex>
