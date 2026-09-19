@@ -11,7 +11,7 @@
 
 namespace {
 
-constexpr int kCnHardenedSelectorRevision = 4;
+constexpr int kCnHardenedSelectorRevision = 5;
 constexpr int kCnHardenedPasses = 5;
 constexpr float kCnHardenedPromotionRatio = 0.95F;
 constexpr float kCnDeepPromotionRatio = 0.985F;
@@ -305,7 +305,7 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
               << " parity=PASS"
               << " | tile64-median=" << tile_ms << " ms@" << threads_tile
               << " parity=" << (parity_tile ? "PASS" : "FAIL")
-              << " | cg-median=" << cg_ms << " ms@" << threads_cg
+              << " | prefetch-median=" << cg_ms << " ms@" << threads_cg
               << " parity=" << (parity_cg ? "PASS" : "FAIL")
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected-ms=" << best_ms
