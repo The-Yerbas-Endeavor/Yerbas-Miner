@@ -20,9 +20,6 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
                                                const cryptonight::SplitContext* __restrict__ contexts)
 {
     __shared__ std::uint32_t tables[1024];
-    // Baseline pays only one word here; the experimental instantiation gets
-    // one exchange slot per possible block thread (4 KiB at 1024 threads).
-    __shared__ std::uint32_t result_exchange[SharedResultExchange ? 1024 : 1];
     cryptonight::init_shared_aes_ttables(tables);
     __syncthreads();
 
@@ -101,6 +98,10 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
 {
     __shared__ std::uint32_t tables[1024];
+    // Candidate mode 445 exchanges one 32-bit result per participating thread.
+    // The false instantiation keeps a single dummy word so the declaration
+    // remains compile-time sized while adding only 4 bytes to the baseline.
+    __shared__ std::uint32_t result_exchange[SharedResultExchange ? 1024 : 1];
     cryptonight::init_shared_aes_ttables(tables);
     __syncthreads();
 
