@@ -17,7 +17,7 @@ namespace {
 constexpr float kCnStaggerPromotionRatio = 0.97F;
 constexpr float kCnStaggerFinePromotionRatio = 0.995F;
 constexpr float kCnStaggerGeometryPromotionRatio = 0.99F;
-constexpr int kCnStaggerSchedulerRevision = 9;
+constexpr int kCnStaggerSchedulerRevision = 10;
 constexpr std::array<int, 11> kCnStaggerModes{{
     1, 25, 33, 40, 50, 60, 67, 75, 125, 150, 175
 }};
