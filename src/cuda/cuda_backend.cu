@@ -39,7 +39,7 @@
 
 namespace {
 
-constexpr int kCnProductionGeometryRevision = 2;
+constexpr int kCnProductionGeometryRevision = 3;
 constexpr int kCnProductionGeometryPasses = 3;
 constexpr int kCnProductionGeometryMaxCandidates = 12;
 
@@ -364,24 +364,9 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
         stream, device_id, props, count, scratchpads, contexts);
     auto& selector = g_cn_production_selector[device_id][VariantIndex];
 
-    // The cooperative 32x32 candidate is worth re-testing for CN-Fast after the
-    // dependency-chain rewrite. Other variants keep its retired status so retune
-    // overhead remains bounded and production behavior stays conservative.
-    if constexpr (VariantIndex != 2) {
-        if (!selector.selected && selector.cg_ok) {
-            selector.cg_ok = false;
-            std::cout << "[CUDA CN production selector] GPU " << device_id
-                      << " | " << cryptonight::config_value(VariantIndex).name
-                      << " | mul32=retired-from-production-timing\n";
-        }
-    } else {
-        if (!selector.selected && selector.cg_ok &&
-            selector.baseline_samples == 0 && selector.tile_samples == 0 &&
-            selector.cg_samples == 0) {
-            std::cout << "[CUDA CN production selector] GPU " << device_id
-                      << " | CN-Fast | mul32=enabled-for-production-timing\n";
-        }
-    }
+    // Mode 444 now carries the local-table-first/compact-broadcast candidate.
+    // It is parity-tested per variant and measured on the real production batch;
+    // do not retire it by variant or GPU model.
 
     // The existing production kernel selector still owns parity and kernel mode.
     // Let it finish first; its launch path is already measured on the real batch.
