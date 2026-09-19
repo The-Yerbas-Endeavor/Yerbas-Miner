@@ -92,7 +92,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, bool SplitMul = false>
+template <std::uint8_t VariantIndex, bool LocalTablesFirst = false>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
@@ -146,13 +146,13 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
         std::uint32_t cw = 0U;
-        if constexpr (VariantIndex == 2) {
-            // Each lane owns one 32-bit AES input word. Perform all four shared
-            // T-table reads from that local word first, before any ShiftRows
-            // exchange. This exposes the independent table loads to the GPU
-            // together instead of serializing them behind three source-word
-            // shuffles. Then route the already-computed table contributions to
-            // the destination lane that consumes each ShiftRows byte.
+        if constexpr (VariantIndex == 2 || LocalTablesFirst) {
+            // Local-table-first candidate. Each lane issues all four shared
+            // T-table reads from its own 32-bit input word before the ShiftRows
+            // exchange, then shuffles the computed contributions. CN-Fast
+            // already uses this ordering in the baseline; LocalTablesFirst
+            // lets the production selector test the same ordering on the other
+            // variants without changing their default path.
             const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
             const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
             const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
@@ -202,35 +202,8 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                         (static_cast<std::uint64_t>(c1) << 32U);
             const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
                                       (static_cast<std::uint64_t>(t0_hi) << 32U);
-            std::uint64_t lo = 0U;
-            std::uint64_t hi = 0U;
-            if constexpr (SplitMul) {
-                // Compute the exact 128-bit product from four 32x32 wide
-                // partial products. This exposes common partial products once
-                // instead of asking the compiler for both a 64-bit low multiply
-                // and a separate __umul64hi on the same operands.
-                const std::uint32_t a_lo = c0;
-                const std::uint32_t a_hi = c1;
-                const std::uint32_t b_lo = t0_lo;
-                const std::uint32_t b_hi = t0_hi;
-                const std::uint64_t p00 =
-                    static_cast<std::uint64_t>(a_lo) * b_lo;
-                const std::uint64_t p01 =
-                    static_cast<std::uint64_t>(a_lo) * b_hi;
-                const std::uint64_t p10 =
-                    static_cast<std::uint64_t>(a_hi) * b_lo;
-                const std::uint64_t p11 =
-                    static_cast<std::uint64_t>(a_hi) * b_hi;
-                const std::uint64_t middle =
-                    (p00 >> 32U) +
-                    static_cast<std::uint32_t>(p01) +
-                    static_cast<std::uint32_t>(p10);
-                lo = (p00 & 0xffffffffULL) | (middle << 32U);
-                hi = p11 + (p01 >> 32U) + (p10 >> 32U) + (middle >> 32U);
-            } else {
-                lo = c_low * t0v;
-                hi = __umul64hi(c_low, t0v);
-            }
+            const std::uint64_t lo = c_low * t0v;
+            const std::uint64_t hi = __umul64hi(c_low, t0v);
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
                                         (static_cast<std::uint64_t>(aw1) << 32U);
             const std::uint64_t olda1 = static_cast<std::uint64_t>(old_a2) |
