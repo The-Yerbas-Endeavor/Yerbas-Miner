@@ -169,8 +169,10 @@ if rows:
         regs = fields.get("registers", 0)
         local = fields.get("local", 0)
         stack = fields.get("stack", 0)
-        if local or stack:
-            out.append("    WARNING: non-zero local/stack storage can indicate register spills.")
+        if local:
+            out.append("    WARNING: non-zero LOCAL storage; inspect for compiler local-memory traffic/spills.")
+        if stack:
+            out.append("    NOTE: non-zero STACK is a per-thread stack frame, not proof of a register spill.")
         if regs >= 128:
             out.append("    NOTE: very high register count; occupancy pressure is likely worth testing.")
         elif regs >= 96:
@@ -181,7 +183,7 @@ else:
 out.append("")
 out.append("Interpretation guide")
 out.append("-" * 72)
-out.append("  1. Non-zero LOCAL/STACK is the first spill signal to attack.")
+out.append("  1. Non-zero LOCAL is the stronger spill/local-memory signal; STACK is a stack-frame footprint.")
 out.append("  2. If spill-free, compare register counts across ttable/ttable4/cg kernels.")
 out.append("  3. Large instruction-count gaps matter only if production selects that kernel.")
 out.append("  4. Do not lower registers blindly; validate whole-rotation H/s after each change.")
