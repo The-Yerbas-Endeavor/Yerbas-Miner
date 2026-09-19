@@ -93,12 +93,69 @@ for name, lines in selected:
 
 out.append("Resource-usage excerpts")
 out.append("-" * 72)
+
+# cuobjdump resource output varies a little by CUDA toolkit. Preserve the raw
+# matching excerpts, then extract the common REG/SHARED/LOCAL/STACK fields when
+# available so the summary immediately exposes occupancy/spill pressure.
+resource_chunks = []
 for i, line in enumerate(resources):
     low = line.lower()
     if "cryptonight" in low or "ttable4" in low:
         start = max(0, i - 1)
-        end = min(len(resources), i + 4)
-        out.extend("  " + x for x in resources[start:end])
+        end = min(len(resources), i + 5)
+        chunk = resources[start:end]
+        resource_chunks.append(chunk)
+        out.extend("  " + x for x in chunk)
+
+out.append("")
+out.append("Resource-pressure hints")
+out.append("-" * 72)
+
+field_patterns = {
+    "registers": re.compile(r"\\bREG(?:ISTERS)?\\s*[:=]\\s*(\\d+)", re.I),
+    "shared": re.compile(r"\\bSHARED\\s*[:=]\\s*(\\d+)", re.I),
+    "local": re.compile(r"\\bLOCAL\\s*[:=]\\s*(\\d+)", re.I),
+    "stack": re.compile(r"\\bSTACK\\s*[:=]\\s*(\\d+)", re.I),
+}
+
+rows = []
+for chunk in resource_chunks:
+    text = " ".join(chunk)
+    name = next((line.strip() for line in chunk
+                 if "cryptonight" in line.lower() or "ttable4" in line.lower()), "?")
+    fields = {}
+    for key, pattern in field_patterns.items():
+        m = pattern.search(text)
+        if m:
+            fields[key] = int(m.group(1))
+    if fields:
+        rows.append((name, fields))
+
+if rows:
+    for name, fields in rows:
+        out.append(f"  {name}")
+        out.append("    " + " | ".join(
+            f"{key}={fields[key]}" for key in ("registers", "shared", "local", "stack")
+            if key in fields))
+        regs = fields.get("registers", 0)
+        local = fields.get("local", 0)
+        stack = fields.get("stack", 0)
+        if local or stack:
+            out.append("    WARNING: non-zero local/stack storage can indicate register spills.")
+        if regs >= 128:
+            out.append("    NOTE: very high register count; occupancy pressure is likely worth testing.")
+        elif regs >= 96:
+            out.append("    NOTE: elevated register count; occupancy may be constrained on some GPUs.")
+else:
+    out.append("  No normalized resource fields parsed; use the raw excerpts above.")
+
+out.append("")
+out.append("Interpretation guide")
+out.append("-" * 72)
+out.append("  1. Non-zero LOCAL/STACK is the first spill signal to attack.")
+out.append("  2. If spill-free, compare register counts across ttable/ttable4/cg kernels.")
+out.append("  3. Large instruction-count gaps matter only if production selects that kernel.")
+out.append("  4. Do not lower registers blindly; validate whole-rotation H/s after each change.")
 
 if not selected:
     out.append("")
