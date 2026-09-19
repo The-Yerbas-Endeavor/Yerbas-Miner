@@ -19,7 +19,7 @@ static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_threads
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_ttable4_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_tile64_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{};
-static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_lane0wide64_parity{}; // mode 444: local-table-first candidate
+static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_lane0wide64_parity{}; // mode 445: lane-0 wide-load candidate
 
 template <typename Kernel>
 int cn_occupancy_block_size(Kernel kernel, int warp, int max_threads)
