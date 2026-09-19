@@ -20,6 +20,9 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
                                                const cryptonight::SplitContext* __restrict__ contexts)
 {
     __shared__ std::uint32_t tables[1024];
+    // Baseline pays only one word here; the experimental instantiation gets
+    // one exchange slot per possible block thread (4 KiB at 1024 threads).
+    __shared__ std::uint32_t result_exchange[SharedResultExchange ? 1024 : 1];
     cryptonight::init_shared_aes_ttables(tables);
     __syncthreads();
 
@@ -92,7 +95,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, bool LocalTablesFirst = false>
+template <std::uint8_t VariantIndex, bool SharedResultExchange = false>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
@@ -146,13 +149,10 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
         std::uint32_t cw = 0U;
-        if constexpr (VariantIndex == 2 || LocalTablesFirst) {
-            // Local-table-first candidate. Each lane issues all four shared
-            // T-table reads from its own 32-bit input word before the ShiftRows
-            // exchange, then shuffles the computed contributions. CN-Fast
-            // already uses this ordering in the baseline; LocalTablesFirst
-            // lets the production selector test the same ordering on the other
-            // variants without changing their default path.
+        if constexpr (VariantIndex == 2) {
+            // CN-Fast benefits from issuing all four local shared-table reads
+            // before the ShiftRows exchange. Other variants keep the established
+            // source-word shuffle ordering unless a separate candidate changes it.
             const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
             const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
             const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
@@ -218,19 +218,36 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // Next iteration's lane-1 A word is exactly na0_hi ^ t0_hi.
             aw1_shadow = na0_hi ^ t0_hi;
         }
-        na0_lo = __shfl_sync(mask, na0_lo, base);
-        na0_hi = __shfl_sync(mask, na0_hi, base);
-        na1_lo = __shfl_sync(mask, na1_lo, base);
-        na1_hi = __shfl_sync(mask, na1_hi, base);
+        std::uint32_t na_word = 0U;
+        if constexpr (SharedResultExchange) {
+            // The baseline broadcasts four different result words with four
+            // subgroup shuffles, even though each destination lane consumes
+            // only one. Let lane 0 publish the four words once to warp-local
+            // shared storage, then have each lane read only its own result.
+            const unsigned int exchange_base = threadIdx.x & ~3U;
+            if (lane == 0U) {
+                result_exchange[exchange_base + 0U] = na0_lo;
+                result_exchange[exchange_base + 1U] = na0_hi;
+                result_exchange[exchange_base + 2U] = na1_lo;
+                result_exchange[exchange_base + 3U] = na1_hi;
+            }
+            __syncwarp(mask);
+            na_word = result_exchange[exchange_base + lane];
+        } else {
+            na0_lo = __shfl_sync(mask, na0_lo, base);
+            na0_hi = __shfl_sync(mask, na0_hi, base);
+            na1_lo = __shfl_sync(mask, na1_lo, base);
+            na1_hi = __shfl_sync(mask, na1_hi, base);
+            na_word = lane == 0U ? na0_lo :
+                      lane == 1U ? na0_hi :
+                      lane == 2U ? na1_lo : na1_hi;
+        }
 
-        const std::uint32_t store_word = lane == 0U ? na0_lo :
-                                         lane == 1U ? na0_hi :
-                                         lane == 2U ? (na1_lo ^ tweak_lo) : (na1_hi ^ tweak_hi);
+        std::uint32_t store_word = na_word;
+        if (lane == 2U) store_word ^= tweak_lo;
+        if (lane == 3U) store_word ^= tweak_hi;
         reinterpret_cast<std::uint32_t*>(slot2)[lane] = store_word;
 
-        const std::uint32_t na_word = lane == 0U ? na0_lo :
-                                      lane == 1U ? na0_hi :
-                                      lane == 2U ? na1_lo : na1_hi;
         aw = na_word ^ t_word;
         bw = cw;
     }
