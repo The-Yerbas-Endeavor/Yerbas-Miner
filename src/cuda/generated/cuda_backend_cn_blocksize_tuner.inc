@@ -7,9 +7,9 @@
 
 namespace {
 
-constexpr int kCnBlockTuneRevision = 1;
+constexpr int kCnBlockTuneRevision = 2;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 2;
+constexpr int kCnProductionSelectorRevision = 3;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
@@ -240,7 +240,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | passes=" << kCnProductionSelectorPasses
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
-              << " | mul32-parity=" << (state.cg_ok ? "PASS" : "FAIL")
+              << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
               << " | sampling=real-production-batch"
               << " | stagger=held-until-selected\n";
 }
@@ -280,7 +280,7 @@ void record_cn_production_sample(int device_id,
         sample = state.tile_samples;
     } else if (mode == 444 && state.cg_samples < kCnProductionSelectorPasses) {
         state.cg_ms[state.cg_samples++] = elapsed_ms;
-        candidate = "mul32";
+        candidate = "prefetch";
         sample = state.cg_samples;
     }
 
@@ -304,7 +304,7 @@ void record_cn_production_sample(int device_id,
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
     const float tile_delta = state.tile_ok && baseline > 0.0F
         ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
-    const float mul32_delta = state.cg_ok && baseline > 0.0F
+    const float prefetch_delta = state.cg_ok && baseline > 0.0F
         ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
@@ -333,8 +333,8 @@ void record_cn_production_sample(int device_id,
               << " | baseline-median=" << baseline << " ms@" << state.threads_t4
               << " | tile64-median=" << tile << " ms@" << state.threads_tile
               << " | tile64-vs-baseline=" << tile_delta << "%"
-              << " | mul32-median=" << cg << " ms@" << state.threads_cg
-              << " | mul32-vs-baseline=" << mul32_delta << "%"
+              << " | prefetch-median=" << cg << " ms@" << state.threads_cg
+              << " | prefetch-vs-baseline=" << prefetch_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
