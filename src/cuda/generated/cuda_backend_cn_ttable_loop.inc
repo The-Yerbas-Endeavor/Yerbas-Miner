@@ -92,7 +92,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, bool Lane0Shadow128 = false>
+template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
@@ -124,19 +124,11 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     std::uint32_t bw = cryptonight::load32le_aligned(ctx.b + lane * 4U);
 
     // The dependent scratchpad addresses use only bits 4..N from the low
-    // 32-bit word for every GhostRider CN variant. Lane 0 already shadows A1.
-    // Candidate mode 445 extends that shadow to A2/A3 so the multiply/update
-    // path does not have to fetch those words back through subgroup shuffles.
+    // 32-bit word for every GhostRider CN variant. Lane 0 is also the only lane
+    // that consumes olda0's high word during the multiply/add step, so carry a
+    // local shadow instead of rediscovering lane 1's A word every iteration.
     std::uint32_t aw1_shadow = 0U;
-    std::uint32_t aw2_shadow = 0U;
-    std::uint32_t aw3_shadow = 0U;
-    if (lane == 0U) {
-        aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
-        if constexpr (Lane0Shadow128) {
-            aw2_shadow = cryptonight::load32le_aligned(ctx.a + 8U);
-            aw3_shadow = cryptonight::load32le_aligned(ctx.a + 12U);
-        }
-    }
+    if (lane == 0U) aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
 
     const std::uint64_t tweak = ctx.tweak;
     const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
@@ -194,39 +186,12 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint32_t byte_offset2 = c0 & byte_address_mask;
         std::uint8_t* slot2 = scratch + static_cast<std::size_t>(byte_offset2);
 
-        std::uint32_t t_word = 0U;
-        uint4 lane0_slot_words = make_uint4(0U, 0U, 0U, 0U);
-        if constexpr (Lane0Shadow128) {
-            // slot2 is 16-byte aligned. Lane 0 consumes the first two words for
-            // the 64x64 multiply and needs words 2/3 to advance its A2/A3
-            // shadows. Fetch the complete slot once as uint4. Lanes 1..3 still
-            // load their own words for their normal per-lane A state updates.
-            if (lane == 0U) {
-                lane0_slot_words = reinterpret_cast<const uint4*>(slot2)[0];
-                t_word = lane0_slot_words.x;
-            } else {
-                t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
-            }
-        } else {
-            t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
-        }
-
+        const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
         const std::uint32_t t0_lo = lane == 0U ? t_word : 0U;
         const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
-        std::uint32_t t0_hi = 0U;
-        std::uint32_t old_a2 = 0U;
-        std::uint32_t old_a3 = 0U;
-        if constexpr (Lane0Shadow128) {
-            if (lane == 0U) {
-                t0_hi = lane0_slot_words.y;
-                old_a2 = aw2_shadow;
-                old_a3 = aw3_shadow;
-            }
-        } else {
-            t0_hi = __shfl_sync(mask, t_word, base + 1U);
-            old_a2 = __shfl_sync(mask, aw, base + 2U);
-            old_a3 = __shfl_sync(mask, aw, base + 3U);
-        }
+        const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
+        const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
+        const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
 
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
@@ -248,14 +213,8 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             na1_lo = static_cast<std::uint32_t>(na1);
             na1_hi = static_cast<std::uint32_t>(na1 >> 32U);
 
-            // Advance lane 0's shadow of the A words used by the next
-            // iteration. The A state itself does not include the variant-1
-            // tweak applied only to the scratchpad store.
+            // Next iteration's lane-1 A word is exactly na0_hi ^ t0_hi.
             aw1_shadow = na0_hi ^ t0_hi;
-            if constexpr (Lane0Shadow128) {
-                aw2_shadow = na1_lo ^ lane0_slot_words.z;
-                aw3_shadow = na1_hi ^ lane0_slot_words.w;
-            }
         }
         na0_lo = __shfl_sync(mask, na0_lo, base);
         na0_hi = __shfl_sync(mask, na0_hi, base);
