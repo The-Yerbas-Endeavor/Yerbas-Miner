@@ -67,6 +67,7 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
+    if (mode == 445) return "4-lane-ttable-splitmul";
     if (mode == 444) return "4-lane-ttable-prefetch";
     if (mode == 222) return "2-lane-tile64";
     if (mode == 44) return "4-lane-ttable";
