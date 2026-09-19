@@ -9,7 +9,7 @@ namespace {
 
 constexpr int kCnBlockTuneRevision = 2;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 3;
+constexpr int kCnProductionSelectorRevision = 4;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
@@ -19,17 +19,21 @@ struct CnProductionSelectorState {
     bool selected{false};
     bool tile_ok{false};
     bool cg_ok{false};
+    bool split_ok{false};
     std::size_t count{0};
     int threads_ref{128};
     int threads_t4{128};
     int threads_tile{128};
     int threads_cg{128};
+    int threads_split{128};
     int baseline_samples{0};
     int tile_samples{0};
     int cg_samples{0};
+    int split_samples{0};
     std::array<float, kCnProductionSelectorPasses> baseline_ms{};
     std::array<float, kCnProductionSelectorPasses> tile_ms{};
     std::array<float, kCnProductionSelectorPasses> cg_ms{};
+    std::array<float, kCnProductionSelectorPasses> split_ms{};
 };
 
 static std::array<std::array<CnProductionSelectorState, 6>, kCn2LaneMaxDevices>
@@ -130,7 +134,7 @@ bool load_cn_production_selector_cache(int device_id,
     if (!(in >> magic >> revision >> variant >> mode >> threads) ||
         magic != "YERBAS_CN_PRODUCTION" || revision != kCnProductionSelectorRevision ||
         variant != static_cast<int>(VariantIndex) ||
-        (mode != 4 && mode != 44 && mode != 222 && mode != 444) ||
+        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0)
         return false;
 
@@ -205,6 +209,9 @@ void initialize_cn_production_selector(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
+    state.threads_split = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
+        warp, props.maxThreadsPerBlock);
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
     const bool parity_t4 = cn_validate_pair<VariantIndex>(
@@ -227,11 +234,13 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     state.cg_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
+    state.split_ok = cn_validate_pair<VariantIndex>(
+        stream, 44, 32, 445, 32, scratchpads, contexts);
     state.initialized = true;
 
     // The older hardened selector may already have populated a production mode.
     // Clear it while this real-batch selector is collecting samples so overlap/
-    // stagger scheduling cannot take over and starve the 3/3/3 trial sequence.
+    // stagger scheduling cannot take over and starve the 3/3/3/3 trial sequence.
     g_cn_hardened_mode[device_id][VariantIndex] = 0;
 
     std::cout << "[CUDA CN production selector] GPU " << device_id
@@ -241,6 +250,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
+              << " | splitmul-parity=" << (state.split_ok ? "PASS" : "FAIL")
               << " | sampling=real-production-batch"
               << " | stagger=held-until-selected\n";
 }
@@ -250,6 +260,7 @@ inline int cn_production_trial_mode(const CnProductionSelectorState& state)
     if (state.baseline_samples < kCnProductionSelectorPasses) return 44;
     if (state.tile_ok && state.tile_samples < kCnProductionSelectorPasses) return 222;
     if (state.cg_ok && state.cg_samples < kCnProductionSelectorPasses) return 444;
+    if (state.split_ok && state.split_samples < kCnProductionSelectorPasses) return 445;
     return 44;
 }
 
@@ -257,6 +268,7 @@ inline int cn_production_trial_threads(const CnProductionSelectorState& state, i
 {
     if (mode == 222) return state.threads_tile;
     if (mode == 444) return state.threads_cg;
+    if (mode == 445) return state.threads_split;
     if (mode == 44) return state.threads_t4;
     return state.threads_ref;
 }
@@ -282,6 +294,10 @@ void record_cn_production_sample(int device_id,
         state.cg_ms[state.cg_samples++] = elapsed_ms;
         candidate = "prefetch";
         sample = state.cg_samples;
+    } else if (mode == 445 && state.split_samples < kCnProductionSelectorPasses) {
+        state.split_ms[state.split_samples++] = elapsed_ms;
+        candidate = "splitmul";
+        sample = state.split_samples;
     }
 
     std::cout << std::fixed << std::setprecision(3)
@@ -291,21 +307,26 @@ void record_cn_production_sample(int device_id,
               << " | sample=" << sample << '/' << kCnProductionSelectorPasses
               << " | elapsed=" << elapsed_ms << " ms"
               << " | progress=" << state.baseline_samples << '/'
-              << state.tile_samples << '/' << state.cg_samples
+              << state.tile_samples << '/' << state.cg_samples << '/'
+              << state.split_samples
               << std::defaultfloat << '\n';
 
     const bool done = state.baseline_samples >= kCnProductionSelectorPasses &&
         (!state.tile_ok || state.tile_samples >= kCnProductionSelectorPasses) &&
-        (!state.cg_ok || state.cg_samples >= kCnProductionSelectorPasses);
+        (!state.cg_ok || state.cg_samples >= kCnProductionSelectorPasses) &&
+        (!state.split_ok || state.split_samples >= kCnProductionSelectorPasses);
     if (!done) return;
 
     const float baseline = cn_hardened_median(state.baseline_ms);
     const float tile = state.tile_ok ? cn_hardened_median(state.tile_ms) : -1.0F;
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
+    const float split = state.split_ok ? cn_hardened_median(state.split_ms) : -1.0F;
     const float tile_delta = state.tile_ok && baseline > 0.0F
         ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
     const float prefetch_delta = state.cg_ok && baseline > 0.0F
         ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
+    const float split_delta = state.split_ok && baseline > 0.0F
+        ? ((baseline - split) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
     float best_ms = baseline;
@@ -318,6 +339,11 @@ void record_cn_production_sample(int device_id,
         best_mode = 444;
         best_threads = state.threads_cg;
         best_ms = cg;
+    }
+    if (state.split_ok && split < baseline * kCnProductionPromotionRatio && split < best_ms) {
+        best_mode = 445;
+        best_threads = state.threads_split;
+        best_ms = split;
     }
 
     state.selected = true;
@@ -335,6 +361,8 @@ void record_cn_production_sample(int device_id,
               << " | tile64-vs-baseline=" << tile_delta << "%"
               << " | prefetch-median=" << cg << " ms@" << state.threads_cg
               << " | prefetch-vs-baseline=" << prefetch_delta << "%"
+              << " | splitmul-median=" << split << " ms@" << state.threads_split
+              << " | splitmul-vs-baseline=" << split_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
