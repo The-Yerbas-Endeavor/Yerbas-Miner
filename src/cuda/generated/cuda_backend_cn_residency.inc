@@ -327,6 +327,8 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     const bool parity_cg = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
+    const bool parity_split = cn_validate_pair<VariantIndex>(
+        stream, 44, 32, 445, 32, scratchpads, contexts);
     g_cn_tile64_parity[device_id][VariantIndex] = parity_tile ? 1 : -1;
     g_cn_cg_parity[device_id][VariantIndex] = parity_cg ? 1 : -1;
     g_cn_splitmul_parity[device_id][VariantIndex] = parity_split ? 1 : -1;
