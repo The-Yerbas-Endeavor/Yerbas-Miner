@@ -17,15 +17,44 @@ if ! command -v cuobjdump >/dev/null 2>&1; then
 fi
 
 mkdir -p "$OUT_DIR"
-SASS="$OUT_DIR/yerbas-miner.sass.txt"
+SASS="$OUT_DIR/cn-phase2.sass.txt"
 RES="$OUT_DIR/yerbas-miner.resources.txt"
 SUMMARY="$OUT_DIR/cn-phase2-summary.txt"
 
 echo "Dumping CUDA resource usage..."
 cuobjdump --dump-resource-usage "$BIN" > "$RES"
 
-echo "Dumping SASS..."
-cuobjdump --dump-sass "$BIN" > "$SASS"
+echo "Streaming only CryptoNight phase-2 SASS..."
+# The release binary contains several real GPU architectures and many templated
+# CUDA kernels. A raw cuobjdump --dump-sass can therefore be multiple gigabytes.
+# Keep only the three loop-kernel families we actually inspect.
+cuobjdump --dump-sass "$BIN" | python3 - "$SASS" <<'PYFILTER'
+from pathlib import Path
+import re
+import sys
+
+out_path = Path(sys.argv[1])
+needles = (
+    "cryptonight_loop_stage_ttable4_coalesced",
+    "cryptonight_loop_stage_ttable4_cg",
+    "cryptonight_loop_stage_ttable2_tile64",
+)
+
+fn_re = re.compile(r"^\\s*Function\\s*:\\s*(.+?)\\s*$")
+selected = False
+written = 0
+
+with out_path.open("w", encoding="utf-8") as out:
+    for line in sys.stdin:
+        m = fn_re.match(line)
+        if m:
+            selected = any(n in m.group(1) for n in needles)
+        if selected:
+            out.write(line)
+            written += 1
+
+print(f"Kept {written} phase-2 SASS lines in {out_path}", file=sys.stderr)
+PYFILTER
 
 python3 - "$SASS" "$RES" "$SUMMARY" <<'PY'
 from pathlib import Path
@@ -168,6 +197,8 @@ print("\n".join(out))
 PY
 
 echo
-echo "Full SASS:      $SASS"
+echo "Filtered SASS:  $SASS"
 echo "Resource usage: $RES"
 echo "Summary:        $SUMMARY"
+echo
+echo "Note: the full multi-architecture SASS dump is intentionally not saved."
