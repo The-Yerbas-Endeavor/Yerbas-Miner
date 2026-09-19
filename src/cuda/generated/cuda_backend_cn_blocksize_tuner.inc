@@ -320,13 +320,13 @@ void record_cn_production_sample(int device_id,
     const float baseline = cn_hardened_median(state.baseline_ms);
     const float tile = state.tile_ok ? cn_hardened_median(state.tile_ms) : -1.0F;
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
-    const float split = state.wide_ok ? cn_hardened_median(state.wide_ms) : -1.0F;
+    const float wide = state.wide_ok ? cn_hardened_median(state.wide_ms) : -1.0F;
     const float tile_delta = state.tile_ok && baseline > 0.0F
         ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
     const float prefetch_delta = state.cg_ok && baseline > 0.0F
         ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
     const float wide_delta = state.wide_ok && baseline > 0.0F
-        ? ((baseline - split) / baseline) * 100.0F : -999.0F;
+        ? ((baseline - wide) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
     float best_ms = baseline;
@@ -340,10 +340,10 @@ void record_cn_production_sample(int device_id,
         best_threads = state.threads_cg;
         best_ms = cg;
     }
-    if (state.wide_ok && split < baseline * kCnProductionPromotionRatio && split < best_ms) {
+    if (state.wide_ok && wide < baseline * kCnProductionPromotionRatio && wide < best_ms) {
         best_mode = 445;
         best_threads = state.threads_wide;
-        best_ms = split;
+        best_ms = wide;
     }
 
     state.selected = true;
@@ -361,7 +361,7 @@ void record_cn_production_sample(int device_id,
               << " | tile64-vs-baseline=" << tile_delta << "%"
               << " | prefetch-median=" << cg << " ms@" << state.threads_cg
               << " | prefetch-vs-baseline=" << prefetch_delta << "%"
-              << " | lane0wide64-median=" << split << " ms@" << state.threads_wide
+              << " | lane0wide64-median=" << wide << " ms@" << state.threads_wide
               << " | lane0wide64-vs-baseline=" << wide_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
