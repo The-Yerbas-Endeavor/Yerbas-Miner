@@ -9,7 +9,7 @@ namespace {
 
 constexpr int kCnBlockTuneRevision = 2;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 5;
+constexpr int kCnProductionSelectorRevision = 6;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
@@ -19,21 +19,21 @@ struct CnProductionSelectorState {
     bool selected{false};
     bool tile_ok{false};
     bool cg_ok{false};
-    bool local_ok{false};
+    bool exchange_ok{false};
     std::size_t count{0};
     int threads_ref{128};
     int threads_t4{128};
     int threads_tile{128};
     int threads_cg{128};
-    int threads_local{128};
+    int threads_exchange{128};
     int baseline_samples{0};
     int tile_samples{0};
     int cg_samples{0};
-    int local_samples{0};
+    int exchange_samples{0};
     std::array<float, kCnProductionSelectorPasses> baseline_ms{};
     std::array<float, kCnProductionSelectorPasses> tile_ms{};
     std::array<float, kCnProductionSelectorPasses> cg_ms{};
-    std::array<float, kCnProductionSelectorPasses> local_ms{};
+    std::array<float, kCnProductionSelectorPasses> exchange_ms{};
 };
 
 static std::array<std::array<CnProductionSelectorState, 6>, kCn2LaneMaxDevices>
@@ -209,7 +209,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
-    state.threads_local = cn_occupancy_block_size(
+    state.threads_exchange = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
         warp, props.maxThreadsPerBlock);
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
@@ -234,10 +234,8 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     state.cg_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    if constexpr (VariantIndex != 2) {
-        state.local_ok = cn_validate_pair<VariantIndex>(
-            stream, 44, 32, 445, 32, scratchpads, contexts);
-    }
+    state.exchange_ok = cn_validate_pair<VariantIndex>(
+        stream, 44, 32, 445, 32, scratchpads, contexts);
     state.initialized = true;
 
     // The older hardened selector may already have populated a production mode.
@@ -252,7 +250,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
-              << " | localtable-parity=" << (state.local_ok ? "PASS" : "FAIL")
+              << " | sharedexchange-parity=" << (state.exchange_ok ? "PASS" : "FAIL")
               << " | sampling=real-production-batch"
               << " | stagger=held-until-selected\n";
 }
@@ -262,7 +260,7 @@ inline int cn_production_trial_mode(const CnProductionSelectorState& state)
     if (state.baseline_samples < kCnProductionSelectorPasses) return 44;
     if (state.tile_ok && state.tile_samples < kCnProductionSelectorPasses) return 222;
     if (state.cg_ok && state.cg_samples < kCnProductionSelectorPasses) return 444;
-    if (state.local_ok && state.local_samples < kCnProductionSelectorPasses) return 445;
+    if (state.exchange_ok && state.exchange_samples < kCnProductionSelectorPasses) return 445;
     return 44;
 }
 
@@ -270,7 +268,7 @@ inline int cn_production_trial_threads(const CnProductionSelectorState& state, i
 {
     if (mode == 222) return state.threads_tile;
     if (mode == 444) return state.threads_cg;
-    if (mode == 445) return state.threads_local;
+    if (mode == 445) return state.threads_exchange;
     if (mode == 44) return state.threads_t4;
     return state.threads_ref;
 }
@@ -296,10 +294,10 @@ void record_cn_production_sample(int device_id,
         state.cg_ms[state.cg_samples++] = elapsed_ms;
         candidate = "prefetch";
         sample = state.cg_samples;
-    } else if (mode == 445 && state.local_samples < kCnProductionSelectorPasses) {
-        state.local_ms[state.local_samples++] = elapsed_ms;
-        candidate = "localtable";
-        sample = state.local_samples;
+    } else if (mode == 445 && state.exchange_samples < kCnProductionSelectorPasses) {
+        state.exchange_ms[state.exchange_samples++] = elapsed_ms;
+        candidate = "sharedexchange";
+        sample = state.exchange_samples;
     }
 
     std::cout << std::fixed << std::setprecision(3)
@@ -310,24 +308,24 @@ void record_cn_production_sample(int device_id,
               << " | elapsed=" << elapsed_ms << " ms"
               << " | progress=" << state.baseline_samples << '/'
               << state.tile_samples << '/' << state.cg_samples << '/'
-              << state.local_samples
+              << state.exchange_samples
               << std::defaultfloat << '\n';
 
     const bool done = state.baseline_samples >= kCnProductionSelectorPasses &&
         (!state.tile_ok || state.tile_samples >= kCnProductionSelectorPasses) &&
         (!state.cg_ok || state.cg_samples >= kCnProductionSelectorPasses) &&
-        (!state.local_ok || state.local_samples >= kCnProductionSelectorPasses);
+        (!state.exchange_ok || state.exchange_samples >= kCnProductionSelectorPasses);
     if (!done) return;
 
     const float baseline = cn_hardened_median(state.baseline_ms);
     const float tile = state.tile_ok ? cn_hardened_median(state.tile_ms) : -1.0F;
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
-    const float split = state.local_ok ? cn_hardened_median(state.local_ms) : -1.0F;
+    const float split = state.exchange_ok ? cn_hardened_median(state.exchange_ms) : -1.0F;
     const float tile_delta = state.tile_ok && baseline > 0.0F
         ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
     const float prefetch_delta = state.cg_ok && baseline > 0.0F
         ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
-    const float local_delta = state.local_ok && baseline > 0.0F
+    const float exchange_delta = state.exchange_ok && baseline > 0.0F
         ? ((baseline - split) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
@@ -342,9 +340,9 @@ void record_cn_production_sample(int device_id,
         best_threads = state.threads_cg;
         best_ms = cg;
     }
-    if (state.local_ok && split < baseline * kCnProductionPromotionRatio && split < best_ms) {
+    if (state.exchange_ok && split < baseline * kCnProductionPromotionRatio && split < best_ms) {
         best_mode = 445;
-        best_threads = state.threads_local;
+        best_threads = state.threads_exchange;
         best_ms = split;
     }
 
@@ -363,8 +361,8 @@ void record_cn_production_sample(int device_id,
               << " | tile64-vs-baseline=" << tile_delta << "%"
               << " | prefetch-median=" << cg << " ms@" << state.threads_cg
               << " | prefetch-vs-baseline=" << prefetch_delta << "%"
-              << " | localtable-median=" << split << " ms@" << state.threads_local
-              << " | localtable-vs-baseline=" << local_delta << "%"
+              << " | sharedexchange-median=" << split << " ms@" << state.threads_exchange
+              << " | sharedexchange-vs-baseline=" << exchange_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
