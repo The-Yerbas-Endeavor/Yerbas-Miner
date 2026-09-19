@@ -12,12 +12,12 @@
 
 namespace {
 
-constexpr int kCnPhase2SelectorCacheRevision = 2;
+constexpr int kCnPhase2SelectorCacheRevision = 3;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_mode{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_threads{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_ttable4_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_tile64_parity{};
-static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{};
+static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{}; // mode 444: local-table-first candidate
 
 template <typename Kernel>
 int cn_occupancy_block_size(Kernel kernel, int warp, int max_threads)
@@ -65,7 +65,7 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
-    if (mode == 444) return "4-lane-ttable-cg";
+    if (mode == 444) return "4-lane-ttable-prefetch";
     if (mode == 222) return "2-lane-tile64";
     if (mode == 44) return "4-lane-ttable";
     return "4-lane-ref";
@@ -405,7 +405,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
               << " parity=" << (parity_tile ? "PASS" : "FAIL")
               << " active-blocks/SM=" << tile_active_blocks
               << " hashes/SM=" << (tile_active_blocks * (threads_tile / 2))
-              << " | cg=" << cg_ms << " ms@" << threads_cg
+              << " | prefetch=" << cg_ms << " ms@" << threads_cg
               << " parity=" << (parity_cg ? "PASS" : "FAIL")
               << " | production=" << cn_residency_mode_name(best_mode)
               << std::defaultfloat << '\n';
