@@ -92,7 +92,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex>
+template <std::uint8_t VariantIndex, bool SplitMul = false>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
@@ -202,8 +202,35 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                         (static_cast<std::uint64_t>(c1) << 32U);
             const std::uint64_t t0v = static_cast<std::uint64_t>(t0_lo) |
                                       (static_cast<std::uint64_t>(t0_hi) << 32U);
-            const std::uint64_t lo = c_low * t0v;
-            const std::uint64_t hi = __umul64hi(c_low, t0v);
+            std::uint64_t lo = 0U;
+            std::uint64_t hi = 0U;
+            if constexpr (SplitMul) {
+                // Compute the exact 128-bit product from four 32x32 wide
+                // partial products. This exposes common partial products once
+                // instead of asking the compiler for both a 64-bit low multiply
+                // and a separate __umul64hi on the same operands.
+                const std::uint32_t a_lo = c0;
+                const std::uint32_t a_hi = c1;
+                const std::uint32_t b_lo = t0_lo;
+                const std::uint32_t b_hi = t0_hi;
+                const std::uint64_t p00 =
+                    static_cast<std::uint64_t>(a_lo) * b_lo;
+                const std::uint64_t p01 =
+                    static_cast<std::uint64_t>(a_lo) * b_hi;
+                const std::uint64_t p10 =
+                    static_cast<std::uint64_t>(a_hi) * b_lo;
+                const std::uint64_t p11 =
+                    static_cast<std::uint64_t>(a_hi) * b_hi;
+                const std::uint64_t middle =
+                    (p00 >> 32U) +
+                    static_cast<std::uint32_t>(p01) +
+                    static_cast<std::uint32_t>(p10);
+                lo = (p00 & 0xffffffffULL) | (middle << 32U);
+                hi = p11 + (p01 >> 32U) + (p10 >> 32U) + (middle >> 32U);
+            } else {
+                lo = c_low * t0v;
+                hi = __umul64hi(c_low, t0v);
+            }
             const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
                                         (static_cast<std::uint64_t>(aw1) << 32U);
             const std::uint64_t olda1 = static_cast<std::uint64_t>(old_a2) |
