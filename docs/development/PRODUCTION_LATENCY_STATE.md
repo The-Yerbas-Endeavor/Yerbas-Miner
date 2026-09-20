@@ -217,13 +217,24 @@ Interpretation: rearranging 4-lane subgroups inside one warp does not provide
 independent execution; Pascal still schedules the warp as the unit. Do not build
 a second-load version of the same cohort idea.
 
-Next diagnostic: a new two-lane shared-T-table kernel keeps the same T-table AES
-model but maps one hash to two lanes instead of four. That raises independent
-hashes per warp from 8 to 16 and directly tests whether more memory-level
-parallelism can hide the dependent random-load latency. This is materially
-different from the older repository two-lane path, which uses the portable
-byte/S-box AES implementation. The new path is benchmark-only and opt-in through
-`YERBAS_CN_2LANE_TTABLE_EXPERIMENT`.
+The two-lane shared-T-table diagnostic also passed parity but was KILLED:
+
+- baseline A/B average: `594.26 H/s`
+- two-lane average: `592.40 H/s` (~`-0.31%`)
+- Fast phase regressed about `+0.51%`
+- Lite phase regressed about `+0.47%`
+- registers increased `32 -> 36`, local memory remained zero
+
+Interpretation: doubling hashes per warp did not improve the real loop enough to
+offset the extra per-lane AES work and register pressure. Do not promote.
+
+Next diagnostic isolates the remaining shared-memory question without changing
+hash mapping or arithmetic: the proven four-lane kernel reads the 4 KiB AES
+T-table through `__ldg` from device-global read-only/L1 cache instead of block
+shared memory. If that wins, shared-memory bank conflicts are materially limiting
+Fast/Lite. If it loses, the shared T-table path is already the right memory
+placement. The test is opt-in through
+`YERBAS_CN_READONLY_TTABLE_EXPERIMENT`.
 
 ## CPU combo result retained
 
