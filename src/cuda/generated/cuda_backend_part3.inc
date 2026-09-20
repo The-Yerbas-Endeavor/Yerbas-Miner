@@ -200,8 +200,10 @@ void BatchEngine::upload_job(const JobDescriptor& job)
             impl_->benchmark_requested_batch, memory_safe_batch);
     }
 
-    if (adaptive_batch >= impl_->batch_quantum)
-        adaptive_batch = (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
+    if (!impl_->benchmark_raw_batch &&
+        adaptive_batch >= impl_->batch_quantum)
+        adaptive_batch =
+            (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
     adaptive_batch = std::max<std::size_t>(1U, adaptive_batch);
 
     if (impl_->benchmark_raw_batch) {
