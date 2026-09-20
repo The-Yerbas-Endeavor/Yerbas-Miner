@@ -39,7 +39,8 @@
 
 namespace {
 
-constexpr int kCnProductionGeometryRevision = 4;
+constexpr int kCnProductionGeometryRevision = 5;
+constexpr float kCnProductionGeometryPromotionRatio = 0.98F;
 constexpr int kCnProductionGeometryPasses = 3;
 constexpr int kCnProductionGeometryMaxCandidates = 12;
 
@@ -77,7 +78,7 @@ bool cn_geometry_threads_valid_variant(int mode,
             &attrs, cryptonight_loop_stage_ttable2_tile64<VariantIndex>);
     } else if (mode == 445) {
         attr_rc = cudaFuncGetAttributes(
-            &attrs, cryptonight_loop_stage_ttable2<VariantIndex>);
+            &attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex, 2>);
     } else if (mode == 444) {
         attr_rc = cudaFuncGetAttributes(
             &attrs, cryptonight_loop_stage_ttable4_cg<VariantIndex>);
@@ -325,8 +326,16 @@ void record_cn_production_geometry_sample(int device_id,
     ++state.candidate_index;
     if (state.candidate_index < state.candidate_count) return;
 
+    int baseline_index = 0;
+    for (int i = 0; i < state.candidate_count; ++i) {
+        if (state.threads[i] == state.baseline_threads) {
+            baseline_index = i;
+            break;
+        }
+    }
+    const float baseline_ms = cn_hardened_median(state.times[baseline_index]);
     int best_threads = state.baseline_threads;
-    float best_ms = 1.0e30F;
+    float best_ms = baseline_ms;
     std::cout << std::fixed << std::setprecision(3)
               << "[CUDA CN production geometry] GPU " << device_id
               << " | " << cryptonight::config_value(VariantIndex).name
@@ -335,7 +344,8 @@ void record_cn_production_geometry_sample(int device_id,
         auto samples = state.times[i];
         const float median = cn_hardened_median(samples);
         std::cout << " | t" << state.threads[i] << '=' << median << " ms";
-        if (median < best_ms) {
+        if (median < baseline_ms * kCnProductionGeometryPromotionRatio &&
+            median < best_ms) {
             best_ms = median;
             best_threads = state.threads[i];
         }
@@ -344,7 +354,8 @@ void record_cn_production_geometry_sample(int device_id,
     g_cn_hardened_threads[device_id][VariantIndex] = best_threads;
     save_cn_production_geometry_cache<VariantIndex>(
         device_id, props, state.count, state.mode, best_threads);
-    std::cout << " | selected=" << best_threads
+    std::cout << " | threshold=2%"
+              << " | selected=" << best_threads
               << " | selected-ms=" << best_ms
               << std::defaultfloat << '\n';
 }
