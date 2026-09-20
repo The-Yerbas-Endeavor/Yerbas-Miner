@@ -6,6 +6,7 @@ cd "$ROOT"
 
 BIN="${1:-$ROOT/build-production-latency/yerbas-miner}"
 OUT_DIR="${2:-$ROOT/logs/cn-sass-$(date +%Y%m%d-%H%M%S)}"
+ARCH="${YERBAS_SASS_ARCH:-sm_61}"
 
 if [[ ! -x "$BIN" ]]; then
     echo "ERROR: binary not found: $BIN"
@@ -24,18 +25,32 @@ SUMMARY="$OUT_DIR/cn-phase2-summary.txt"
 echo "Dumping CUDA resource usage..."
 cuobjdump --dump-resource-usage "$BIN" > "$RES"
 
-echo "Streaming only CryptoNight phase-2 SASS..."
+echo "Streaming only CryptoNight phase-2 SASS for $ARCH..."
 # The release binary contains several real GPU architectures and many templated
 # CUDA kernels. A raw cuobjdump --dump-sass can therefore be multiple gigabytes.
 # Keep only the three loop-kernel families we actually inspect.
-cuobjdump --dump-sass "$BIN" | awk '
-/^[[:space:]]*Function[[:space:]]*:/ {
-    keep = ($0 ~ /cryptonight_loop_stage_ttable4_coalesced/ ||
-            $0 ~ /cryptonight_loop_stage_ttable4_cg/ ||
-            $0 ~ /cryptonight_loop_stage_ttable2_tile64/)
-}
-keep { print }
-' > "$SASS"
+if cuobjdump --dump-sass --gpu-architecture "$ARCH" "$BIN" >/dev/null 2>&1; then
+    cuobjdump --dump-sass --gpu-architecture "$ARCH" "$BIN" | awk '
+    /^[[:space:]]*Function[[:space:]]*:/ {
+        keep = ($0 ~ /cryptonight_loop_stage_ttable4_coalesced/ ||
+                $0 ~ /cryptonight_loop_stage_ttable4_mul4/ ||
+                $0 ~ /cryptonight_loop_stage_ttable4_cg/ ||
+                $0 ~ /cryptonight_loop_stage_ttable2_tile64/)
+    }
+    keep { print }
+    ' > "$SASS"
+else
+    echo "WARNING: cuobjdump rejected architecture filter $ARCH; falling back to all embedded architectures." >&2
+    cuobjdump --dump-sass "$BIN" | awk '
+    /^[[:space:]]*Function[[:space:]]*:/ {
+        keep = ($0 ~ /cryptonight_loop_stage_ttable4_coalesced/ ||
+                $0 ~ /cryptonight_loop_stage_ttable4_mul4/ ||
+                $0 ~ /cryptonight_loop_stage_ttable4_cg/ ||
+                $0 ~ /cryptonight_loop_stage_ttable2_tile64/)
+    }
+    keep { print }
+    ' > "$SASS"
+fi
 echo "Kept $(wc -l < "$SASS") phase-2 SASS lines in $SASS"
 
 python3 - "$SASS" "$RES" "$SUMMARY" <<'PY'
@@ -62,17 +77,18 @@ for line in sass:
         functions[current].append(line)
 
 needles = (
-    "cryptonight_loop_stage_ttable4",
+    "cryptonight_loop_stage_ttable4_coalesced",
+    "cryptonight_loop_stage_ttable4_mul4",
     "cryptonight_loop_stage_ttable4_cg",
-    "cryptonight_loop_stage_ttable",
+    "cryptonight_loop_stage_ttable2_tile64",
 )
 
 selected = [(name, lines) for name, lines in functions.items()
             if any(n in name for n in needles)]
 
 interesting_prefixes = (
-    "XMAD", "IMAD", "IADD", "IADD3", "ISCADD", "LEA",
-    "SHF", "SHFL", "LDG", "STG", "LDS", "STS",
+    "XMAD", "IMAD", "MUL", "IADD", "IADD3", "ISCADD", "LEA",
+    "SHF", "SHFL", "LDG", "STG", "LDS", "STS", "S2R",
     "BAR", "BRA", "SYNC", "LOP", "PRMT"
 )
 
@@ -81,6 +97,7 @@ out.append("Yerbas CN phase-2 SASS inspection")
 out.append("=" * 72)
 out.append(f"SASS file: {sass_path}")
 out.append(f"Resource file: {res_path}")
+out.append("Requested architecture: ${ARCH}")
 out.append(f"Matched phase-2 functions: {len(selected)}")
 out.append("")
 
@@ -181,6 +198,7 @@ print("\n".join(out))
 PY
 
 echo
+echo "Architecture:   $ARCH"
 echo "Filtered SASS:  $SASS"
 echo "Resource usage: $RES"
 echo "Summary:        $SUMMARY"
