@@ -269,6 +269,13 @@ default, with the forward/reverse ordering reproduced. Do not promote globally
 yet; first confirm with `YERBAS_DIAGNOSTICS=1` that setup/final timings improve
 while phase-2 loop timing stays flat.
 
+The first diagnostic attempt was invalid for phase attribution: the benchmark was
+accidentally routed through the retained legacy phase profiler, which ran
+`byte-aes` setup/final despite the production cache selecting `word32`. Those
+phase numbers must not be used to judge the thread geometry. Commits `f756bab`
+and `6b8cce7` restore the benchmark's production dispatcher and instrument the
+exact production `word32 -> phase2 -> word32` path directly.
+
 ## CPU combo result retained
 
 Final same-binary A/B:
