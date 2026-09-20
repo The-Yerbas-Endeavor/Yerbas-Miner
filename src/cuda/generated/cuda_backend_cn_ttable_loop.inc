@@ -235,6 +235,148 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     }
 }
 
+
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_loop_stage_ttable2_coalesced(
+    std::size_t count,
+    std::uint8_t* __restrict__ scratchpads,
+    const cryptonight::SplitContext* __restrict__ contexts)
+{
+    __shared__ std::uint32_t tables[1024];
+    cryptonight::init_shared_aes_ttables(tables);
+    __syncthreads();
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::uint32_t byte_address_mask =
+        static_cast<std::uint32_t>(address_mask << 4U);
+
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int lane = threadIdx.x & 1U;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int base = warp_lane & ~1U;
+    const unsigned int group = global_thread >> 1U;
+    if (group >= count) return;
+    const unsigned int mask = 0x3U << base;
+
+    const std::uint32_t* t0 = tables;
+    const std::uint32_t* t1 = tables + 256;
+    const std::uint32_t* t2 = tables + 512;
+    const std::uint32_t* t3 = tables + 768;
+
+    std::uint8_t* scratch =
+        scratchpads + static_cast<std::size_t>(group) * cfg.page_size;
+    const auto& ctx = contexts[group];
+
+    std::uint64_t a =
+        reinterpret_cast<const std::uint64_t*>(ctx.a)[lane];
+    std::uint64_t b =
+        reinterpret_cast<const std::uint64_t*>(ctx.b)[lane];
+    const std::uint64_t tweak = ctx.tweak;
+
+    #pragma unroll 1
+    for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
+        const std::uint64_t a0 = __shfl_sync(mask, a, base);
+        const std::uint32_t byte_offset =
+            static_cast<std::uint32_t>(a0) & byte_address_mask;
+        auto* slot_words =
+            reinterpret_cast<std::uint64_t*>(
+                scratch + static_cast<std::size_t>(byte_offset));
+
+        const std::uint64_t own = slot_words[lane];
+        const std::uint64_t other =
+            __shfl_sync(mask, own, base + (lane ^ 1U));
+
+        const std::uint32_t own0 = static_cast<std::uint32_t>(own);
+        const std::uint32_t own1 = static_cast<std::uint32_t>(own >> 32U);
+        const std::uint32_t other0 = static_cast<std::uint32_t>(other);
+        const std::uint32_t other1 = static_cast<std::uint32_t>(other >> 32U);
+
+        std::uint32_t cw0 = 0U;
+        std::uint32_t cw1 = 0U;
+        const std::uint32_t a_lo = static_cast<std::uint32_t>(a);
+        const std::uint32_t a_hi = static_cast<std::uint32_t>(a >> 32U);
+
+        if (lane == 0U) {
+            // own = w0|w1, other = w2|w3. Produce AES words c0/c1.
+            cw0 =
+                t0[static_cast<std::uint8_t>(own0)] ^
+                t1[static_cast<std::uint8_t>(own1 >> 8U)] ^
+                t2[static_cast<std::uint8_t>(other0 >> 16U)] ^
+                t3[static_cast<std::uint8_t>(other1 >> 24U)] ^
+                a_lo;
+            cw1 =
+                t0[static_cast<std::uint8_t>(own1)] ^
+                t1[static_cast<std::uint8_t>(other0 >> 8U)] ^
+                t2[static_cast<std::uint8_t>(other1 >> 16U)] ^
+                t3[static_cast<std::uint8_t>(own0 >> 24U)] ^
+                a_hi;
+        } else {
+            // own = w2|w3, other = w0|w1. Produce AES words c2/c3.
+            cw0 =
+                t0[static_cast<std::uint8_t>(own0)] ^
+                t1[static_cast<std::uint8_t>(own1 >> 8U)] ^
+                t2[static_cast<std::uint8_t>(other0 >> 16U)] ^
+                t3[static_cast<std::uint8_t>(other1 >> 24U)] ^
+                a_lo;
+            cw1 =
+                t0[static_cast<std::uint8_t>(own1)] ^
+                t1[static_cast<std::uint8_t>(other0 >> 8U)] ^
+                t2[static_cast<std::uint8_t>(other1 >> 16U)] ^
+                t3[static_cast<std::uint8_t>(own0 >> 24U)] ^
+                a_hi;
+        }
+
+        const std::uint64_t c =
+            static_cast<std::uint64_t>(cw0) |
+            (static_cast<std::uint64_t>(cw1) << 32U);
+
+        std::uint64_t first_store = c ^ b;
+        if (lane == 1U) {
+            // Variant-1 mutation is byte 11: high byte of word 2, which is
+            // the high byte of this lane's low 32-bit word.
+            std::uint32_t low = static_cast<std::uint32_t>(first_store);
+            const std::uint8_t tmp = static_cast<std::uint8_t>(low >> 24U);
+            constexpr std::uint32_t table = 0x75310U;
+            const std::uint8_t mutate_index =
+                static_cast<std::uint8_t>(
+                    ((((tmp >> 3U) & 6U) | (tmp & 1U)) << 1U));
+            low ^= ((table >> mutate_index) & 0x30U) << 24U;
+            first_store =
+                (first_store & 0xffffffff00000000ULL) |
+                static_cast<std::uint64_t>(low);
+        }
+        slot_words[lane] = first_store;
+
+        const std::uint64_t c_low = __shfl_sync(mask, c, base);
+        const std::uint32_t byte_offset2 =
+            static_cast<std::uint32_t>(c_low) & byte_address_mask;
+        auto* slot2_words =
+            reinterpret_cast<std::uint64_t*>(
+                scratch + static_cast<std::size_t>(byte_offset2));
+
+        const std::uint64_t t = slot2_words[lane];
+        const std::uint64_t t0v = __shfl_sync(mask, t, base);
+        const std::uint64_t old_a1 = __shfl_sync(mask, a, base + 1U);
+
+        std::uint64_t next0 = 0U;
+        std::uint64_t next1 = 0U;
+        if (lane == 0U) {
+            const std::uint64_t lo = c_low * t0v;
+            const std::uint64_t hi = __umul64hi(c_low, t0v);
+            next0 = a0 + hi;
+            next1 = old_a1 + lo;
+        }
+        next0 = __shfl_sync(mask, next0, base);
+        next1 = __shfl_sync(mask, next1, base);
+
+        slot2_words[lane] =
+            lane == 0U ? next0 : (next1 ^ tweak);
+        a = (lane == 0U ? next0 : next1) ^ t;
+        b = c;
+    }
+}
+
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable4_mul4(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
