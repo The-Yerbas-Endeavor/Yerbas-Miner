@@ -205,12 +205,25 @@ The Pascal SASS dump changes the diagnosis:
 - Exact historical geometry sweeps at batch 3584 already showed block sizes from
   32 through 1024 within only tenths of a percent. Do not reopen geometry tuning.
 
-Next diagnostic: a parity-gated split-warp `pairload` candidate keeps the proven
-arithmetic path but divides the eight four-lane hashes in a warp into two memory
-cohorts. It issues the first random load for both cohorts into separate scoreboard
-destinations, allowing a ready cohort to begin AES work without waiting on the
-other cohort's slowest memory response. This is benchmark-only and opt-in through
-`YERBAS_CN_PAIRLOAD_EXPERIMENT`.
+The split-warp `pairload` diagnostic was tested and KILLED:
+
+- baseline A/B average: `602.13 H/s`
+- pairload average: `598.77 H/s` (~`-0.56%`)
+- Fast phase regressed about `+0.73%`
+- Lite phase regressed about `+1.10%`
+- registers increased `32 -> 38`, local memory remained zero
+
+Interpretation: rearranging 4-lane subgroups inside one warp does not provide
+independent execution; Pascal still schedules the warp as the unit. Do not build
+a second-load version of the same cohort idea.
+
+Next diagnostic: a new two-lane shared-T-table kernel keeps the same T-table AES
+model but maps one hash to two lanes instead of four. That raises independent
+hashes per warp from 8 to 16 and directly tests whether more memory-level
+parallelism can hide the dependent random-load latency. This is materially
+different from the older repository two-lane path, which uses the portable
+byte/S-box AES implementation. The new path is benchmark-only and opt-in through
+`YERBAS_CN_2LANE_TTABLE_EXPERIMENT`.
 
 ## CPU combo result retained
 
