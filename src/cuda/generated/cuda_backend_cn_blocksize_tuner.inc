@@ -234,8 +234,9 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     state.cg_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    state.dualhash_ok = cn_validate_pair<VariantIndex>(
-        stream, 44, 32, 445, 32, scratchpads, contexts);
+    state.dualhash_ok = cn_dualhash_experiment_requested() &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 445, 32, scratchpads, contexts);
 
     cudaFuncAttributes baseline_attrs{};
     cudaFuncAttributes dualhash_attrs{};
