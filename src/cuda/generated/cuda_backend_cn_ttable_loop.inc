@@ -92,8 +92,9 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, int UnrollFactor = 1>
-__global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
+template <std::uint8_t VariantIndex, int MinBlocksPerSm = 1>
+__global__ __launch_bounds__(1024, MinBlocksPerSm)
+void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
 {
@@ -134,7 +135,7 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
     const std::uint32_t tweak_hi = static_cast<std::uint32_t>(tweak >> 32U);
 
-    #pragma unroll UnrollFactor
+    #pragma unroll 1
     for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
         // ((a_low >> 4) & address_mask) * 16 is exactly the low word masked
         // with (address_mask << 4). This removes a subgroup shuffle, 64-bit
