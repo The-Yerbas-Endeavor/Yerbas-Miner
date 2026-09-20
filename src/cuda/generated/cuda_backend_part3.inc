@@ -33,7 +33,9 @@ struct BatchEngine::Impl {
     std::array<std::uint64_t, 256> rolling_stage_count{};
     bool diagnostics_enabled{false};
     bool benchmark_raw_batch{false};
+    bool benchmark_stage_local{false};
     std::size_t benchmark_requested_batch{0};
+    std::size_t benchmark_cn_chunk{0};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -44,9 +46,26 @@ struct BatchEngine::Impl {
         benchmark_raw_batch =
             raw_batch_env != nullptr && *raw_batch_env != '\0' &&
             std::string(raw_batch_env) != "0";
-        benchmark_requested_batch = requested_size;
 
-        batch_size = benchmark_raw_batch
+        const char* stage_local_env = std::getenv("YERBAS_CUDA_BENCH_STAGE_LOCAL");
+        benchmark_stage_local =
+            stage_local_env != nullptr && *stage_local_env != '\0' &&
+            std::string(stage_local_env) != "0";
+
+        benchmark_requested_batch = requested_size;
+        benchmark_cn_chunk = requested_size;
+        if (benchmark_stage_local) {
+            const char* chunk_env = std::getenv("YERBAS_CUDA_BENCH_CN_CHUNK");
+            if (chunk_env != nullptr && *chunk_env != '\0') {
+                const unsigned long parsed = std::strtoul(chunk_env, nullptr, 10);
+                if (parsed != 0UL)
+                    benchmark_cn_chunk = static_cast<std::size_t>(parsed);
+            } else {
+                benchmark_cn_chunk = std::min<std::size_t>(3584U, requested_size);
+            }
+        }
+
+        batch_size = (benchmark_raw_batch || benchmark_stage_local)
             ? requested_size
             : std::min(requested_size, cryptonight::kInitialMaxBatch);
         base_batch_size = batch_size;
@@ -61,9 +80,14 @@ struct BatchEngine::Impl {
         // smallest CN footprint so per-class calibration can choose among all
         // memory-safe 2MiB/1MiB/512KiB/256KiB batch sizes without reallocating.
         constexpr std::size_t min_cn_scratchpad = 262144U;
-        scratchpad_budget_bytes = base_batch_size * kCnScratchpadStride;
+        const std::size_t heavy_budget_batch = benchmark_stage_local
+            ? std::min(benchmark_cn_chunk, requested_size)
+            : base_batch_size;
+        scratchpad_budget_bytes = heavy_budget_batch * kCnScratchpadStride;
         const std::size_t slot_limit = scratchpad_budget_bytes / min_cn_scratchpad;
-        batch_capacity = std::max(base_batch_size, std::min(requested_size, slot_limit));
+        batch_capacity = benchmark_stage_local
+            ? requested_size
+            : std::max(base_batch_size, std::min(requested_size, slot_limit));
 
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice failed");
         cudaDeviceProp props{};
@@ -106,6 +130,15 @@ struct BatchEngine::Impl {
         variant_batch_specialized = variant_policy.specialized;
         variant_batch_from_cache = variant_policy.from_cache;
 
+        if (benchmark_stage_local) {
+            std::cout << "[GPU " << device_id << "] benchmark stage-local batching"
+                      << " | outer=" << requested_size
+                      << " | heavy-cn-chunk=" << benchmark_cn_chunk
+                      << " | scratchpad-budget="
+                      << (scratchpad_budget_bytes / (1024U * 1024U)) << " MiB"
+                      << " | production-policy=bypassed\n";
+        }
+
         std::cout << "[GPU " << device_id << "] adaptive batch capacity"
                   << " | calibrated=" << class_batches[0] << '/' << class_batches[1]
                   << '/' << class_batches[2] << '/' << class_batches[3]
@@ -118,6 +151,46 @@ struct BatchEngine::Impl {
                           ? (variant_batch_from_cache ? "cache" : "tuned")
                           : "class-fallback")
                   << '\n';
+    }
+
+    void launch_cn_stage(std::uint8_t algorithm)
+    {
+        if (!benchmark_stage_local) {
+            launch_split_cryptonight(
+                stream, d_states, batch_size, algorithm,
+                d_cn_scratchpads, d_cn_contexts, cn_geometries[algorithm]);
+            return;
+        }
+
+        const auto& cfg = cryptonight::kVariantConfigs[algorithm];
+        const std::size_t max_chunk = std::max<std::size_t>(
+            1U, scratchpad_budget_bytes /
+                std::max<std::size_t>(1U, cfg.page_size));
+        const std::size_t chunk = std::min(batch_size, max_chunk);
+
+        std::array<bool, kGpuVariantBatchCount> active_variant{};
+        active_variant[algorithm] = true;
+
+        std::cout << "[GPU " << device_id << "] stage-local CN"
+                  << " | variant=" << cfg.name
+                  << " | outer=" << batch_size
+                  << " | chunk=" << chunk
+                  << " | chunks=" << ((batch_size + chunk - 1U) / chunk)
+                  << '\n';
+
+        for (std::size_t offset = 0; offset < batch_size; offset += chunk) {
+            const std::size_t count = std::min(chunk, batch_size - offset);
+            gpu_variant_activate_runtime_batch(
+                device_id, count, active_variant);
+            launch_split_cryptonight(
+                stream,
+                d_states + offset * kStateBytes,
+                count,
+                algorithm,
+                d_cn_scratchpads,
+                d_cn_contexts + offset,
+                cn_geometries[algorithm]);
+        }
     }
 
     ~Impl()
@@ -193,20 +266,32 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     // GhostRider rotation: every one of the 18 stages still uses this same count.
     const std::size_t memory_safe_batch = std::max<std::size_t>(1U,
         std::min(impl_->batch_capacity, impl_->scratchpad_budget_bytes / max_page_size));
-    adaptive_batch = std::min(adaptive_batch, memory_safe_batch);
 
-    if (impl_->benchmark_raw_batch) {
+    if (impl_->benchmark_stage_local) {
         adaptive_batch = std::min(
-            impl_->benchmark_requested_batch, memory_safe_batch);
+            impl_->benchmark_requested_batch, impl_->batch_capacity);
+    } else {
+        adaptive_batch = std::min(adaptive_batch, memory_safe_batch);
+        if (impl_->benchmark_raw_batch) {
+            adaptive_batch = std::min(
+                impl_->benchmark_requested_batch, memory_safe_batch);
+        }
     }
 
-    if (!impl_->benchmark_raw_batch &&
+    if (!impl_->benchmark_raw_batch && !impl_->benchmark_stage_local &&
         adaptive_batch >= impl_->batch_quantum)
         adaptive_batch =
             (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
     adaptive_batch = std::max<std::size_t>(1U, adaptive_batch);
 
-    if (impl_->benchmark_raw_batch) {
+    if (impl_->benchmark_stage_local) {
+        std::cout << "[GPU " << impl_->device_id
+                  << "] benchmark stage-local outer batch"
+                  << " | requested=" << impl_->benchmark_requested_batch
+                  << " | active=" << adaptive_batch
+                  << " | heavy-cn-safe=" << memory_safe_batch
+                  << " | production-policy=bypassed\n";
+    } else if (impl_->benchmark_raw_batch) {
         std::cout << "[GPU " << impl_->device_id
                   << "] benchmark raw batch override"
                   << " | requested=" << impl_->benchmark_requested_batch
@@ -219,7 +304,9 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     // live memory as rotations move between Fast/Lite/heavier preferred counts.
     // Partial explicit-retune progress is preserved and resumed when a batch
     // returns, rather than being discarded or reused at the wrong count.
-    gpu_variant_activate_runtime_batch(impl_->device_id, adaptive_batch, used_variants);
+    if (!impl_->benchmark_stage_local)
+        gpu_variant_activate_runtime_batch(
+            impl_->device_id, adaptive_batch, used_variants);
 
     if (adaptive_batch != impl_->batch_size) {
         std::cout << "[GPU " << impl_->device_id << "] rotation-adaptive batch"
@@ -292,8 +379,7 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         const std::uint8_t algorithm = static_cast<std::uint8_t>(stage & 0x7fU);
         if (is_cn) {
             if (algorithm >= cryptonight::kVariantConfigs.size()) throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
-            launch_split_cryptonight(impl_->stream, impl_->d_states, impl_->batch_size, algorithm,
-                                     impl_->d_cn_scratchpads, impl_->d_cn_contexts, impl_->cn_geometries[algorithm]);
+            impl_->launch_cn_stage(algorithm);
         } else {
             if (!core::core512_implemented(algorithm)) throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
             int stage_threads = kCoreDefaultThreads;
