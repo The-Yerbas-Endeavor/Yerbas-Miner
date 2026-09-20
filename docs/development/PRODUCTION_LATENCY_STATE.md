@@ -146,6 +146,47 @@ Use that result to decide whether a genuinely new phase-2 dependency reduction
 exists. Do not write another multiply candidate until the machine instructions
 justify it.
 
+## Sept. 20 production / structural results
+
+The regression hunt is now much narrower.
+
+- A long `legacy50` production run held about `1.92 kH/s`, above the historical
+  `~1.87 kH/s` floor. Do not describe the current campaign as merely recovering
+  old hash.
+- `gpu_tune=auto` was incorrectly launching live CN selector/block-size
+  tournaments on exact cache misses. Commit `9e2582a` changed auto/off to use an
+  exact cache when available and otherwise take the safe four-lane baseline
+  immediately. Explicit `gpu_tune=full` remains the retune path.
+- Session logging is now timestamped by default (commit `1d5b68a`).
+- Historical rev2 stagger policy was restored as diagnostic mode
+  `YERBAS_CUDA_OVERLAP=legacyauto` (commit `cc01338`). It did not reveal a
+  missing large gain.
+- GPU1 Dark/Fast/Lite single-vs-rev2-33/67 A/B:
+  single average `604.84 H/s`, legacy33 average `607.71 H/s`; only about
+  `+0.47%`, with one stagger pass slower and one faster. Treat as noise-sized;
+  stop spending cycles on stagger tuning.
+- Raw batch sweep for GPU0 Dark/Fast/Lite proved `3584` is the best tested
+  uniform batch:
+  `3584=602.85 H/s`, `3712=556.81`, `3840=593.23`,
+  `3968=595.19`, `4096=600.40`. Larger batches also increase scan latency.
+- Benchmark-only stage-local batching tested outer `7168` with
+  Dark/Lite at 7168 and Fast chunked `3584+3584`. Result: `600.07 H/s`,
+  about `-0.46%` versus the `602.85 H/s` baseline, with roughly double scan
+  latency. KILL this direction.
+- Lane-distributed multiply candidate (`mul4`) passed parity and reduced
+  registers `32 -> 30` with zero local memory, but lost performance:
+  baseline A/B average `597.18 H/s` versus candidate `594.86 H/s`
+  (`-0.39%`). Fast phase time regressed about `+0.62%`; Lite about
+  `+0.61%`. Do not promote.
+- Full overnight rotation analysis shows the four slowest CN triples all contain
+  the `CN-Fast + CN-Lite` pair. The current miner matches the old stable build
+  on comparable rotations, so this is a structural weak family rather than a
+  newly introduced global regression.
+
+Current conclusion: batch policy and stagger policy are no longer the primary
+suspects. The remaining high-ceiling work is inside the shared Fast/Lite
+CryptoNight phase-2 dependency chain.
+
 ## CPU combo result retained
 
 Final same-binary A/B:
