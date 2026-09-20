@@ -14,6 +14,12 @@ constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
 
+inline bool cn_production_retune_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_RETUNE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 struct CnProductionSelectorState {
     bool initialized{false};
     bool selected{false};
@@ -65,8 +71,7 @@ bool load_cn_block_tune_cache(int device_id,
                               std::size_t batch_size,
                               int mode)
 {
-    const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
-    if (retune && *retune && std::string(retune) != "0") return false;
+    if (cn_production_retune_requested()) return false;
     const auto path = cn_block_tune_cache_path<VariantIndex>(device_id, props, batch_size, mode);
     if (path.empty()) return false;
     std::ifstream in(path);
@@ -123,8 +128,7 @@ bool load_cn_production_selector_cache(int device_id,
                                        const cudaDeviceProp& props,
                                        std::size_t count)
 {
-    const char* retune = std::getenv("YERBAS_CUDA_RETUNE");
-    if (retune && *retune && std::string(retune) != "0") return false;
+    if (cn_production_retune_requested()) return false;
     const auto path = cn_production_selector_cache_path<VariantIndex>(device_id, props, count);
     if (path.empty()) return false;
     std::ifstream in(path);
@@ -227,6 +231,28 @@ void initialize_cn_production_selector(cudaStream_t stream,
                   << " | " << cryptonight::config_value(VariantIndex).name
                   << " | batch=" << count
                   << " | baseline-parity=FAIL | production=4-lane-ref\n";
+        return;
+    }
+
+    // Normal gpu_tune=auto/off must never turn a cache miss into a live
+    // production benchmark.  The four-lane T-table path is the established,
+    // parity-proven production baseline.  Use it immediately and persist the
+    // exact-batch fallback.  Deep candidate tournaments are reserved for
+    // gpu_tune=full, which sets YERBAS_CUDA_RETUNE=1.
+    if (!cn_production_retune_requested()) {
+        state.initialized = true;
+        state.selected = true;
+        g_cn_hardened_mode[device_id][VariantIndex] = 44;
+        g_cn_hardened_threads[device_id][VariantIndex] = state.threads_t4;
+        save_cn_production_selector_cache<VariantIndex>(
+            device_id, props, count, 44, state.threads_t4);
+        std::cout << "[CUDA CN production selector] GPU " << device_id
+                  << " | " << cryptonight::config_value(VariantIndex).name
+                  << " | batch=" << count
+                  << " | source=cache-miss-safe"
+                  << " | tuning=off"
+                  << " | production=4-lane-ttable"
+                  << " | threads=" << state.threads_t4 << '\n';
         return;
     }
 
@@ -403,6 +429,19 @@ int cn_tune_selected_block_size(cudaStream_t stream,
         return g_cn_block_tuned_threads[device_id][VariantIndex];
     if (load_cn_block_tune_cache<VariantIndex>(device_id, props, count, mode))
         return g_cn_block_tuned_threads[device_id][VariantIndex];
+
+    if (!cn_production_retune_requested()) {
+        g_cn_block_tuned_threads[device_id][VariantIndex] = baseline_threads;
+        save_cn_block_tune_cache<VariantIndex>(
+            device_id, props, count, mode, baseline_threads);
+        std::cout << "[CUDA CN block policy] GPU " << device_id
+                  << " | " << cryptonight::config_value(VariantIndex).name
+                  << " | batch=" << count
+                  << " | source=cache-miss-safe"
+                  << " | tuning=off"
+                  << " | threads=" << baseline_threads << '\n';
+        return baseline_threads;
+    }
 
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
     std::size_t free_bytes = 0, total_bytes = 0;
