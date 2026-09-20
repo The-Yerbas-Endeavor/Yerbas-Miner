@@ -92,9 +92,8 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, int MinBlocksPerSm = 1>
-__global__ __launch_bounds__(1024, MinBlocksPerSm)
-void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
+template <std::uint8_t VariantIndex, bool LateA23 = false>
+__global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
 {
@@ -129,7 +128,15 @@ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     // that consumes olda0's high word during the multiply/add step, so carry a
     // local shadow instead of rediscovering lane 1's A word every iteration.
     std::uint32_t aw1_shadow = 0U;
-    if (lane == 0U) aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
+    std::uint32_t aw2_shadow = 0U;
+    std::uint32_t aw3_shadow = 0U;
+    if (lane == 0U) {
+        aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
+        if constexpr (LateA23) {
+            aw2_shadow = cryptonight::load32le_aligned(ctx.a + 8U);
+            aw3_shadow = cryptonight::load32le_aligned(ctx.a + 12U);
+        }
+    }
 
     const std::uint64_t tweak = ctx.tweak;
     const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
@@ -191,8 +198,17 @@ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint32_t t0_lo = lane == 0U ? t_word : 0U;
         const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
         const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
-        const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
-        const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
+        std::uint32_t old_a2 = 0U;
+        std::uint32_t old_a3 = 0U;
+        if constexpr (LateA23) {
+            if (lane == 0U) {
+                old_a2 = aw2_shadow;
+                old_a3 = aw3_shadow;
+            }
+        } else {
+            old_a2 = __shfl_sync(mask, aw, base + 2U);
+            old_a3 = __shfl_sync(mask, aw, base + 3U);
+        }
 
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
@@ -217,6 +233,19 @@ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             // Next iteration's lane-1 A word is exactly na0_hi ^ t0_hi.
             aw1_shadow = na0_hi ^ t0_hi;
         }
+
+        if constexpr (LateA23) {
+            // A2/A3 are not needed until the next iteration. Fetch the lane-2/3
+            // scratchpad words only after the current multiply/add work, moving
+            // these two shuffles off the multiply dependency chain.
+            const std::uint32_t t2_late = __shfl_sync(mask, t_word, base + 2U);
+            const std::uint32_t t3_late = __shfl_sync(mask, t_word, base + 3U);
+            if (lane == 0U) {
+                aw2_shadow = na1_lo ^ t2_late;
+                aw3_shadow = na1_hi ^ t3_late;
+            }
+        }
+
         na0_lo = __shfl_sync(mask, na0_lo, base);
         na0_hi = __shfl_sync(mask, na0_hi, base);
         na1_lo = __shfl_sync(mask, na1_lo, base);
