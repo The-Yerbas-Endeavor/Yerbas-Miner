@@ -236,6 +236,16 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 444, 32, scratchpads, contexts);
     state.occ2_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 445, 32, scratchpads, contexts);
+
+    cudaFuncAttributes baseline_attrs{};
+    cudaFuncAttributes occ2_attrs{};
+    const cudaError_t baseline_attr_rc = cudaFuncGetAttributes(
+        &baseline_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
+    const cudaError_t occ2_attr_rc = cudaFuncGetAttributes(
+        &occ2_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex, 2>);
+    if (baseline_attr_rc != cudaSuccess || occ2_attr_rc != cudaSuccess)
+        cudaGetLastError();
+
     state.initialized = true;
 
     // The older hardened selector may already have populated a production mode.
@@ -251,6 +261,16 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
               << " | occ2-parity=" << (state.occ2_ok ? "PASS" : "FAIL")
+              << " | baseline-regs="
+              << (baseline_attr_rc == cudaSuccess ? baseline_attrs.numRegs : -1)
+              << " | occ2-regs="
+              << (occ2_attr_rc == cudaSuccess ? occ2_attrs.numRegs : -1)
+              << " | baseline-local="
+              << (baseline_attr_rc == cudaSuccess
+                      ? static_cast<unsigned long long>(baseline_attrs.localSizeBytes) : 0ULL)
+              << " | occ2-local="
+              << (occ2_attr_rc == cudaSuccess
+                      ? static_cast<unsigned long long>(occ2_attrs.localSizeBytes) : 0ULL)
               << " | sampling=real-production-batch"
               << " | stagger=held-until-selected\n";
 }
