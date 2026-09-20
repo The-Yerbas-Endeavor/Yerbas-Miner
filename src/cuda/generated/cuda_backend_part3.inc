@@ -32,14 +32,25 @@ struct BatchEngine::Impl {
     std::array<double, 256> rolling_stage_ms{};
     std::array<std::uint64_t, 256> rolling_stage_count{};
     bool diagnostics_enabled{false};
+    bool benchmark_raw_batch{false};
+    std::size_t benchmark_requested_batch{0};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
         : device_id(id),
-          batch_size(std::min(requested_size, cryptonight::kInitialMaxBatch)),
-          base_batch_size(batch_size),
           fallback_threads(std::max(1u, requested_fallback_threads))
     {
+        const char* raw_batch_env = std::getenv("YERBAS_CUDA_BENCH_RAW_BATCH");
+        benchmark_raw_batch =
+            raw_batch_env != nullptr && *raw_batch_env != '\0' &&
+            std::string(raw_batch_env) != "0";
+        benchmark_requested_batch = requested_size;
+
+        batch_size = benchmark_raw_batch
+            ? requested_size
+            : std::min(requested_size, cryptonight::kInitialMaxBatch);
+        base_batch_size = batch_size;
+
         if (base_batch_size == 0) throw std::runtime_error("CUDA batch size must be greater than zero");
 
         const char* diagnostics_env = std::getenv("YERBAS_DIAGNOSTICS");
@@ -183,9 +194,24 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     const std::size_t memory_safe_batch = std::max<std::size_t>(1U,
         std::min(impl_->batch_capacity, impl_->scratchpad_budget_bytes / max_page_size));
     adaptive_batch = std::min(adaptive_batch, memory_safe_batch);
+
+    if (impl_->benchmark_raw_batch) {
+        adaptive_batch = std::min(
+            impl_->benchmark_requested_batch, memory_safe_batch);
+    }
+
     if (adaptive_batch >= impl_->batch_quantum)
         adaptive_batch = (adaptive_batch / impl_->batch_quantum) * impl_->batch_quantum;
     adaptive_batch = std::max<std::size_t>(1U, adaptive_batch);
+
+    if (impl_->benchmark_raw_batch) {
+        std::cout << "[GPU " << impl_->device_id
+                  << "] benchmark raw batch override"
+                  << " | requested=" << impl_->benchmark_requested_batch
+                  << " | active=" << adaptive_batch
+                  << " | memory-safe=" << memory_safe_batch
+                  << " | production-policy=bypassed\n";
+    }
 
     // Every CN selector/cache is keyed by batch on disk. Mirror that contract in
     // live memory as rotations move between Fast/Lite/heavier preferred counts.
