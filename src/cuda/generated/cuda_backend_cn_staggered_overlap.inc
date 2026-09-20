@@ -51,6 +51,16 @@ inline bool cn_stagger_tuning_requested()
            v == "tune" || v == "full" || v == "benchmark";
 }
 
+inline int cn_stagger_forced_simple_mode()
+{
+    const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
+    if (!value || !*value) return 0;
+    const std::string v(value);
+    if (v == "33" || v == "stagger33" || v == "legacy33") return 33;
+    if (v == "50" || v == "stagger50" || v == "legacy50") return 50;
+    return 0;
+}
+
 inline bool cn_stagger_loop_overlap(int mode)
 {
     return mode >= 100;
@@ -725,8 +735,13 @@ bool launch_cn_staggered_if_ready(
     }
 
     int& mode = g_cn_stagger_mode[device_id][VariantIndex];
-    if (mode == 0 &&
-        !load_cn_stagger_cache<VariantIndex>(device_id, props, count)) {
+    const int forced_simple_mode = cn_stagger_forced_simple_mode();
+    if (forced_simple_mode != 0) {
+        mode = forced_simple_mode;
+        g_cn_stagger_threads_a[device_id][VariantIndex] = 0;
+        g_cn_stagger_threads_b[device_id][VariantIndex] = 0;
+    } else if (mode == 0 &&
+               !load_cn_stagger_cache<VariantIndex>(device_id, props, count)) {
         if (!cn_stagger_tuning_requested()) return false;
 
         std::uint8_t* saved_states = nullptr;
@@ -884,7 +899,8 @@ bool launch_cn_staggered_if_ready(
                   << " | batch=" << count
                   << " | partitions=" << first << '+' << (count - first)
                   << " | threads=" << threads_a << '/' << threads_b
-                  << " | source=cache-or-tuned"
+                  << " | source="
+                  << (forced_simple_mode != 0 ? "forced-simple" : "cache-or-tuned")
                   << " | loop-overlap="
                   << (cn_stagger_loop_overlap(mode) ? "yes" : "no")
                   << " | generic=yes\n";
