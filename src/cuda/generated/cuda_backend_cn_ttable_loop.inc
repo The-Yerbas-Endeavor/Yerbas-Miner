@@ -496,8 +496,7 @@ __global__ void cryptonight_loop_stage_ttable4_pairload(std::size_t count,
             "@!p ld.global.u32 %1, [%3];\n\t"
             "}\n"
             : "+r"(own_even), "+r"(own_odd)
-            : "r"(cohort), "l"(own_address)
-            : "memory");
+            : "r"(cohort), "l"(own_address));
 
         std::uint32_t cw = 0U;
         if constexpr (VariantIndex == 2) {
