@@ -21,6 +21,12 @@ static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_tile64_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_dualhash_parity{}; // mode 445: dual-hash ILP candidate
 
+inline bool cn_dualhash_experiment_requested()
+{
+    const char* value = std::getenv("YERBAS_CN_DUALHASH_EXPERIMENT");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 template <typename Kernel>
 int cn_occupancy_block_size(Kernel kernel, int warp, int max_threads)
 {
@@ -338,8 +344,9 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     const bool parity_cg = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    const bool parity_dualhash = cn_validate_pair<VariantIndex>(
-        stream, 44, 32, 445, 32, scratchpads, contexts);
+    const bool parity_dualhash = cn_dualhash_experiment_requested() &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 445, 32, scratchpads, contexts);
     g_cn_tile64_parity[device_id][VariantIndex] = parity_tile ? 1 : -1;
     g_cn_cg_parity[device_id][VariantIndex] = parity_cg ? 1 : -1;
     g_cn_dualhash_parity[device_id][VariantIndex] = parity_dualhash ? 1 : -1;
