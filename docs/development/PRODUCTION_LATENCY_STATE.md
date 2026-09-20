@@ -241,6 +241,21 @@ than Pascal's read-only/L1 path for this workload. Combined with the previous
 batch, stagger, geometry, mul4, pairload and two-lane results, stop creating
 speculative Fast/Lite phase-2 kernels without new profiler evidence.
 
+### Next target: setup/final launch geometry
+
+The selected register-word setup/final backend still launches at a historical
+fixed 128 threads per block. Unlike phase-2, this geometry has not had a
+real-batch production sweep.
+
+Commit `323a721` adds diagnostic-only `YERBAS_CN_PHASE_THREADS`.
+Accepted values are `32,64,96,128`; default production remains `128`.
+The 128-thread upper bound is intentional because the selected word32/shared-key
+kernels reserve 16 shared key schedules for 8-lane groups.
+
+Test setup/final geometry before changing their AES or Keccak math. These phases
+apply to every CN rotation, so a measured win is globally useful even if smaller
+than a phase-2 breakthrough.
+
 ## CPU combo result retained
 
 Final same-binary A/B:
