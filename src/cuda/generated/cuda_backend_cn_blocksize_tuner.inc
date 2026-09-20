@@ -9,7 +9,7 @@ namespace {
 
 constexpr int kCnBlockTuneRevision = 2;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 12;
+constexpr int kCnProductionSelectorRevision = 13;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
@@ -19,21 +19,21 @@ struct CnProductionSelectorState {
     bool selected{false};
     bool tile_ok{false};
     bool cg_ok{false};
-    bool latea23_ok{false};
+    bool dualhash_ok{false};
     std::size_t count{0};
     int threads_ref{128};
     int threads_t4{128};
     int threads_tile{128};
     int threads_cg{128};
-    int threads_latea23{128};
+    int threads_dualhash{128};
     int baseline_samples{0};
     int tile_samples{0};
     int cg_samples{0};
-    int latea23_samples{0};
+    int dualhash_samples{0};
     std::array<float, kCnProductionSelectorPasses> baseline_ms{};
     std::array<float, kCnProductionSelectorPasses> tile_ms{};
     std::array<float, kCnProductionSelectorPasses> cg_ms{};
-    std::array<float, kCnProductionSelectorPasses> latea23_ms{};
+    std::array<float, kCnProductionSelectorPasses> dualhash_ms{};
 };
 
 static std::array<std::array<CnProductionSelectorState, 6>, kCn2LaneMaxDevices>
@@ -209,8 +209,8 @@ void initialize_cn_production_selector(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
-    state.threads_latea23 = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
+    state.threads_dualhash = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
@@ -234,16 +234,16 @@ void initialize_cn_production_selector(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     state.cg_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    state.latea23_ok = cn_validate_pair<VariantIndex>(
+    state.dualhash_ok = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 445, 32, scratchpads, contexts);
 
     cudaFuncAttributes baseline_attrs{};
-    cudaFuncAttributes latea23_attrs{};
+    cudaFuncAttributes dualhash_attrs{};
     const cudaError_t baseline_attr_rc = cudaFuncGetAttributes(
         &baseline_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
-    const cudaError_t latea23_attr_rc = cudaFuncGetAttributes(
-        &latea23_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>);
-    if (baseline_attr_rc != cudaSuccess || latea23_attr_rc != cudaSuccess)
+    const cudaError_t dualhash_attr_rc = cudaFuncGetAttributes(
+        &dualhash_attrs, cryptonight_loop_stage_ttable4_dualhash<VariantIndex>);
+    if (baseline_attr_rc != cudaSuccess || dualhash_attr_rc != cudaSuccess)
         cudaGetLastError();
 
     state.initialized = true;
@@ -260,17 +260,17 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
-              << " | latea23-parity=" << (state.latea23_ok ? "PASS" : "FAIL")
+              << " | dualhash-parity=" << (state.dualhash_ok ? "PASS" : "FAIL")
               << " | baseline-regs="
               << (baseline_attr_rc == cudaSuccess ? baseline_attrs.numRegs : -1)
-              << " | latea23-regs="
-              << (latea23_attr_rc == cudaSuccess ? latea23_attrs.numRegs : -1)
+              << " | dualhash-regs="
+              << (dualhash_attr_rc == cudaSuccess ? dualhash_attrs.numRegs : -1)
               << " | baseline-local="
               << (baseline_attr_rc == cudaSuccess
                       ? static_cast<unsigned long long>(baseline_attrs.localSizeBytes) : 0ULL)
-              << " | latea23-local="
-              << (latea23_attr_rc == cudaSuccess
-                      ? static_cast<unsigned long long>(latea23_attrs.localSizeBytes) : 0ULL)
+              << " | dualhash-local="
+              << (dualhash_attr_rc == cudaSuccess
+                      ? static_cast<unsigned long long>(dualhash_attrs.localSizeBytes) : 0ULL)
               << " | sampling=real-production-batch"
               << " | stagger=held-until-selected\n";
 }
@@ -280,7 +280,7 @@ inline int cn_production_trial_mode(const CnProductionSelectorState& state)
     if (state.baseline_samples < kCnProductionSelectorPasses) return 44;
     if (state.tile_ok && state.tile_samples < kCnProductionSelectorPasses) return 222;
     if (state.cg_ok && state.cg_samples < kCnProductionSelectorPasses) return 444;
-    if (state.latea23_ok && state.latea23_samples < kCnProductionSelectorPasses) return 445;
+    if (state.dualhash_ok && state.dualhash_samples < kCnProductionSelectorPasses) return 445;
     return 44;
 }
 
@@ -288,7 +288,7 @@ inline int cn_production_trial_threads(const CnProductionSelectorState& state, i
 {
     if (mode == 222) return state.threads_tile;
     if (mode == 444) return state.threads_cg;
-    if (mode == 445) return state.threads_latea23;
+    if (mode == 445) return state.threads_dualhash;
     if (mode == 44) return state.threads_t4;
     return state.threads_ref;
 }
@@ -314,10 +314,10 @@ void record_cn_production_sample(int device_id,
         state.cg_ms[state.cg_samples++] = elapsed_ms;
         candidate = "prefetch";
         sample = state.cg_samples;
-    } else if (mode == 445 && state.latea23_samples < kCnProductionSelectorPasses) {
-        state.latea23_ms[state.latea23_samples++] = elapsed_ms;
-        candidate = "latea23";
-        sample = state.latea23_samples;
+    } else if (mode == 445 && state.dualhash_samples < kCnProductionSelectorPasses) {
+        state.dualhash_ms[state.dualhash_samples++] = elapsed_ms;
+        candidate = "dualhash";
+        sample = state.dualhash_samples;
     }
 
     std::cout << std::fixed << std::setprecision(3)
@@ -328,25 +328,25 @@ void record_cn_production_sample(int device_id,
               << " | elapsed=" << elapsed_ms << " ms"
               << " | progress=" << state.baseline_samples << '/'
               << state.tile_samples << '/' << state.cg_samples << '/'
-              << state.latea23_samples
+              << state.dualhash_samples
               << std::defaultfloat << '\n';
 
     const bool done = state.baseline_samples >= kCnProductionSelectorPasses &&
         (!state.tile_ok || state.tile_samples >= kCnProductionSelectorPasses) &&
         (!state.cg_ok || state.cg_samples >= kCnProductionSelectorPasses) &&
-        (!state.latea23_ok || state.latea23_samples >= kCnProductionSelectorPasses);
+        (!state.dualhash_ok || state.dualhash_samples >= kCnProductionSelectorPasses);
     if (!done) return;
 
     const float baseline = cn_hardened_median(state.baseline_ms);
     const float tile = state.tile_ok ? cn_hardened_median(state.tile_ms) : -1.0F;
     const float cg = state.cg_ok ? cn_hardened_median(state.cg_ms) : -1.0F;
-    const float latea23 = state.latea23_ok ? cn_hardened_median(state.latea23_ms) : -1.0F;
+    const float dualhash = state.dualhash_ok ? cn_hardened_median(state.dualhash_ms) : -1.0F;
     const float tile_delta = state.tile_ok && baseline > 0.0F
         ? ((baseline - tile) / baseline) * 100.0F : -999.0F;
     const float prefetch_delta = state.cg_ok && baseline > 0.0F
         ? ((baseline - cg) / baseline) * 100.0F : -999.0F;
-    const float latea23_delta = state.latea23_ok && baseline > 0.0F
-        ? ((baseline - latea23) / baseline) * 100.0F : -999.0F;
+    const float dualhash_delta = state.dualhash_ok && baseline > 0.0F
+        ? ((baseline - dualhash) / baseline) * 100.0F : -999.0F;
     int best_mode = 44;
     int best_threads = state.threads_t4;
     float best_ms = baseline;
@@ -360,10 +360,10 @@ void record_cn_production_sample(int device_id,
         best_threads = state.threads_cg;
         best_ms = cg;
     }
-    if (state.latea23_ok && latea23 < baseline * kCnProductionPromotionRatio && latea23 < best_ms) {
+    if (state.dualhash_ok && dualhash < baseline * kCnProductionPromotionRatio && dualhash < best_ms) {
         best_mode = 445;
-        best_threads = state.threads_latea23;
-        best_ms = latea23;
+        best_threads = state.threads_dualhash;
+        best_ms = dualhash;
     }
 
     state.selected = true;
@@ -381,8 +381,8 @@ void record_cn_production_sample(int device_id,
               << " | tile64-vs-baseline=" << tile_delta << "%"
               << " | prefetch-median=" << cg << " ms@" << state.threads_cg
               << " | prefetch-vs-baseline=" << prefetch_delta << "%"
-              << " | latea23-median=" << latea23 << " ms@" << state.threads_latea23
-              << " | latea23-vs-baseline=" << latea23_delta << "%"
+              << " | dualhash-median=" << dualhash << " ms@" << state.threads_dualhash
+              << " | dualhash-vs-baseline=" << dualhash_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
