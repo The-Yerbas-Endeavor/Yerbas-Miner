@@ -73,6 +73,23 @@ inline bool cn_pairload_experiment_requested(std::uint8_t variant)
     return true;
 }
 
+inline bool cn_2lane_ttable_experiment_requested(std::uint8_t variant)
+{
+    const char* value = std::getenv("YERBAS_CN_2LANE_TTABLE_EXPERIMENT");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0")
+        return false;
+
+    std::string v(value);
+    for (char& ch : v)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+    if (v == "fast") return variant == 2U;
+    if (v == "lite") return variant == 3U;
+    if (v == "fastlite" || v == "fast+lite" || v == "fast/lite")
+        return variant == 2U || variant == 3U;
+    return true;
+}
+
 constexpr int kCnProductionGeometryRevision = 8;
 constexpr float kCnProductionGeometryPromotionRatio = 0.98F;
 constexpr int kCnProductionGeometryPasses = 3;
@@ -414,6 +431,65 @@ void launch_cn_loop_block_tuned(cudaStream_t stream,
     cudaDeviceProp props{};
     check_cuda(cudaGetDeviceProperties(&props, device_id),
                "cudaGetDeviceProperties CN production geometry failed");
+
+    // Explicit diagnostic only. Use two lanes per hash so one warp carries
+    // sixteen independent CryptoNight hashes instead of eight while retaining
+    // the shared T-table AES path. This directly tests whether additional
+    // memory-level parallelism can hide the dependent random-load latency.
+    if (cn_2lane_ttable_experiment_requested(VariantIndex)) {
+        static std::array<int, kCn2LaneMaxDevices> parity{};
+        static std::array<int, kCn2LaneMaxDevices> threads{};
+        static std::array<bool, kCn2LaneMaxDevices> reported{};
+
+        if (parity[device_id] == 0) {
+            const bool pass = cn_validate_pair<VariantIndex>(
+                stream, 44, 32, 449, 32, scratchpads, contexts);
+            parity[device_id] = pass ? 1 : -1;
+            threads[device_id] = cn_occupancy_block_size(
+                cryptonight_loop_stage_ttable2_coalesced<VariantIndex>,
+                std::max(32, props.warpSize), props.maxThreadsPerBlock);
+        }
+
+        if (!reported[device_id]) {
+            reported[device_id] = true;
+            cudaFuncAttributes baseline_attrs{};
+            cudaFuncAttributes candidate_attrs{};
+            const cudaError_t baseline_rc = cudaFuncGetAttributes(
+                &baseline_attrs,
+                cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
+            const cudaError_t candidate_rc = cudaFuncGetAttributes(
+                &candidate_attrs,
+                cryptonight_loop_stage_ttable2_coalesced<VariantIndex>);
+            if (baseline_rc != cudaSuccess || candidate_rc != cudaSuccess)
+                cudaGetLastError();
+
+            std::cout << "[CUDA CN 2lane-ttable experiment] GPU " << device_id
+                      << " | " << cryptonight::config_value(VariantIndex).name
+                      << " | parity=" << (parity[device_id] > 0 ? "PASS" : "FAIL")
+                      << " | threads=" << threads[device_id]
+                      << " | hashes-per-warp=16"
+                      << " | baseline-regs="
+                      << (baseline_rc == cudaSuccess ? baseline_attrs.numRegs : -1)
+                      << " | candidate-regs="
+                      << (candidate_rc == cudaSuccess ? candidate_attrs.numRegs : -1)
+                      << " | baseline-local="
+                      << (baseline_rc == cudaSuccess
+                              ? static_cast<unsigned long long>(baseline_attrs.localSizeBytes)
+                              : 0ULL)
+                      << " | candidate-local="
+                      << (candidate_rc == cudaSuccess
+                              ? static_cast<unsigned long long>(candidate_attrs.localSizeBytes)
+                              : 0ULL)
+                      << '\n';
+        }
+
+        if (parity[device_id] > 0) {
+            cn_launch_mode<VariantIndex>(
+                stream, 449, threads[device_id],
+                count, scratchpads, contexts);
+            return;
+        }
+    }
 
     // Explicit diagnostic only. Split each warp's eight 4-lane hashes into
     // two memory cohorts so a long random-load miss in one cohort does not
