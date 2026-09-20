@@ -187,6 +187,31 @@ Current conclusion: batch policy and stagger policy are no longer the primary
 suspects. The remaining high-ceiling work is inside the shared Fast/Lite
 CryptoNight phase-2 dependency chain.
 
+### Sept. 20 sm_61 SASS finding
+
+The Pascal SASS dump changes the diagnosis:
+
+- Baseline Fast/Lite four-lane T-table loop: ~309 static instructions,
+  55 XMAD-family instructions, 32 registers, zero local memory.
+- The parity-correct mul4 candidate reduced this to ~282 static instructions,
+  29 XMAD-family instructions and 30 registers, yet ran ~0.4% slower.
+- Therefore raw instruction count, multiply instruction count, and register
+  pressure are not the primary limiter.
+- In the baseline inner loop, both dependent random global loads are consumed
+  almost immediately. The second LDG in particular has only a couple of trivial
+  instructions before its first dependent shuffle. This points to random-memory
+  dependency latency / warp head-of-line blocking as the dominant machine-level
+  limitation.
+- Exact historical geometry sweeps at batch 3584 already showed block sizes from
+  32 through 1024 within only tenths of a percent. Do not reopen geometry tuning.
+
+Next diagnostic: a parity-gated split-warp `pairload` candidate keeps the proven
+arithmetic path but divides the eight four-lane hashes in a warp into two memory
+cohorts. It issues the first random load for both cohorts into separate scoreboard
+destinations, allowing a ready cohort to begin AES work without waiting on the
+other cohort's slowest memory response. This is benchmark-only and opt-in through
+`YERBAS_CN_PAIRLOAD_EXPERIMENT`.
+
 ## CPU combo result retained
 
 Final same-binary A/B:
