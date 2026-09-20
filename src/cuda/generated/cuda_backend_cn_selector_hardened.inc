@@ -186,7 +186,7 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     const int threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_dualhash = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
+        cryptonight_loop_stage_ttable4_coalesced<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
