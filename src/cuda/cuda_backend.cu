@@ -39,7 +39,7 @@
 
 namespace {
 
-constexpr int kCnProductionGeometryRevision = 5;
+constexpr int kCnProductionGeometryRevision = 6;
 constexpr float kCnProductionGeometryPromotionRatio = 0.98F;
 constexpr int kCnProductionGeometryPasses = 3;
 constexpr int kCnProductionGeometryMaxCandidates = 12;
