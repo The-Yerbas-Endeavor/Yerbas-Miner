@@ -206,8 +206,9 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     const bool parity_cg = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    const bool parity_dualhash = cn_validate_pair<VariantIndex>(
-        stream, 44, 32, 445, 32, scratchpads, contexts);
+    const bool parity_dualhash = cn_dualhash_experiment_requested() &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 445, 32, scratchpads, contexts);
 
     std::size_t free_bytes = 0, total_bytes = 0;
     check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo hardened CN selector failed");
