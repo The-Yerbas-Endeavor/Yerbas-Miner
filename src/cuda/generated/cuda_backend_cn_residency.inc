@@ -215,7 +215,7 @@ void cn_launch_mode(cudaStream_t stream,
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
     } else if (mode == 445) {
-        cryptonight_loop_stage_ttable4_dualhash<VariantIndex><<<blocks, threads, 0, stream>>>(
+        cryptonight_loop_stage_ttable4_coalesced<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
     } else if (mode == 444) {
         cryptonight_loop_stage_ttable4_cg<VariantIndex><<<blocks, threads, 0, stream>>>(
@@ -323,7 +323,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
     const int threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_dualhash = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
+        cryptonight_loop_stage_ttable4_coalesced<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
