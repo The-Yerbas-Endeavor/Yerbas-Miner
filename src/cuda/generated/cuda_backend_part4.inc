@@ -31,8 +31,7 @@ std::vector<Candidate> BatchEngine::scan_profiled(std::uint32_t start_nonce, Bat
             check_cuda(cudaEventRecord(section_start, impl_->stream), "cudaEventRecord stage start failed");
             if (is_cn) {
                 if (algorithm >= cryptonight::kVariantConfigs.size()) throw std::runtime_error("GhostRider CryptoNight stage has invalid variant index");
-                launch_split_cryptonight(impl_->stream, impl_->d_states, impl_->batch_size, algorithm,
-                                         impl_->d_cn_scratchpads, impl_->d_cn_contexts, impl_->cn_geometries[algorithm]);
+                impl_->launch_cn_stage(algorithm);
             } else {
                 if (!core::core512_implemented(algorithm)) throw std::runtime_error("GhostRider conventional stage has no native CUDA implementation");
                 core512_stage<<<core_blocks, core_threads, 0, impl_->stream>>>(impl_->d_job, impl_->d_nonces,
