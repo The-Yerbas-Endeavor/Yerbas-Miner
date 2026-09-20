@@ -228,13 +228,18 @@ The two-lane shared-T-table diagnostic also passed parity but was KILLED:
 Interpretation: doubling hashes per warp did not improve the real loop enough to
 offset the extra per-lane AES work and register pressure. Do not promote.
 
-Next diagnostic isolates the remaining shared-memory question without changing
-hash mapping or arithmetic: the proven four-lane kernel reads the 4 KiB AES
-T-table through `__ldg` from device-global read-only/L1 cache instead of block
-shared memory. If that wins, shared-memory bank conflicts are materially limiting
-Fast/Lite. If it loses, the shared T-table path is already the right memory
-placement. The test is opt-in through
-`YERBAS_CN_READONLY_TTABLE_EXPERIMENT`.
+The read-only/L1 T-table diagnostic passed parity but was KILLED:
+
+- baseline A/B average: `603.21 H/s`
+- read-only average: `600.48 H/s` (~`-0.45%`)
+- Fast phase regressed about `+0.57%`
+- Lite phase regressed about `+0.53%`
+- registers increased `32 -> 38`; shared memory dropped `4096 -> 0`
+
+Conclusion: the existing 4 KiB shared-memory T-table placement is already better
+than Pascal's read-only/L1 path for this workload. Combined with the previous
+batch, stagger, geometry, mul4, pairload and two-lane results, stop creating
+speculative Fast/Lite phase-2 kernels without new profiler evidence.
 
 ## CPU combo result retained
 
