@@ -11,6 +11,7 @@
 //   444 four-lane T-table/coalesced + cache-global (.cg) scratchpad traffic
 //   445 retired dual-hash slot (baseline alias)
  //   446 four-lane T-table with lane-distributed 64x64 multiply
+//   448 four-lane T-table with split-warp first random-load scheduling
 
 namespace {
 
@@ -74,6 +75,7 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
+    if (mode == 448) return "4-lane-ttable-pairload";
     if (mode == 446) return "4-lane-ttable-mul4";
     if (mode == 445) return "4-lane-ttable-retired";
     if (mode == 444) return "4-lane-ttable-prefetch";
@@ -216,6 +218,9 @@ void cn_launch_mode(cudaStream_t stream,
         cryptonight_loop_stage_ttable2_tile64<VariantIndex><<<
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
+    } else if (mode == 448) {
+        cryptonight_loop_stage_ttable4_pairload<VariantIndex><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
     } else if (mode == 446) {
         cryptonight_loop_stage_ttable4_mul4<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
