@@ -39,7 +39,7 @@
 
 namespace {
 
-constexpr int kCnProductionGeometryRevision = 7;
+constexpr int kCnProductionGeometryRevision = 8;
 constexpr float kCnProductionGeometryPromotionRatio = 0.98F;
 constexpr int kCnProductionGeometryPasses = 3;
 constexpr int kCnProductionGeometryMaxCandidates = 12;
@@ -78,7 +78,7 @@ bool cn_geometry_threads_valid_variant(int mode,
             &attrs, cryptonight_loop_stage_ttable2_tile64<VariantIndex>);
     } else if (mode == 445) {
         attr_rc = cudaFuncGetAttributes(
-            &attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>);
+            &attrs, cryptonight_loop_stage_ttable4_dualhash<VariantIndex>);
     } else if (mode == 444) {
         attr_rc = cudaFuncGetAttributes(
             &attrs, cryptonight_loop_stage_ttable4_cg<VariantIndex>);
