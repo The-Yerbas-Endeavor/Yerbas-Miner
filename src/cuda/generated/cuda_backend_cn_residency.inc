@@ -13,6 +13,7 @@
  //   446 four-lane T-table with lane-distributed 64x64 multiply
 //   448 four-lane T-table with split-warp first random-load scheduling
 //   449 two-lane T-table with 16 independent hashes per warp
+//   450 four-lane T-table through the read-only global cache
 
 namespace {
 
@@ -76,6 +77,7 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
+    if (mode == 450) return "4-lane-ttable-readonly";
     if (mode == 449) return "2-lane-ttable";
     if (mode == 448) return "4-lane-ttable-pairload";
     if (mode == 446) return "4-lane-ttable-mul4";
@@ -220,6 +222,9 @@ void cn_launch_mode(cudaStream_t stream,
         cryptonight_loop_stage_ttable2_tile64<VariantIndex><<<
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
+    } else if (mode == 450) {
+        cryptonight_loop_stage_ttable4_readonly<VariantIndex><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
     } else if (mode == 449) {
         cryptonight_loop_stage_ttable2_coalesced<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
