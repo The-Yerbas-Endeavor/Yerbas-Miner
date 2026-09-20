@@ -26,6 +26,18 @@ constexpr int kCnPhaseBackendWord32 = 3;
 static std::array<std::array<int, 6>, kCnWordPhaseMaxDevices> g_cn_word_setup{};
 static std::array<std::array<int, 6>, kCnWordPhaseMaxDevices> g_cn_word_final{};
 
+inline int cn_phase_launch_threads()
+{
+    const char* value = std::getenv("YERBAS_CN_PHASE_THREADS");
+    if (value == nullptr || *value == '\0')
+        return 128;
+
+    const long parsed = std::strtol(value, nullptr, 10);
+    if (parsed < 32 || parsed > 128 || (parsed % 32) != 0)
+        return 128;
+    return static_cast<int>(parsed);
+}
+
 template <std::size_t N>
 float cn_wordphase_median(std::array<float, N> x)
 {
@@ -45,7 +57,7 @@ void cn_launch_setup_phase(cudaStream_t stream, int mode, std::size_t count,
                            std::uint8_t* states, std::uint8_t* scratchpads,
                            cryptonight::SplitContext* contexts)
 {
-    constexpr int threads = 128;
+    const int threads = cn_phase_launch_threads();
     const std::size_t total = count * 8U;
     const int blocks = static_cast<int>((total + threads - 1U) / threads);
     if (mode == kCnPhaseBackendWord32) {
@@ -66,7 +78,7 @@ void cn_launch_final_phase(cudaStream_t stream, int mode, std::size_t count,
                            std::uint8_t* states, std::uint8_t* scratchpads,
                            cryptonight::SplitContext* contexts)
 {
-    constexpr int threads = 128;
+    const int threads = cn_phase_launch_threads();
     const std::size_t total = count * 8U;
     const int blocks = static_cast<int>((total + threads - 1U) / threads);
     if (mode == kCnPhaseBackendWord32) {
