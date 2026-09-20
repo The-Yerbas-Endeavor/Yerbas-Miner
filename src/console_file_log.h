@@ -1,10 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <streambuf>
 #include <string>
 
@@ -96,10 +100,34 @@ private:
     bool active_{false};
 };
 
+inline std::string default_session_log_path()
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t stamp = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &stamp);
+#else
+    localtime_r(&stamp, &local);
+#endif
+    std::ostringstream path;
+    path << "logs/yerbas-miner-"
+         << std::put_time(&local, "%Y%m%d-%H%M%S")
+         << ".log";
+    return path.str();
+}
+
 inline std::string session_log_path_from_env()
 {
     const char* value = std::getenv("YERBAS_LOG_FILE");
-    return (value != nullptr && *value != '\0') ? std::string(value) : std::string{};
+    if (value != nullptr && *value != '\0') {
+        const std::string requested(value);
+        if (requested == "0" || requested == "off" ||
+            requested == "false" || requested == "no")
+            return {};
+        return requested;
+    }
+    return default_session_log_path();
 }
 
 } // namespace yerbas::console
