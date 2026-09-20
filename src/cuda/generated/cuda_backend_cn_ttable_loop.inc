@@ -44,7 +44,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     std::uint64_t b = reinterpret_cast<const std::uint64_t*>(ctx.b)[lane];
     const std::uint64_t tweak = ctx.tweak;
 
-    #pragma unroll 1
+    #pragma unroll UnrollFactor
     for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
         const std::uint64_t a0 = __shfl_sync(mask, a, base);
         const std::uint32_t index = static_cast<std::uint32_t>((a0 >> 4U) & address_mask);
@@ -92,7 +92,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex>
+template <std::uint8_t VariantIndex, int UnrollFactor = 1>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
