@@ -92,7 +92,7 @@ __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
     }
 }
 
-template <std::uint8_t VariantIndex, bool LateA23 = false>
+template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
@@ -128,15 +128,7 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     // that consumes olda0's high word during the multiply/add step, so carry a
     // local shadow instead of rediscovering lane 1's A word every iteration.
     std::uint32_t aw1_shadow = 0U;
-    std::uint32_t aw2_shadow = 0U;
-    std::uint32_t aw3_shadow = 0U;
-    if (lane == 0U) {
-        aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
-        if constexpr (LateA23) {
-            aw2_shadow = cryptonight::load32le_aligned(ctx.a + 8U);
-            aw3_shadow = cryptonight::load32le_aligned(ctx.a + 12U);
-        }
-    }
+    if (lane == 0U) aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
 
     const std::uint64_t tweak = ctx.tweak;
     const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
@@ -198,17 +190,8 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
         const std::uint32_t t0_lo = lane == 0U ? t_word : 0U;
         const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
         const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
-        std::uint32_t old_a2 = 0U;
-        std::uint32_t old_a3 = 0U;
-        if constexpr (LateA23) {
-            if (lane == 0U) {
-                old_a2 = aw2_shadow;
-                old_a3 = aw3_shadow;
-            }
-        } else {
-            old_a2 = __shfl_sync(mask, aw, base + 2U);
-            old_a3 = __shfl_sync(mask, aw, base + 3U);
-        }
+        const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
+        const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
 
         std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
         if (lane == 0U) {
@@ -234,18 +217,6 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             aw1_shadow = na0_hi ^ t0_hi;
         }
 
-        if constexpr (LateA23) {
-            // A2/A3 are not needed until the next iteration. Fetch the lane-2/3
-            // scratchpad words only after the current multiply/add work, moving
-            // these two shuffles off the multiply dependency chain.
-            const std::uint32_t t2_late = __shfl_sync(mask, t_word, base + 2U);
-            const std::uint32_t t3_late = __shfl_sync(mask, t_word, base + 3U);
-            if (lane == 0U) {
-                aw2_shadow = na1_lo ^ t2_late;
-                aw3_shadow = na1_hi ^ t3_late;
-            }
-        }
-
         na0_lo = __shfl_sync(mask, na0_lo, base);
         na0_hi = __shfl_sync(mask, na0_hi, base);
         na1_lo = __shfl_sync(mask, na1_lo, base);
@@ -261,6 +232,242 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         aw = na_word ^ t_word;
         bw = cw;
+    }
+}
+
+
+// Experimental mode 445: two independent hashes per 4-lane subgroup.
+//
+// CryptoNight phase 2 is a long serial dependency chain. More resident warps,
+// lower register count, different block sizes and small shuffle rearrangements
+// did not materially improve throughput. This kernel instead creates explicit
+// instruction-level parallelism inside each subgroup: it carries two unrelated
+// hash states and issues the dependent scratchpad operations for both hashes
+// before consuming either result.
+//
+// The arithmetic and memory semantics for each hash remain identical to the
+// proven four-lane T-table baseline. Only scheduling/mapping changes.
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_loop_stage_ttable4_dualhash(
+    std::size_t count,
+    std::uint8_t* __restrict__ scratchpads,
+    const cryptonight::SplitContext* __restrict__ contexts)
+{
+    __shared__ std::uint32_t tables[1024];
+    cryptonight::init_shared_aes_ttables(tables);
+    __syncthreads();
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::uint32_t byte_address_mask =
+        static_cast<std::uint32_t>(address_mask << 4U);
+
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int lane = threadIdx.x & 3U;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int base = warp_lane & ~3U;
+    const unsigned int pair_group = global_thread >> 2U;
+    const std::size_t hash_a = static_cast<std::size_t>(pair_group) * 2U;
+    if (hash_a >= count) return;
+    const std::size_t hash_b = hash_a + 1U;
+    const bool has_b = hash_b < count;
+    const unsigned int mask = 0xFU << base;
+
+    const std::uint32_t* t0 = tables;
+    const std::uint32_t* t1 = tables + 256;
+    const std::uint32_t* t2 = tables + 512;
+    const std::uint32_t* t3 = tables + 768;
+
+    std::uint8_t* scratch_a =
+        scratchpads + hash_a * cfg.page_size;
+    std::uint8_t* scratch_b =
+        has_b ? scratchpads + hash_b * cfg.page_size : nullptr;
+
+    const auto& ctx_a = contexts[hash_a];
+    std::uint32_t aw_a = cryptonight::load32le_aligned(ctx_a.a + lane * 4U);
+    std::uint32_t bw_a = cryptonight::load32le_aligned(ctx_a.b + lane * 4U);
+    std::uint32_t aw1_a = 0U;
+    if (lane == 0U) aw1_a = cryptonight::load32le_aligned(ctx_a.a + 4U);
+    const std::uint64_t tweak_a = ctx_a.tweak;
+    const std::uint32_t tweak_a_lo = static_cast<std::uint32_t>(tweak_a);
+    const std::uint32_t tweak_a_hi = static_cast<std::uint32_t>(tweak_a >> 32U);
+
+    std::uint32_t aw_b = 0U;
+    std::uint32_t bw_b = 0U;
+    std::uint32_t aw1_b = 0U;
+    std::uint32_t tweak_b_lo = 0U;
+    std::uint32_t tweak_b_hi = 0U;
+    if (has_b) {
+        const auto& ctx_b = contexts[hash_b];
+        aw_b = cryptonight::load32le_aligned(ctx_b.a + lane * 4U);
+        bw_b = cryptonight::load32le_aligned(ctx_b.b + lane * 4U);
+        if (lane == 0U) aw1_b = cryptonight::load32le_aligned(ctx_b.a + 4U);
+        const std::uint64_t tweak_b = ctx_b.tweak;
+        tweak_b_lo = static_cast<std::uint32_t>(tweak_b);
+        tweak_b_hi = static_cast<std::uint32_t>(tweak_b >> 32U);
+    }
+
+    #pragma unroll 1
+    for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
+        // First dependent address for A and B. Both global loads are issued
+        // before either result enters the AES T-table dependency path.
+        const std::uint32_t aw0_a = __shfl_sync(mask, aw_a, base);
+        const std::uint32_t off_a = aw0_a & byte_address_mask;
+        std::uint8_t* slot_a = scratch_a + static_cast<std::size_t>(off_a);
+        const std::uint32_t own_a =
+            reinterpret_cast<const std::uint32_t*>(slot_a)[lane];
+
+        std::uint32_t aw0_b = 0U;
+        std::uint8_t* slot_b = nullptr;
+        std::uint32_t own_b = 0U;
+        if (has_b) {
+            aw0_b = __shfl_sync(mask, aw_b, base);
+            const std::uint32_t off_b = aw0_b & byte_address_mask;
+            slot_b = scratch_b + static_cast<std::size_t>(off_b);
+            own_b = reinterpret_cast<const std::uint32_t*>(slot_b)[lane];
+        }
+
+        auto aes_word = [&](std::uint32_t own, std::uint32_t aw) {
+            if constexpr (VariantIndex == 2) {
+                const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
+                const std::uint32_t q1_local =
+                    t1[static_cast<std::uint8_t>(own >> 8U)];
+                const std::uint32_t q2_local =
+                    t2[static_cast<std::uint8_t>(own >> 16U)];
+                const std::uint32_t q3_local =
+                    t3[static_cast<std::uint8_t>(own >> 24U)];
+                const std::uint32_t q1 =
+                    __shfl_sync(mask, q1_local, base + ((lane + 1U) & 3U));
+                const std::uint32_t q2 =
+                    __shfl_sync(mask, q2_local, base + ((lane + 2U) & 3U));
+                const std::uint32_t q3 =
+                    __shfl_sync(mask, q3_local, base + ((lane + 3U) & 3U));
+                return q0 ^ q1 ^ q2 ^ q3 ^ aw;
+            } else {
+                const std::uint32_t w1 =
+                    __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
+                const std::uint32_t w2 =
+                    __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
+                const std::uint32_t w3 =
+                    __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+                const std::uint8_t x0 = static_cast<std::uint8_t>(own);
+                const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
+                const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
+                const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
+                return t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
+            }
+        };
+
+        const std::uint32_t cw_a = aes_word(own_a, aw_a);
+        std::uint32_t cw_b = 0U;
+        if (has_b) cw_b = aes_word(own_b, aw_b);
+
+        std::uint32_t first_a = cw_a ^ bw_a;
+        if (lane == 2U) {
+            const std::uint8_t tmp = static_cast<std::uint8_t>(first_a >> 24U);
+            constexpr std::uint32_t table = 0x75310U;
+            const std::uint8_t mutate_index =
+                static_cast<std::uint8_t>((((tmp >> 3U) & 6U) | (tmp & 1U)) << 1U);
+            first_a ^= ((table >> mutate_index) & 0x30U) << 24U;
+        }
+        reinterpret_cast<std::uint32_t*>(slot_a)[lane] = first_a;
+
+        if (has_b) {
+            std::uint32_t first_b = cw_b ^ bw_b;
+            if (lane == 2U) {
+                const std::uint8_t tmp = static_cast<std::uint8_t>(first_b >> 24U);
+                constexpr std::uint32_t table = 0x75310U;
+                const std::uint8_t mutate_index =
+                    static_cast<std::uint8_t>((((tmp >> 3U) & 6U) | (tmp & 1U)) << 1U);
+                first_b ^= ((table >> mutate_index) & 0x30U) << 24U;
+            }
+            reinterpret_cast<std::uint32_t*>(slot_b)[lane] = first_b;
+        }
+
+        // Second dependent address/load for both hashes before either multiply.
+        const std::uint32_t c0_a = __shfl_sync(mask, cw_a, base);
+        std::uint8_t* slot2_a =
+            scratch_a + static_cast<std::size_t>(c0_a & byte_address_mask);
+        const std::uint32_t tv_a =
+            reinterpret_cast<const std::uint32_t*>(slot2_a)[lane];
+
+        std::uint32_t c0_b = 0U;
+        std::uint8_t* slot2_b = nullptr;
+        std::uint32_t tv_b = 0U;
+        if (has_b) {
+            c0_b = __shfl_sync(mask, cw_b, base);
+            slot2_b =
+                scratch_b + static_cast<std::size_t>(c0_b & byte_address_mask);
+            tv_b = reinterpret_cast<const std::uint32_t*>(slot2_b)[lane];
+        }
+
+        auto finish = [&](std::uint32_t aw,
+                          std::uint32_t aw0,
+                          std::uint32_t aw1,
+                          std::uint32_t cw,
+                          std::uint32_t c0,
+                          std::uint32_t tv,
+                          std::uint32_t tweak_lo,
+                          std::uint32_t tweak_hi,
+                          std::uint8_t* slot2,
+                          std::uint32_t& next_aw1,
+                          std::uint32_t& next_aw,
+                          std::uint32_t& next_bw) {
+            const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
+            const std::uint32_t t0_hi = __shfl_sync(mask, tv, base + 1U);
+            const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
+            const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
+
+            std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
+            if (lane == 0U) {
+                const std::uint64_t c_low =
+                    static_cast<std::uint64_t>(c0) |
+                    (static_cast<std::uint64_t>(c1) << 32U);
+                const std::uint64_t t0v =
+                    static_cast<std::uint64_t>(tv) |
+                    (static_cast<std::uint64_t>(t0_hi) << 32U);
+                const std::uint64_t lo = c_low * t0v;
+                const std::uint64_t hi = __umul64hi(c_low, t0v);
+                const std::uint64_t olda0 =
+                    static_cast<std::uint64_t>(aw0) |
+                    (static_cast<std::uint64_t>(aw1) << 32U);
+                const std::uint64_t olda1 =
+                    static_cast<std::uint64_t>(old_a2) |
+                    (static_cast<std::uint64_t>(old_a3) << 32U);
+                const std::uint64_t na0 = olda0 + hi;
+                const std::uint64_t na1 = olda1 + lo;
+                na0_lo = static_cast<std::uint32_t>(na0);
+                na0_hi = static_cast<std::uint32_t>(na0 >> 32U);
+                na1_lo = static_cast<std::uint32_t>(na1);
+                na1_hi = static_cast<std::uint32_t>(na1 >> 32U);
+                next_aw1 = na0_hi ^ t0_hi;
+            }
+
+            na0_lo = __shfl_sync(mask, na0_lo, base);
+            na0_hi = __shfl_sync(mask, na0_hi, base);
+            na1_lo = __shfl_sync(mask, na1_lo, base);
+            na1_hi = __shfl_sync(mask, na1_hi, base);
+            const std::uint32_t na_word =
+                lane == 0U ? na0_lo :
+                lane == 1U ? na0_hi :
+                lane == 2U ? na1_lo : na1_hi;
+
+            std::uint32_t store_word = na_word;
+            if (lane == 2U) store_word ^= tweak_lo;
+            if (lane == 3U) store_word ^= tweak_hi;
+            reinterpret_cast<std::uint32_t*>(slot2)[lane] = store_word;
+
+            next_aw = na_word ^ tv;
+            next_bw = cw;
+        };
+
+        finish(aw_a, aw0_a, aw1_a, cw_a, c0_a, tv_a,
+               tweak_a_lo, tweak_a_hi, slot2_a, aw1_a, aw_a, bw_a);
+
+        if (has_b) {
+            finish(aw_b, aw0_b, aw1_b, cw_b, c0_b, tv_b,
+                   tweak_b_lo, tweak_b_hi, slot2_b, aw1_b, aw_b, bw_b);
+        }
     }
 }
 
