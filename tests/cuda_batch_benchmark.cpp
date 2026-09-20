@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -38,13 +39,8 @@ bool env_enabled(const char* name)
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
-int forced_cn_variant()
+int parse_cn_variant(std::string v)
 {
-    const char* value = std::getenv("YERBAS_BENCH_FORCE_CN_VARIANT");
-    if (value == nullptr || *value == '\0')
-        return env_enabled("YERBAS_BENCH_FORCE_CN_FAST") ? 2 : -1;
-
-    std::string v(value);
     for (char& c : v)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
@@ -55,6 +51,42 @@ int forced_cn_variant()
     if (v == "4" || v == "turtle" || v == "cn-turtle") return 4;
     if (v == "5" || v == "turtlelite" || v == "turtle-lite" || v == "cn-turtlelite" || v == "cn-turtle-lite") return 5;
     return -2;
+}
+
+int forced_cn_variant()
+{
+    const char* value = std::getenv("YERBAS_BENCH_FORCE_CN_VARIANT");
+    if (value == nullptr || *value == '\0')
+        return env_enabled("YERBAS_BENCH_FORCE_CN_FAST") ? 2 : -1;
+    return parse_cn_variant(value);
+}
+
+std::array<int, 3> forced_cn_triple()
+{
+    std::array<int, 3> result{{-1, -1, -1}};
+    const char* value = std::getenv("YERBAS_BENCH_FORCE_CN_TRIPLE");
+    if (value == nullptr || *value == '\0') return result;
+
+    std::string v(value);
+    for (char& ch : v) {
+        if (ch == ',' || ch == '/' || ch == '+') ch = ' ';
+    }
+
+    std::istringstream in(v);
+    std::string token;
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        if (!(in >> token)) {
+            result[0] = -2;
+            return result;
+        }
+        result[i] = parse_cn_variant(token);
+        if (result[i] < 0) {
+            result[0] = -2;
+            return result;
+        }
+    }
+    if (in >> token) result[0] = -2;
+    return result;
 }
 
 std::vector<std::size_t> default_sizes()
@@ -90,12 +122,24 @@ int main(int argc, char** argv)
     }
 
     const int forced_variant = forced_cn_variant();
+    const auto forced_triple = forced_cn_triple();
     if (forced_variant == -2) {
         std::cerr << "Invalid YERBAS_BENCH_FORCE_CN_VARIANT. Use 0..5 or "
                      "dark, darklite, fast, lite, turtle, turtlelite.\n";
         return 4;
     }
-    const bool force_cn = forced_variant >= 0;
+    if (forced_triple[0] == -2) {
+        std::cerr << "Invalid YERBAS_BENCH_FORCE_CN_TRIPLE. Use three variants, "
+                     "for example dark,fast,lite.\n";
+        return 5;
+    }
+    const bool force_triple = forced_triple[0] >= 0;
+    if (forced_variant >= 0 && force_triple) {
+        std::cerr << "Use either YERBAS_BENCH_FORCE_CN_VARIANT or "
+                     "YERBAS_BENCH_FORCE_CN_TRIPLE, not both.\n";
+        return 6;
+    }
+    const bool force_cn = forced_variant >= 0 || force_triple;
     const auto sizes = benchmark_sizes(argc, argv);
     auto header = yerbas::test_vectors::MAINNET_GENESIS_HEADER;
     header[76] = header[77] = header[78] = header[79] = 0;
@@ -106,7 +150,7 @@ int main(int argc, char** argv)
     job.target_le.fill(0xff);
     job.stages = yerbas::ghostrider::stage_schedule(work);
 
-    if (force_cn) {
+    if (forced_variant >= 0) {
         const std::uint8_t forced_stage = static_cast<std::uint8_t>(
             yerbas::ghostrider::kCryptoNightStageFlag |
             static_cast<std::uint8_t>(forced_variant));
@@ -114,16 +158,30 @@ int main(int argc, char** argv)
             if ((stage & yerbas::ghostrider::kCryptoNightStageFlag) != 0)
                 stage = forced_stage;
         }
+    } else if (force_triple) {
+        std::size_t cn_index = 0;
+        for (auto& stage : job.stages) {
+            if ((stage & yerbas::ghostrider::kCryptoNightStageFlag) == 0)
+                continue;
+            stage = static_cast<std::uint8_t>(
+                yerbas::ghostrider::kCryptoNightStageFlag |
+                static_cast<std::uint8_t>(forced_triple[cn_index++]));
+        }
     }
 
     std::cout << "Yerbas CUDA real-pipeline benchmark\n";
     yerbas::cuda::print_devices();
     std::cout << "Benchmark GPU: " << device_id << "\n";
-    if (force_cn) {
+    if (forced_variant >= 0) {
         std::cout << "Schedule mode: forced " << kCnNames[forced_variant]
                   << " production-selector exercise\n";
         if (env_enabled("YERBAS_CN_GEOMETRY_RETUNE"))
             std::cout << "Geometry mode: full real-batch CN block-size sweep\n";
+    } else if (force_triple) {
+        std::cout << "Schedule mode: forced mixed CN triple "
+                  << kCnNames[forced_triple[0]] << '/'
+                  << kCnNames[forced_triple[1]] << '/'
+                  << kCnNames[forced_triple[2]] << "\n";
     }
     std::cout << "Schedule:";
     for (std::size_t i = 0; i < job.stages.size(); ++i)
