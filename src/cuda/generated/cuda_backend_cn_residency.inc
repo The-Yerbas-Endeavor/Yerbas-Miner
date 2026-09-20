@@ -9,17 +9,17 @@
 //   44  promoted four-lane T-table/coalesced baseline
 //   222 two-lane T-table + 64-byte shared tile
 //   444 four-lane T-table/coalesced + cache-global (.cg) scratchpad traffic
-//   445 four-lane T-table/coalesced + late A2/A3 shuffles
+//   445 four-lane T-table dual-hash ILP
 
 namespace {
 
-constexpr int kCnPhase2SelectorCacheRevision = 11;
+constexpr int kCnPhase2SelectorCacheRevision = 12;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_mode{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_threads{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_ttable4_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_tile64_parity{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_cg_parity{};
-static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_latea23_parity{}; // mode 445: late A2/A3 shuffle candidate
+static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_dualhash_parity{}; // mode 445: dual-hash ILP candidate
 
 template <typename Kernel>
 int cn_occupancy_block_size(Kernel kernel, int warp, int max_threads)
@@ -67,7 +67,7 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
-    if (mode == 445) return "4-lane-ttable-latea23";
+    if (mode == 445) return "4-lane-ttable-dualhash";
     if (mode == 444) return "4-lane-ttable-prefetch";
     if (mode == 222) return "2-lane-tile64";
     if (mode == 44) return "4-lane-ttable";
@@ -138,7 +138,7 @@ bool load_cn_phase2_selector_cache(int device_id,
     g_cn_ttable4_parity[device_id][VariantIndex] = mode == 4 ? -1 : 1;
     g_cn_tile64_parity[device_id][VariantIndex] = mode == 222 ? 1 : 0;
     g_cn_cg_parity[device_id][VariantIndex] = mode == 444 ? 1 : 0;
-    g_cn_latea23_parity[device_id][VariantIndex] = mode == 445 ? 1 : 0;
+    g_cn_dualhash_parity[device_id][VariantIndex] = mode == 445 ? 1 : 0;
 
     std::cout << "[GPU " << device_id << "] CryptoNight phase2 cache loaded | "
               << cryptonight::config_value(VariantIndex).name
@@ -196,17 +196,20 @@ void cn_launch_mode(cudaStream_t stream,
                     std::uint8_t* scratchpads,
                     const cryptonight::SplitContext* contexts)
 {
-    const int lanes = mode == 222 ? 2 : 4;
-    const std::size_t total_threads = count * static_cast<std::size_t>(lanes);
-    const int blocks = static_cast<int>((total_threads + static_cast<std::size_t>(threads) - 1U) /
-                                        static_cast<std::size_t>(threads));
+    const std::size_t total_threads =
+        mode == 445
+            ? ((count + 1U) / 2U) * 4U
+            : count * static_cast<std::size_t>(mode == 222 ? 2 : 4);
+    const int blocks = static_cast<int>(
+        (total_threads + static_cast<std::size_t>(threads) - 1U) /
+        static_cast<std::size_t>(threads));
 
     if (mode == 222) {
         cryptonight_loop_stage_ttable2_tile64<VariantIndex><<<
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
     } else if (mode == 445) {
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true><<<blocks, threads, 0, stream>>>(
+        cryptonight_loop_stage_ttable4_dualhash<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
     } else if (mode == 444) {
         cryptonight_loop_stage_ttable4_cg<VariantIndex><<<blocks, threads, 0, stream>>>(
@@ -253,27 +256,35 @@ bool cn_validate_pair(cudaStream_t stream,
                       const cryptonight::SplitContext* contexts)
 {
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    const std::size_t parity_count =
+        (candidate_mode == 445 || reference_mode == 445) ? 2U : 1U;
+    const std::size_t scratch_bytes = parity_count * cfg.page_size;
+    const std::size_t context_bytes =
+        parity_count * sizeof(cryptonight::SplitContext);
+
     std::uint8_t* ref = nullptr;
     std::uint8_t* candidate = nullptr;
     cryptonight::SplitContext* ref_ctx = nullptr;
     cryptonight::SplitContext* candidate_ctx = nullptr;
 
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref), cfg.page_size), "cudaMalloc CN parity ref failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate), cfg.page_size), "cudaMalloc CN parity candidate failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN parity ref ctx failed");
-    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_ctx), sizeof(cryptonight::SplitContext)), "cudaMalloc CN parity candidate ctx failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref), scratch_bytes), "cudaMalloc CN parity ref failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate), scratch_bytes), "cudaMalloc CN parity candidate failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&ref_ctx), context_bytes), "cudaMalloc CN parity ref ctx failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&candidate_ctx), context_bytes), "cudaMalloc CN parity candidate ctx failed");
 
-    check_cuda(cudaMemcpyAsync(ref, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref failed");
-    check_cuda(cudaMemcpyAsync(candidate, scratchpads, cfg.page_size, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate failed");
-    check_cuda(cudaMemcpyAsync(ref_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref ctx failed");
-    check_cuda(cudaMemcpyAsync(candidate_ctx, contexts, sizeof(cryptonight::SplitContext), cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate ctx failed");
+    check_cuda(cudaMemcpyAsync(ref, scratchpads, scratch_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref failed");
+    check_cuda(cudaMemcpyAsync(candidate, scratchpads, scratch_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate failed");
+    check_cuda(cudaMemcpyAsync(ref_ctx, contexts, context_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity ref ctx failed");
+    check_cuda(cudaMemcpyAsync(candidate_ctx, contexts, context_bytes, cudaMemcpyDeviceToDevice, stream), "cudaMemcpy CN parity candidate ctx failed");
 
-    cn_launch_mode<VariantIndex>(stream, reference_mode, reference_threads, 1U, ref, ref_ctx);
-    cn_launch_mode<VariantIndex>(stream, candidate_mode, candidate_threads, 1U, candidate, candidate_ctx);
+    cn_launch_mode<VariantIndex>(
+        stream, reference_mode, reference_threads, parity_count, ref, ref_ctx);
+    cn_launch_mode<VariantIndex>(
+        stream, candidate_mode, candidate_threads, parity_count, candidate, candidate_ctx);
 
-    std::vector<std::uint8_t> host_ref(cfg.page_size), host_candidate(cfg.page_size);
-    check_cuda(cudaMemcpyAsync(host_ref.data(), ref, cfg.page_size, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity ref result failed");
-    check_cuda(cudaMemcpyAsync(host_candidate.data(), candidate, cfg.page_size, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity candidate result failed");
+    std::vector<std::uint8_t> host_ref(scratch_bytes), host_candidate(scratch_bytes);
+    check_cuda(cudaMemcpyAsync(host_ref.data(), ref, scratch_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity ref result failed");
+    check_cuda(cudaMemcpyAsync(host_candidate.data(), candidate, scratch_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpy CN parity candidate result failed");
     check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CN parity result failed");
 
     cudaFree(candidate_ctx);
@@ -305,8 +316,8 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
-    const int threads_latea23 = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex, true>,
+    const int threads_dualhash = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
@@ -327,11 +338,11 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         stream, 44, 32, 222, 32, scratchpads, contexts);
     const bool parity_cg = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    const bool parity_latea23 = cn_validate_pair<VariantIndex>(
+    const bool parity_dualhash = cn_validate_pair<VariantIndex>(
         stream, 44, 32, 445, 32, scratchpads, contexts);
     g_cn_tile64_parity[device_id][VariantIndex] = parity_tile ? 1 : -1;
     g_cn_cg_parity[device_id][VariantIndex] = parity_cg ? 1 : -1;
-    g_cn_latea23_parity[device_id][VariantIndex] = parity_latea23 ? 1 : -1;
+    g_cn_dualhash_parity[device_id][VariantIndex] = parity_dualhash ? 1 : -1;
 
     std::size_t free_bytes = 0, total_bytes = 0;
     check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo CN selector failed");
@@ -367,7 +378,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
     int best_threads = threads_t4;
     float tile_ms = -1.0F;
     float cg_ms = -1.0F;
-    float latea23_ms = -1.0F;
+    float dualhash_ms = -1.0F;
 
     if (parity_tile) {
         reset();
@@ -391,14 +402,14 @@ void cn_residency_autoselect_once(cudaStream_t stream,
         }
     }
 
-    if (parity_latea23) {
+    if (parity_dualhash) {
         reset();
-        latea23_ms = cn_time_mode<VariantIndex>(
-            stream, 445, threads_latea23, sample_count, clone, clone_ctx);
-        if (latea23_ms < best_ms * 0.98F) {
-            best_ms = latea23_ms;
+        dualhash_ms = cn_time_mode<VariantIndex>(
+            stream, 445, threads_dualhash, sample_count, clone, clone_ctx);
+        if (dualhash_ms < best_ms * 0.98F) {
+            best_ms = dualhash_ms;
             best_mode = 445;
-            best_threads = threads_latea23;
+            best_threads = threads_dualhash;
         }
     }
 
