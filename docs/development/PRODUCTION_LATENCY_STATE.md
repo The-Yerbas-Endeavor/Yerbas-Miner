@@ -256,6 +256,19 @@ Test setup/final geometry before changing their AES or Keccak math. These phases
 apply to every CN rotation, so a measured win is globally useful even if smaller
 than a phase-2 breakthrough.
 
+Preliminary GPU0 real-pipeline sweep on Dark/Fast/Lite @ batch 3584 found a
+repeatable winner:
+
+- 32 threads: `611.72 / 611.55 H/s` -> `611.64 H/s` average
+- 64 threads: `602.76 / 602.81 H/s` -> `602.79 H/s` average
+- 96 threads: `597.09 / 597.85 H/s` -> `597.47 H/s` average
+- 128 threads: `602.86 / 602.89 H/s` -> `602.88 H/s` average
+
+32 threads is about `+1.45%` whole-pipeline versus the current 128-thread
+default, with the forward/reverse ordering reproduced. Do not promote globally
+yet; first confirm with `YERBAS_DIAGNOSTICS=1` that setup/final timings improve
+while phase-2 loop timing stays flat.
+
 ## CPU combo result retained
 
 Final same-binary A/B:
