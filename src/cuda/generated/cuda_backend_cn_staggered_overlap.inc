@@ -61,6 +61,15 @@ inline int cn_stagger_forced_simple_mode()
     return 0;
 }
 
+inline bool cn_stagger_legacy_auto_requested()
+{
+    const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
+    if (!value || !*value) return false;
+    const std::string v(value);
+    return v == "legacyauto" || v == "legacy-auto" ||
+           v == "legacy" || v == "rev2";
+}
+
 inline bool cn_stagger_loop_overlap(int mode)
 {
     return mode >= 100;
@@ -347,6 +356,62 @@ std::filesystem::path cn_stagger_cache_path(
         ("cn-stagger-rev" + std::to_string(kCnStaggerSchedulerRevision) +
          "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) +
          "-p" + std::to_string(cfg.page_size) + '-' + key + ".txt");
+}
+
+template <std::uint8_t VariantIndex>
+std::filesystem::path cn_stagger_legacy_rev2_cache_path(
+    int device_id,
+    const cudaDeviceProp& props,
+    std::size_t count)
+{
+    int driver = 0, runtime = 0;
+    if (cudaDriverGetVersion(&driver) != cudaSuccess ||
+        cudaRuntimeGetVersion(&runtime) != cudaSuccess) {
+        cudaGetLastError();
+        return {};
+    }
+    const std::string key =
+        cn_cache_key(device_id, props, count, driver, runtime);
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    return cn_cache_directory() /
+        ("cn-stagger-rev2-v" +
+         std::to_string(static_cast<unsigned int>(VariantIndex)) +
+         "-p" + std::to_string(cfg.page_size) + '-' + key + ".txt");
+}
+
+template <std::uint8_t VariantIndex>
+bool load_cn_stagger_legacy_rev2_cache(
+    int device_id,
+    const cudaDeviceProp& props,
+    std::size_t count)
+{
+    const auto path =
+        cn_stagger_legacy_rev2_cache_path<VariantIndex>(
+            device_id, props, count);
+    if (path.empty()) return false;
+
+    std::ifstream in(path);
+    std::string magic;
+    int revision = 0;
+    int mode = 0;
+    if (!(in >> magic >> revision >> mode) ||
+        magic != "YERBAS_CN_STAGGER" ||
+        revision != 2 ||
+        (mode != 1 && mode != 33 && mode != 50))
+        return false;
+
+    g_cn_stagger_mode[device_id][VariantIndex] = mode;
+    g_cn_stagger_threads_a[device_id][VariantIndex] = 0;
+    g_cn_stagger_threads_b[device_id][VariantIndex] = 0;
+
+    std::cout << "[CUDA CN stagger legacy] GPU " << device_id
+              << " | " << cryptonight::config_value(VariantIndex).name
+              << " | batch=" << count
+              << " | source=rev2-cache"
+              << " | production=";
+    cn_stagger_print_mode(std::cout, mode);
+    std::cout << '\n';
+    return true;
 }
 
 template <std::uint8_t VariantIndex>
@@ -735,12 +800,29 @@ bool launch_cn_staggered_if_ready(
     }
 
     int& mode = g_cn_stagger_mode[device_id][VariantIndex];
+    const bool legacy_auto = cn_stagger_legacy_auto_requested();
     const int forced_simple_mode = cn_stagger_forced_simple_mode();
-    if (forced_simple_mode != 0) {
+
+    if (legacy_auto && mode == 0) {
+        if (!load_cn_stagger_legacy_rev2_cache<VariantIndex>(
+                device_id, props, count)) {
+            mode = 1;
+            g_cn_stagger_threads_a[device_id][VariantIndex] = 0;
+            g_cn_stagger_threads_b[device_id][VariantIndex] = 0;
+            if (!g_cn_stagger_reported[device_id][VariantIndex]) {
+                g_cn_stagger_reported[device_id][VariantIndex] = true;
+                std::cout << "[CUDA CN stagger legacy] GPU " << device_id
+                          << " | " << cryptonight::config_value(VariantIndex).name
+                          << " | batch=" << count
+                          << " | source=rev2-cache-miss"
+                          << " | production=single\n";
+            }
+        }
+    } else if (!legacy_auto && forced_simple_mode != 0) {
         mode = forced_simple_mode;
         g_cn_stagger_threads_a[device_id][VariantIndex] = 0;
         g_cn_stagger_threads_b[device_id][VariantIndex] = 0;
-    } else if (mode == 0 &&
+    } else if (!legacy_auto && mode == 0 &&
                !load_cn_stagger_cache<VariantIndex>(device_id, props, count)) {
         if (!cn_stagger_tuning_requested()) return false;
 
@@ -900,7 +982,8 @@ bool launch_cn_staggered_if_ready(
                   << " | partitions=" << first << '+' << (count - first)
                   << " | threads=" << threads_a << '/' << threads_b
                   << " | source="
-                  << (forced_simple_mode != 0 ? "forced-simple" : "cache-or-tuned")
+                  << (legacy_auto ? "rev2-cache" :
+                      (forced_simple_mode != 0 ? "forced-simple" : "cache-or-tuned"))
                   << " | loop-overlap="
                   << (cn_stagger_loop_overlap(mode) ? "yes" : "no")
                   << " | generic=yes\n";
