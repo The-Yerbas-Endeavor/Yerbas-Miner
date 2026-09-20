@@ -92,9 +92,9 @@ void launch_cn_partition(cudaStream_t stream,
 {
     if (count == 0) return;
     const bool use_ttable = geometry.aes_backend == 1;
-    const int setup_threads = use_ttable ? kCnSharedKeyMaxThreads
+    const int setup_threads = use_ttable ? cn_phase_launch_threads()
         : cn_setup_occupancy_threads<VariantIndex, false>(props);
-    const int final_threads = use_ttable ? kCnSharedKeyMaxThreads
+    const int final_threads = use_ttable ? cn_phase_launch_threads()
         : cn_final_occupancy_threads<VariantIndex, false>(props);
     const std::size_t total_threads = count * 8U;
     const int setup_blocks = static_cast<int>((total_threads + setup_threads - 1U) / setup_threads);
