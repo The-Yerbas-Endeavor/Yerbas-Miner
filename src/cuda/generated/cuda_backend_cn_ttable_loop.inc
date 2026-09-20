@@ -14,6 +14,27 @@
 
 namespace {
 
+__device__ __align__(128) std::uint32_t g_cn_aes_ttables_readonly[1024];
+
+__global__ void init_cn_aes_ttables_readonly()
+{
+    const int i = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= 256) return;
+    const std::uint8_t s = cryptonight::kAesSbox[i];
+    const std::uint8_t x2 = cryptonight::xtime(s);
+    const std::uint8_t x3 = static_cast<std::uint8_t>(x2 ^ s);
+    g_cn_aes_ttables_readonly[i]       = cryptonight::pack4(x2, s,  s,  x3);
+    g_cn_aes_ttables_readonly[256 + i] = cryptonight::pack4(x3, x2, s,  s );
+    g_cn_aes_ttables_readonly[512 + i] = cryptonight::pack4(s,  x3, x2, s );
+    g_cn_aes_ttables_readonly[768 + i] = cryptonight::pack4(s,  s,  x3, x2);
+}
+
+__device__ __forceinline__ std::uint32_t cn_aes_readonly_load(
+    const std::uint32_t* base, std::uint32_t index)
+{
+    return __ldg(base + index);
+}
+
 template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable2(std::size_t count,
                                                std::uint8_t* __restrict__ scratchpads,
@@ -167,6 +188,146 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
             const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
             const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
             cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
+        }
+
+        std::uint32_t first_store_word = cw ^ bw;
+        if (lane == 2U) {
+            const std::uint8_t tmp = static_cast<std::uint8_t>(first_store_word >> 24U);
+            constexpr std::uint32_t table = 0x75310U;
+            const std::uint8_t mutate_index =
+                static_cast<std::uint8_t>((((tmp >> 3U) & 6U) | (tmp & 1U)) << 1U);
+            first_store_word ^= ((table >> mutate_index) & 0x30U) << 24U;
+        }
+        reinterpret_cast<std::uint32_t*>(slot)[lane] = first_store_word;
+
+        // The second dependent address obeys the same low-word identity. Issue
+        // the memory access before fetching c1/remaining A words so shuffle
+        // latency is kept off the address dependency chain.
+        const std::uint32_t c0 = __shfl_sync(mask, cw, base);
+        const std::uint32_t byte_offset2 = c0 & byte_address_mask;
+        std::uint8_t* slot2 = scratch + static_cast<std::size_t>(byte_offset2);
+
+        const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
+        const std::uint32_t t0_lo = lane == 0U ? t_word : 0U;
+        const std::uint32_t c1 = __shfl_sync(mask, cw, base + 1U);
+        const std::uint32_t t0_hi = __shfl_sync(mask, t_word, base + 1U);
+        const std::uint32_t old_a2 = __shfl_sync(mask, aw, base + 2U);
+        const std::uint32_t old_a3 = __shfl_sync(mask, aw, base + 3U);
+
+        std::uint32_t na0_lo = 0U, na0_hi = 0U, na1_lo = 0U, na1_hi = 0U;
+        if (lane == 0U) {
+            const std::uint64_t c_low = static_cast<std::uint64_t>(c0) |
+                                        (static_cast<std::uint64_t>(c1) << 32U);
+            const std::uint64_t t0v =
+                static_cast<std::uint64_t>(t0_lo) |
+                (static_cast<std::uint64_t>(t0_hi) << 32U);
+            const std::uint64_t lo = c_low * t0v;
+            const std::uint64_t hi = __umul64hi(c_low, t0v);
+            const std::uint64_t olda0 = static_cast<std::uint64_t>(aw0) |
+                                        (static_cast<std::uint64_t>(aw1) << 32U);
+            const std::uint64_t olda1 = static_cast<std::uint64_t>(old_a2) |
+                                        (static_cast<std::uint64_t>(old_a3) << 32U);
+            const std::uint64_t na0 = olda0 + hi;
+            const std::uint64_t na1 = olda1 + lo;
+            na0_lo = static_cast<std::uint32_t>(na0);
+            na0_hi = static_cast<std::uint32_t>(na0 >> 32U);
+            na1_lo = static_cast<std::uint32_t>(na1);
+            na1_hi = static_cast<std::uint32_t>(na1 >> 32U);
+
+            // Next iteration's lane-1 A word is exactly na0_hi ^ t0_hi.
+            aw1_shadow = na0_hi ^ t0_hi;
+        }
+
+        na0_lo = __shfl_sync(mask, na0_lo, base);
+        na0_hi = __shfl_sync(mask, na0_hi, base);
+        na1_lo = __shfl_sync(mask, na1_lo, base);
+        na1_hi = __shfl_sync(mask, na1_hi, base);
+        const std::uint32_t na_word = lane == 0U ? na0_lo :
+                                      lane == 1U ? na0_hi :
+                                      lane == 2U ? na1_lo : na1_hi;
+
+        std::uint32_t store_word = na_word;
+        if (lane == 2U) store_word ^= tweak_lo;
+        if (lane == 3U) store_word ^= tweak_hi;
+        reinterpret_cast<std::uint32_t*>(slot2)[lane] = store_word;
+
+        aw = na_word ^ t_word;
+        bw = cw;
+    }
+}
+
+
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_loop_stage_ttable4_readonly(std::size_t count,
+                                                         std::uint8_t* __restrict__ scratchpads,
+                                                         const cryptonight::SplitContext* __restrict__ contexts)
+{
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::uint32_t byte_address_mask =
+        static_cast<std::uint32_t>(address_mask << 4U);
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int lane = threadIdx.x & 3U;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int base = warp_lane & ~3U;
+    const unsigned int group = global_thread >> 2U;
+    if (group >= count) return;
+    const unsigned int mask = 0xFU << base;
+
+    const std::uint32_t* t0 = g_cn_aes_ttables_readonly;
+    const std::uint32_t* t1 = g_cn_aes_ttables_readonly + 256;
+    const std::uint32_t* t2 = g_cn_aes_ttables_readonly + 512;
+    const std::uint32_t* t3 = g_cn_aes_ttables_readonly + 768;
+
+    std::uint8_t* scratch = scratchpads + static_cast<std::size_t>(group) * cfg.page_size;
+    const auto& ctx = contexts[group];
+    std::uint32_t aw = cryptonight::load32le_aligned(ctx.a + lane * 4U);
+    std::uint32_t bw = cryptonight::load32le_aligned(ctx.b + lane * 4U);
+
+    // The dependent scratchpad addresses use only bits 4..N from the low
+    // 32-bit word for every GhostRider CN variant. Lane 0 is also the only lane
+    // that consumes olda0's high word during the multiply/add step, so carry a
+    // local shadow instead of rediscovering lane 1's A word every iteration.
+    std::uint32_t aw1_shadow = 0U;
+    if (lane == 0U) aw1_shadow = cryptonight::load32le_aligned(ctx.a + 4U);
+
+    const std::uint64_t tweak = ctx.tweak;
+    const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
+    const std::uint32_t tweak_hi = static_cast<std::uint32_t>(tweak >> 32U);
+
+    #pragma unroll 1
+    for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
+        // ((a_low >> 4) & address_mask) * 16 is exactly the low word masked
+        // with (address_mask << 4). This removes a subgroup shuffle, 64-bit
+        // combine and widened multiply from the first dependent address path.
+        const std::uint32_t aw0 = __shfl_sync(mask, aw, base);
+        const std::uint32_t aw1 = lane == 0U ? aw1_shadow : 0U;
+        const std::uint32_t byte_offset = aw0 & byte_address_mask;
+        std::uint8_t* slot = scratch + static_cast<std::size_t>(byte_offset);
+
+        const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
+        std::uint32_t cw = 0U;
+        if constexpr (VariantIndex == 2) {
+            // CN-Fast benefits from issuing all four local shared-table reads
+            // before the ShiftRows exchange. Other variants keep the established
+            // source-word shuffle ordering unless a separate candidate changes it.
+            const std::uint32_t q0 = cn_aes_readonly_load(t0, static_cast<std::uint8_t>(own));
+            const std::uint32_t q1_local = cn_aes_readonly_load(t1, static_cast<std::uint8_t>(own >> 8U));
+            const std::uint32_t q2_local = cn_aes_readonly_load(t2, static_cast<std::uint8_t>(own >> 16U));
+            const std::uint32_t q3_local = cn_aes_readonly_load(t3, static_cast<std::uint8_t>(own >> 24U));
+            const std::uint32_t q1 = __shfl_sync(mask, q1_local, base + ((lane + 1U) & 3U));
+            const std::uint32_t q2 = __shfl_sync(mask, q2_local, base + ((lane + 2U) & 3U));
+            const std::uint32_t q3 = __shfl_sync(mask, q3_local, base + ((lane + 3U) & 3U));
+            cw = q0 ^ q1 ^ q2 ^ q3 ^ aw;
+        } else {
+            const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
+            const std::uint32_t w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
+            const std::uint32_t w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+            const std::uint8_t x0 = static_cast<std::uint8_t>(own);
+            const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
+            const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
+            const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
+            cw = cn_aes_readonly_load(t0, x0) ^ cn_aes_readonly_load(t1, x1) ^ cn_aes_readonly_load(t2, x2) ^ cn_aes_readonly_load(t3, x3) ^ aw;
         }
 
         std::uint32_t first_store_word = cw ^ bw;
