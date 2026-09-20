@@ -844,8 +844,14 @@ void launch_split_cryptonight_variant_phase_backend(cudaStream_t stream,
     const bool loop_ready = device_ok &&
         g_cn_production_selector[device_id][VariantIndex].selected &&
         g_cn_production_geometry[device_id][VariantIndex].selected;
+    const bool sample = device_ok &&
+        cn_phase_diagnostics_enabled() &&
+        g_cn_phase_samples[device_id][VariantIndex] == 0U;
 
-    if (phase_ready && loop_ready) {
+    // A diagnostic sample must measure the exact single-stream production
+    // setup/loop/final path. Skip stagger for that one launch; subsequent
+    // invocations resume the normal scheduler unchanged.
+    if (!sample && phase_ready && loop_ready) {
         CnGeometry scheduled_geometry = geometry;
         scheduled_geometry.aes_backend = 1;
         if (launch_cn_staggered_if_ready<VariantIndex>(
@@ -854,10 +860,27 @@ void launch_split_cryptonight_variant_phase_backend(cudaStream_t stream,
             return;
     }
 
+    cudaEvent_t e0{}, e1{}, e2{}, e3{};
+    if (sample) {
+        check_cuda(cudaEventCreateWithFlags(&e0, cudaEventDefault),
+                   "cudaEventCreate CN production phase setup start failed");
+        check_cuda(cudaEventCreateWithFlags(&e1, cudaEventDefault),
+                   "cudaEventCreate CN production phase setup stop failed");
+        check_cuda(cudaEventCreateWithFlags(&e2, cudaEventDefault),
+                   "cudaEventCreate CN production phase loop stop failed");
+        check_cuda(cudaEventCreateWithFlags(&e3, cudaEventDefault),
+                   "cudaEventCreate CN production phase final stop failed");
+        check_cuda(cudaEventRecord(e0, stream),
+                   "cudaEventRecord CN production phase setup start failed");
+    }
+
     // Single-stream warm-up/fallback. Setup and final always use their own
     // production selector; only phase 2 continues to honor geometry.aes_backend.
     launch_cn_setup_selected<VariantIndex>(
         stream, device_id, count, states, scratchpads, contexts);
+    if (sample)
+        check_cuda(cudaEventRecord(e1, stream),
+                   "cudaEventRecord CN production phase setup stop failed");
 
     if (geometry.aes_backend == 1)
         launch_cn_loop_block_tuned<VariantIndex, true>(
@@ -865,9 +888,55 @@ void launch_split_cryptonight_variant_phase_backend(cudaStream_t stream,
     else
         launch_cn_loop_block_tuned<VariantIndex, false>(
             stream, states, count, scratchpads, contexts, geometry);
+    if (sample)
+        check_cuda(cudaEventRecord(e2, stream),
+                   "cudaEventRecord CN production phase loop stop failed");
 
     launch_cn_final_selected<VariantIndex>(
         stream, device_id, count, states, scratchpads, contexts);
+
+    if (sample) {
+        check_cuda(cudaEventRecord(e3, stream),
+                   "cudaEventRecord CN production phase final stop failed");
+        check_cuda(cudaEventSynchronize(e3),
+                   "cudaEventSynchronize CN production phase profile failed");
+
+        float setup_ms = 0.0F, loop_ms = 0.0F, final_ms = 0.0F;
+        check_cuda(cudaEventElapsedTime(&setup_ms, e0, e1),
+                   "cudaEventElapsedTime CN production setup failed");
+        check_cuda(cudaEventElapsedTime(&loop_ms, e1, e2),
+                   "cudaEventElapsedTime CN production loop failed");
+        check_cuda(cudaEventElapsedTime(&final_ms, e2, e3),
+                   "cudaEventElapsedTime CN production final failed");
+        cudaEventDestroy(e3);
+        cudaEventDestroy(e2);
+        cudaEventDestroy(e1);
+        cudaEventDestroy(e0);
+
+        ++g_cn_phase_samples[device_id][VariantIndex];
+        g_cn_phase_setup_ms[device_id][VariantIndex] += setup_ms;
+        g_cn_phase_loop_ms[device_id][VariantIndex] += loop_ms;
+        g_cn_phase_final_ms[device_id][VariantIndex] += final_ms;
+
+        const float total_ms = setup_ms + loop_ms + final_ms;
+        const int threads = cn_phase_launch_threads();
+        const int loop_mode = cn_hardened_mode(device_id, VariantIndex);
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[CUDA CN phase production] GPU " << device_id
+                  << " | " << cryptonight::config_value(VariantIndex).name
+                  << " | batch=" << count
+                  << " | setup-mode=" << cn_word_setup_name(device_id, VariantIndex)
+                  << " final-mode=" << cn_word_final_name(device_id, VariantIndex)
+                  << " | setup-threads=" << threads
+                  << " final-threads=" << threads
+                  << " | loop-mode=" << cn_residency_mode_name(loop_mode)
+                  << " | setup=" << setup_ms << " ms"
+                  << " | loop=" << loop_ms << " ms"
+                  << " | final=" << final_ms << " ms"
+                  << " | total=" << total_ms << " ms"
+                  << " | captured=1/1"
+                  << std::defaultfloat << '\n';
+    }
 }
 
 void launch_split_cryptonight_phase_backend(cudaStream_t stream,
