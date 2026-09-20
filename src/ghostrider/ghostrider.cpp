@@ -1,5 +1,6 @@
 #include "ghostrider/ghostrider.h"
 #include "cpu/cn_2way.h"
+#include "cpu/cpu_combo_policy.h"
 
 #include <array>
 #include <atomic>
@@ -441,6 +442,8 @@ bool hash_optimized_batch(const Work* works,
     }
 
     const auto& schedule = cached_schedule(works[0]);
+    const auto effective_cn_widths =
+        ::yerbas::cpu_combo_policy::select(schedule, cn_widths);
     uint512 hash[4][18]{};
 
     for (std::size_t i = 0; i < schedule.size(); ++i) {
@@ -461,7 +464,7 @@ bool hash_optimized_batch(const Work* works,
 
         if (algorithm < 0 || algorithm >= static_cast<int>(kCnParams.size())) return false;
         const auto& params = kCnParams[static_cast<std::size_t>(algorithm)];
-        const unsigned int width = cn_widths[static_cast<std::size_t>(algorithm)];
+        const unsigned int width = effective_cn_widths[static_cast<std::size_t>(algorithm)];
         std::size_t lane = 0;
 
         if (width >= 4U && count == 4U) {
