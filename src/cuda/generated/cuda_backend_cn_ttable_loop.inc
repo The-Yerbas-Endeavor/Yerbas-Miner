@@ -235,5 +235,197 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
     }
 }
 
+template <std::uint8_t VariantIndex>
+__global__ void cryptonight_loop_stage_ttable4_mul4(std::size_t count,
+                                                         std::uint8_t* __restrict__ scratchpads,
+                                                         const cryptonight::SplitContext* __restrict__ contexts)
+{
+    __shared__ std::uint32_t tables[1024];
+    cryptonight::init_shared_aes_ttables(tables);
+    __syncthreads();
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::uint32_t byte_address_mask =
+        static_cast<std::uint32_t>(address_mask << 4U);
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int lane = threadIdx.x & 3U;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int base = warp_lane & ~3U;
+    const unsigned int group = global_thread >> 2U;
+    if (group >= count) return;
+    const unsigned int mask = 0xFU << base;
+
+    const std::uint32_t* t0 = tables;
+    const std::uint32_t* t1 = tables + 256;
+    const std::uint32_t* t2 = tables + 512;
+    const std::uint32_t* t3 = tables + 768;
+
+    std::uint8_t* scratch = scratchpads + static_cast<std::size_t>(group) * cfg.page_size;
+    const auto& ctx = contexts[group];
+    std::uint32_t aw = cryptonight::load32le_aligned(ctx.a + lane * 4U);
+    std::uint32_t bw = cryptonight::load32le_aligned(ctx.b + lane * 4U);
+
+    // Distributed-multiply candidate: every lane keeps its own A word live.
+    // The 64x64->128 multiply/add is decomposed into four 32x32 partial
+    // products, one per lane, so lane 0 no longer owns the whole critical path.
+
+    const std::uint64_t tweak = ctx.tweak;
+    const std::uint32_t tweak_lo = static_cast<std::uint32_t>(tweak);
+    const std::uint32_t tweak_hi = static_cast<std::uint32_t>(tweak >> 32U);
+
+    #pragma unroll 1
+    for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
+        // ((a_low >> 4) & address_mask) * 16 is exactly the low word masked
+        // with (address_mask << 4). This removes a subgroup shuffle, 64-bit
+        // combine and widened multiply from the first dependent address path.
+        const std::uint32_t aw0 = __shfl_sync(mask, aw, base);
+        const std::uint32_t byte_offset = aw0 & byte_address_mask;
+        std::uint8_t* slot = scratch + static_cast<std::size_t>(byte_offset);
+
+        const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
+        std::uint32_t cw = 0U;
+        if constexpr (VariantIndex == 2) {
+            // CN-Fast benefits from issuing all four local shared-table reads
+            // before the ShiftRows exchange. Other variants keep the established
+            // source-word shuffle ordering unless a separate candidate changes it.
+            const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
+            const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
+            const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
+            const std::uint32_t q3_local = t3[static_cast<std::uint8_t>(own >> 24U)];
+            const std::uint32_t q1 = __shfl_sync(mask, q1_local, base + ((lane + 1U) & 3U));
+            const std::uint32_t q2 = __shfl_sync(mask, q2_local, base + ((lane + 2U) & 3U));
+            const std::uint32_t q3 = __shfl_sync(mask, q3_local, base + ((lane + 3U) & 3U));
+            cw = q0 ^ q1 ^ q2 ^ q3 ^ aw;
+        } else {
+            const std::uint32_t w1 = __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
+            const std::uint32_t w2 = __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
+            const std::uint32_t w3 = __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+            const std::uint8_t x0 = static_cast<std::uint8_t>(own);
+            const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
+            const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
+            const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
+            cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
+        }
+
+        std::uint32_t first_store_word = cw ^ bw;
+        if (lane == 2U) {
+            const std::uint8_t tmp = static_cast<std::uint8_t>(first_store_word >> 24U);
+            constexpr std::uint32_t table = 0x75310U;
+            const std::uint8_t mutate_index =
+                static_cast<std::uint8_t>((((tmp >> 3U) & 6U) | (tmp & 1U)) << 1U);
+            first_store_word ^= ((table >> mutate_index) & 0x30U) << 24U;
+        }
+        reinterpret_cast<std::uint32_t*>(slot)[lane] = first_store_word;
+
+        // The second dependent address obeys the same low-word identity. Issue
+        // the memory access before fetching c1/remaining A words so shuffle
+        // latency is kept off the address dependency chain.
+        const std::uint32_t c0 = __shfl_sync(mask, cw, base);
+        const std::uint32_t byte_offset2 = c0 & byte_address_mask;
+        std::uint8_t* slot2 = scratch + static_cast<std::size_t>(byte_offset2);
+
+        const std::uint32_t t_word = reinterpret_cast<const std::uint32_t*>(slot2)[lane];
+
+        // Map the four 32x32 partial products onto the four subgroup lanes:
+        //   lane 2: p00 = c0 * t0_lo
+        //   lane 3: p01 = c0 * t0_hi
+        //   lane 0: p10 = c1 * t0_lo
+        //   lane 1: p11 = c1 * t0_hi
+        // The target mapping is chosen so each lane can finish the A word it
+        // already owns after two compact carry exchanges.
+        const unsigned int t_source = base + (lane & 1U);
+        const std::uint32_t t_half =
+            __shfl_sync(mask, t_word, t_source);
+        const unsigned int c_source =
+            base + (lane < 2U ? 1U : 0U);
+        const std::uint32_t c_half =
+            __shfl_sync(mask, cw, c_source);
+
+        const std::uint32_t product_lo = c_half * t_half;
+        const std::uint32_t product_hi = __umulhi(c_half, t_half);
+
+        // In one low-word shuffle, lane 0 receives p11.lo and lane 3 receives
+        // p10.lo. In one high-word shuffle, lane 0 receives p01.hi and lane 3
+        // receives p00.hi. Other lanes simply read themselves.
+        const unsigned int lo_source =
+            lane == 0U ? base + 1U :
+            lane == 3U ? base + 0U :
+                         base + lane;
+        const unsigned int hi_source =
+            lane == 0U ? base + 3U :
+            lane == 3U ? base + 2U :
+                         base + lane;
+        const std::uint32_t peer_lo =
+            __shfl_sync(mask, product_lo, lo_source);
+        const std::uint32_t peer_hi =
+            __shfl_sync(mask, product_hi, hi_source);
+
+        std::uint32_t word1 = 0U;
+        std::uint32_t carry1 = 0U;
+        std::uint32_t carry_b = 0U;
+        std::uint32_t na_word = 0U;
+
+        if (lane == 3U) {
+            std::uint32_t s = peer_hi + product_lo;
+            carry1 = s < peer_hi ? 1U : 0U;
+            const std::uint32_t s2 = s + peer_lo;
+            carry1 += s2 < s ? 1U : 0U;
+            word1 = s2;
+        } else if (lane == 2U) {
+            const std::uint32_t sum = aw + product_lo;
+            carry_b = sum < aw ? 1U : 0U;
+            na_word = sum;
+        }
+
+        // One shuffle simultaneously gives lane 0 the product carry from lane 3
+        // and lane 3 the low-64 add carry from lane 2.
+        const std::uint32_t carry_seed =
+            lane == 3U ? carry1 :
+            lane == 2U ? carry_b : 0U;
+        const unsigned int carry_source =
+            lane == 0U ? base + 3U :
+            lane == 3U ? base + 2U :
+                         base + lane;
+        const std::uint32_t carried =
+            __shfl_sync(mask, carry_seed, carry_source);
+
+        std::uint32_t packed_hi_carries = 0U;
+        if (lane == 0U) {
+            std::uint32_t s = product_hi + peer_hi;
+            std::uint32_t carry2 = s < product_hi ? 1U : 0U;
+            const std::uint32_t s2 = s + peer_lo;
+            carry2 += s2 < s ? 1U : 0U;
+            const std::uint32_t s3 = s2 + carried;
+            carry2 += s3 < s2 ? 1U : 0U;
+
+            const std::uint32_t sum = aw + s3;
+            const std::uint32_t carry_a = sum < aw ? 1U : 0U;
+            na_word = sum;
+            packed_hi_carries = carry2 | (carry_a << 2U);
+        } else if (lane == 3U) {
+            na_word = aw + word1 + carried;
+        }
+
+        // Lane 1 finishes the high word of the high 64-bit half. Pack carry2
+        // and carry_a together so only one subgroup shuffle is required.
+        const std::uint32_t hi_carries =
+            __shfl_sync(mask, packed_hi_carries, base);
+        if (lane == 1U) {
+            const std::uint32_t word3 =
+                product_hi + (hi_carries & 3U);
+            na_word = aw + word3 + ((hi_carries >> 2U) & 1U);
+        }
+
+        std::uint32_t store_word = na_word;
+        if (lane == 2U) store_word ^= tweak_lo;
+        if (lane == 3U) store_word ^= tweak_hi;
+        reinterpret_cast<std::uint32_t*>(slot2)[lane] = store_word;
+
+        aw = na_word ^ t_word;
+        bw = cw;
+    }
+}
+
 
 } // anonymous namespace
