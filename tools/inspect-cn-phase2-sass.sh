@@ -34,6 +34,7 @@ if cuobjdump --dump-sass --gpu-architecture "$ARCH" "$BIN" >/dev/null 2>&1; then
     /^[[:space:]]*Function[[:space:]]*:/ {
         keep = ($0 ~ /cryptonight_loop_stage_ttable4_coalesced/ ||
                 $0 ~ /cryptonight_loop_stage_ttable4_mul4/ ||
+                $0 ~ /cryptonight_loop_stage_ttable4_pairload/ ||
                 $0 ~ /cryptonight_loop_stage_ttable4_cg/ ||
                 $0 ~ /cryptonight_loop_stage_ttable2_tile64/)
     }
@@ -45,6 +46,7 @@ else
     /^[[:space:]]*Function[[:space:]]*:/ {
         keep = ($0 ~ /cryptonight_loop_stage_ttable4_coalesced/ ||
                 $0 ~ /cryptonight_loop_stage_ttable4_mul4/ ||
+                $0 ~ /cryptonight_loop_stage_ttable4_pairload/ ||
                 $0 ~ /cryptonight_loop_stage_ttable4_cg/ ||
                 $0 ~ /cryptonight_loop_stage_ttable2_tile64/)
     }
@@ -79,6 +81,7 @@ for line in sass:
 needles = (
     "cryptonight_loop_stage_ttable4_coalesced",
     "cryptonight_loop_stage_ttable4_mul4",
+    "cryptonight_loop_stage_ttable4_pairload",
     "cryptonight_loop_stage_ttable4_cg",
     "cryptonight_loop_stage_ttable2_tile64",
 )
@@ -97,7 +100,7 @@ out.append("Yerbas CN phase-2 SASS inspection")
 out.append("=" * 72)
 out.append(f"SASS file: {sass_path}")
 out.append(f"Resource file: {res_path}")
-out.append("Requested architecture: ${ARCH}")
+out.append(f"Requested architecture: {Path(sass_path).parent.name.replace('cn-sass-', '')}")
 out.append(f"Matched phase-2 functions: {len(selected)}")
 out.append("")
 
