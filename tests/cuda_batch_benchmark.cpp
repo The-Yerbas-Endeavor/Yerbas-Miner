@@ -202,7 +202,9 @@ int main(int argc, char** argv)
             // selector. A geometry-only retune needs enough real-batch launches
             // to finish the full 3-pass block-size candidate sweep as well.
             const bool geometry_retune = env_enabled("YERBAS_CN_GEOMETRY_RETUNE");
-            const int warmup_scans = force_cn ? (geometry_retune ? 15 : 4) : 1;
+            const int warmup_scans = forced_variant >= 0
+                ? (geometry_retune ? 15 : 4)
+                : 1;
             for (int warmup = 0; warmup < warmup_scans; ++warmup) {
                 const std::uint32_t nonce = static_cast<std::uint32_t>(
                     static_cast<std::uint64_t>(warmup) * actual);
