@@ -518,3 +518,28 @@ If nvprof is not installed, do not install or downgrade a CUDA toolkit blindly.
 First capture the current nvcc version and installed /usr/local CUDA trees so the
 least-invasive compatible profiler package can be chosen.
 
+### Sept. 21 Pascal nvprof kernel discovery
+
+Trace-only nvprof discovery succeeded on GPU0 CN-Fast and revealed the exact
+production phase-2 symbol used by the old profiler. The kernel is the templated
+`cryptonight_loop_stage_ttable4_coalesced<2>` specialization, emitted with a
+long internal mangled/static prefix.
+
+Observed launch resources at batch 3584:
+- grid: 14 blocks;
+- block: 1024 threads;
+- registers: 32/thread;
+- shared memory: 4 KiB;
+- local memory: 0;
+- loop duration in trace: about 2.18-2.40 s per CN-Fast launch under nvprof.
+
+The 14x1024 shape is consistent with 3584 hashes x 4 lanes = 14336 CUDA threads.
+Historical phase-2 geometry sweeps already covered 32..1024 threads and stayed
+within tenths of a percent, so do not reopen block-size tuning solely from this
+trace.
+
+Commit `06ffe72` updates the profiler to run a trace-only discovery for each
+GPU/variant, extract the exact mangled phase-2 kernel symbol, and then use that
+exact symbol for the Pascal metric pass. This replaces the failed substring
+selector.
+
