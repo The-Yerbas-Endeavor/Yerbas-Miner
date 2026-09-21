@@ -158,6 +158,49 @@ elif [[ -n "$NVPROF_BIN" ]]; then
     echo "Pascal/legacy profiler path: nvprof ($NVPROF_BIN)"
 
     for gpu in "${GPUS[@]}"; do
+        query_file="$OUT_DIR/gpu${gpu}-available-metrics.txt"
+        sudo "$NVPROF_BIN" --devices "$gpu" --query-metrics >"$query_file" 2>&1 || true
+        sudo chown "$(id -u):$(id -g)" "$query_file" 2>/dev/null || true
+
+        wanted_metrics=(
+            achieved_occupancy
+            eligible_warps_per_cycle
+            issue_slot_utilization
+            ipc
+            stall_memory_dependency
+            stall_memory_throttle
+            stall_exec_dependency
+            stall_not_selected
+            stall_pipe_busy
+            stall_sync
+            stall_inst_fetch
+            stall_texture
+            stall_constant_memory_dependency
+            gld_efficiency
+            gld_throughput
+            dram_read_throughput
+            dram_utilization
+            l2_read_hit_rate
+            l2_tex_read_hit_rate
+            global_hit_rate
+        )
+        selected_metrics=()
+        for metric in "${wanted_metrics[@]}"; do
+            if grep -Eq "(^|[[:space:]])${metric}([[:space:]:]|$)" "$query_file"; then
+                selected_metrics+=("$metric")
+            fi
+        done
+
+        if [[ "${#selected_metrics[@]}" -eq 0 ]]; then
+            echo "ERROR: no targeted Pascal metrics were reported for GPU $gpu."
+            echo "See: $query_file"
+            continue
+        fi
+
+        metric_csv="$(IFS=,; echo "${selected_metrics[*]}")"
+        echo
+        echo "GPU $gpu metrics: $metric_csv"
+
         for variant in "${VARIANTS[@]}"; do
             base="$OUT_DIR/gpu${gpu}-${variant}"
             (
@@ -168,8 +211,10 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                 unset YERBAS_CUDA_OVERLAP || true
                 unset YERBAS_GPU_AUTOTUNE || true
                 unset YERBAS_GPU_VARIANT_AUTOTUNE || true
-                export YERBAS_CUDA_BENCH_RAW_BATCH=1
-                export YERBAS_BENCH_FORCE_CN_VARIANT="$variant"
+                unset YERBAS_CN_MUL4_EXPERIMENT || true
+                unset YERBAS_CN_PAIRLOAD_EXPERIMENT || true
+                unset YERBAS_CN_2LANE_TTABLE_EXPERIMENT || true
+                unset YERBAS_CN_READONLY_TTABLE_EXPERIMENT || true
 
                 sudo env \
                     "HOME=$HOME" \
@@ -179,8 +224,9 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                     "$NVPROF_BIN" \
                     --profile-api-trace none \
                     --replay-mode kernel \
-                    --kernels "::.*$KERNEL_REGEX.*:13" \
-                    --analysis-metrics \
+                    --devices "$gpu" \
+                    --kernels "$KERNEL_REGEX" \
+                    --metrics "$metric_csv" \
                     --export-profile "$base.nvprof" \
                     --force-overwrite \
                     --log-file "$base-nvprof.log" \
@@ -196,8 +242,15 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                 "$NVPROF_BIN" --csv --import-profile "$base.nvprof" \
                     --log-file "$base-metrics.csv" >/dev/null 2>&1 || true
 
-                echo "Decoded: $base-metrics.txt"
-                echo "Decoded: $base-metrics.csv"
+                if grep -q "No kernels were profiled" "$base-metrics.txt" 2>/dev/null; then
+                    echo "WARNING: kernel-name filter matched zero launches: $KERNEL_REGEX"
+                    echo "See $base-nvprof.log and $base-metrics.txt"
+                else
+                    echo "Decoded: $base-metrics.txt"
+                    echo "Decoded: $base-metrics.csv"
+                    grep -Ei 'stall|occup|eligible|issue|ipc|dram|global|l2|throughput|efficiency' \
+                        "$base-metrics.txt" | head -80 || true
+                fi
             elif [[ -f "$base.nvprof" ]]; then
                 echo "WARNING: profile exists but is empty: $base.nvprof"
             fi
