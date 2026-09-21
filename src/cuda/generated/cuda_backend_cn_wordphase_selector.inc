@@ -25,17 +25,66 @@ constexpr int kCnPhaseBackendSharedKey = 2;
 constexpr int kCnPhaseBackendWord32 = 3;
 static std::array<std::array<int, 6>, kCnWordPhaseMaxDevices> g_cn_word_setup{};
 static std::array<std::array<int, 6>, kCnWordPhaseMaxDevices> g_cn_word_final{};
+static std::array<std::array<int, 6>, kCnWordPhaseMaxDevices> g_cn_setup_threads{};
+static std::array<std::array<int, 6>, kCnWordPhaseMaxDevices> g_cn_final_threads{};
+
+constexpr int kCnPhaseGeometryCacheRevision = 1;
+constexpr int kCnPhaseGeometryPasses = 3;
+constexpr float kCnPhaseGeometryPromotionRatio = 0.99F;
+static constexpr std::array<int, 4> kCnPhaseGeometryCandidates{{32, 64, 96, 128}};
+
+inline int cn_parse_phase_threads_env(const char* name)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return 0;
+    const long parsed = std::strtol(value, nullptr, 10);
+    if (parsed < 32 || parsed > 128 || (parsed % 32) != 0) return 0;
+    return static_cast<int>(parsed);
+}
+
+inline int cn_phase_global_threads_override()
+{
+    return cn_parse_phase_threads_env("YERBAS_CN_PHASE_THREADS");
+}
+
+inline int cn_setup_launch_threads(int device_id, std::uint8_t variant)
+{
+    const int specific = cn_parse_phase_threads_env("YERBAS_CN_SETUP_THREADS");
+    if (specific != 0) return specific;
+    const int global = cn_phase_global_threads_override();
+    if (global != 0) return global;
+    if (device_id >= 0 && device_id < kCnWordPhaseMaxDevices && variant < 6U &&
+        g_cn_setup_threads[device_id][variant] != 0)
+        return g_cn_setup_threads[device_id][variant];
+    return 128;
+}
+
+inline int cn_final_launch_threads(int device_id, std::uint8_t variant)
+{
+    const int specific = cn_parse_phase_threads_env("YERBAS_CN_FINAL_THREADS");
+    if (specific != 0) return specific;
+    const int global = cn_phase_global_threads_override();
+    if (global != 0) return global;
+    if (device_id >= 0 && device_id < kCnWordPhaseMaxDevices && variant < 6U &&
+        g_cn_final_threads[device_id][variant] != 0)
+        return g_cn_final_threads[device_id][variant];
+    return 128;
+}
+
+inline bool cn_phase_geometry_retune_requested()
+{
+    for (const char* name : {"YERBAS_CN_PHASE_RETUNE", "YERBAS_CUDA_RETUNE", "YERBAS_GPU_AUTOTUNE"}) {
+        const char* value = std::getenv(name);
+        if (value != nullptr && *value != '\0' && std::string(value) != "0")
+            return true;
+    }
+    return false;
+}
 
 inline int cn_phase_launch_threads()
 {
-    const char* value = std::getenv("YERBAS_CN_PHASE_THREADS");
-    if (value == nullptr || *value == '\0')
-        return 128;
-
-    const long parsed = std::strtol(value, nullptr, 10);
-    if (parsed < 32 || parsed > 128 || (parsed % 32) != 0)
-        return 128;
-    return static_cast<int>(parsed);
+    const int global = cn_phase_global_threads_override();
+    return global != 0 ? global : 128;
 }
 
 template <std::size_t N>
@@ -53,11 +102,10 @@ inline const char* cn_phase_backend_name(int mode)
 }
 
 template <std::uint8_t VariantIndex>
-void cn_launch_setup_phase(cudaStream_t stream, int mode, std::size_t count,
-                           std::uint8_t* states, std::uint8_t* scratchpads,
-                           cryptonight::SplitContext* contexts)
+void cn_launch_setup_phase_threads(cudaStream_t stream, int mode, int threads, std::size_t count,
+                                   std::uint8_t* states, std::uint8_t* scratchpads,
+                                   cryptonight::SplitContext* contexts)
 {
-    const int threads = cn_phase_launch_threads();
     const std::size_t total = count * 8U;
     const int blocks = static_cast<int>((total + threads - 1U) / threads);
     if (mode == kCnPhaseBackendWord32) {
@@ -74,11 +122,19 @@ void cn_launch_setup_phase(cudaStream_t stream, int mode, std::size_t count,
 }
 
 template <std::uint8_t VariantIndex>
-void cn_launch_final_phase(cudaStream_t stream, int mode, std::size_t count,
+void cn_launch_setup_phase(cudaStream_t stream, int mode, std::size_t count,
                            std::uint8_t* states, std::uint8_t* scratchpads,
                            cryptonight::SplitContext* contexts)
 {
-    const int threads = cn_phase_launch_threads();
+    cn_launch_setup_phase_threads<VariantIndex>(
+        stream, mode, cn_phase_launch_threads(), count, states, scratchpads, contexts);
+}
+
+template <std::uint8_t VariantIndex>
+void cn_launch_final_phase_threads(cudaStream_t stream, int mode, int threads, std::size_t count,
+                                   std::uint8_t* states, std::uint8_t* scratchpads,
+                                   cryptonight::SplitContext* contexts)
+{
     const std::size_t total = count * 8U;
     const int blocks = static_cast<int>((total + threads - 1U) / threads);
     if (mode == kCnPhaseBackendWord32) {
@@ -92,6 +148,15 @@ void cn_launch_final_phase(cudaStream_t stream, int mode, std::size_t count,
             states, count, scratchpads, contexts);
     }
     check_cuda(cudaGetLastError(), "GhostRider CUDA CN final backend launch failed");
+}
+
+template <std::uint8_t VariantIndex>
+void cn_launch_final_phase(cudaStream_t stream, int mode, std::size_t count,
+                           std::uint8_t* states, std::uint8_t* scratchpads,
+                           cryptonight::SplitContext* contexts)
+{
+    cn_launch_final_phase_threads<VariantIndex>(
+        stream, mode, cn_phase_launch_threads(), count, states, scratchpads, contexts);
 }
 
 template <typename Launch>
