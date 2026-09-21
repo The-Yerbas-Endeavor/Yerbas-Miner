@@ -142,8 +142,16 @@ bool load_cn_phase2_selector_cache(int device_id,
     }
 
     if (mode == 453) {
-        cryptonight_loop_stage_ttable4_bank8<VariantIndex><<<blocks, threads, 0, stream>>>(
-            count, scratchpads, contexts);
+        int active_blocks = 0;
+        const cudaError_t rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &active_blocks,
+            cryptonight_loop_stage_ttable4_bank8<VariantIndex>,
+            threads,
+            0);
+        if (rc != cudaSuccess || active_blocks <= 0) {
+            cudaGetLastError();
+            return false;
+        }
     } else if (mode == 222) {
         int active_blocks = 0;
         const cudaError_t rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -238,7 +246,10 @@ void cn_launch_mode(cudaStream_t stream,
         (total_threads + static_cast<std::size_t>(threads) - 1U) /
         static_cast<std::size_t>(threads));
 
-    if (mode == 222) {
+    if (mode == 453) {
+        cryptonight_loop_stage_ttable4_bank8<VariantIndex><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
+    } else if (mode == 222) {
         cryptonight_loop_stage_ttable2_tile64<VariantIndex><<<
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
