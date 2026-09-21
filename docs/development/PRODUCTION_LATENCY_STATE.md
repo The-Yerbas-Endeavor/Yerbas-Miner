@@ -875,3 +875,28 @@ phase-2 kernel variant.
 Commit b82bbc4 extends analyze-production-latency.py to report stale waste by
 batch size and by GPU/batch without changing miner behavior.
 
+### Sept. 21 best-stack runner geometry correction
+
+The first ~69-minute best-stack production snapshot confirmed the CPU combo
+policy and cache-first GPU path, but it also exposed that setup/final phase
+geometry was falling back to 128/128 instead of the previously validated
+32/128 geometry at batch 3584.
+
+Representative startup lines showed CN-Fast setup and final as
+`phase geometry safe default ... threads=128` on both GPUs.
+
+This means the first snapshot is useful for CPU/stale-work analysis but should
+not be treated as the final best-known GPU validation.
+
+Root cause: the best-stack runner selected a cache root primarily to reuse the
+strongest CPU policy cache. That cache root did not contain the validated phase
+geometry entries, and the runner explicitly disabled phase-geometry retuning.
+
+Commit 4d7aa16 changes only the best-stack validation runner:
+- `YERBAS_CN_PHASE_RETUNE=1` is enabled;
+- setup/final geometry retunes once per CN variant on first use;
+- phase-2 kernel selection remains cache-first;
+- all experimental CUDA paths remain disabled.
+
+The next long validation should therefore exercise the actual best-known stack.
+
