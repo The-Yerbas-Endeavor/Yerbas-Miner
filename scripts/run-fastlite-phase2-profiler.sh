@@ -30,7 +30,11 @@ else
     GPUS=(0)
 fi
 
-VARIANTS=(fast lite)
+if [[ -n "${YERBAS_BENCH_VARIANTS:-}" ]]; then
+    read -r -a VARIANTS <<< "$YERBAS_BENCH_VARIANTS"
+else
+    VARIANTS=(fast lite)
+fi
 KERNEL_REGEX="cryptonight_loop_stage_ttable4_coalesced"
 
 echo "============================================================"
