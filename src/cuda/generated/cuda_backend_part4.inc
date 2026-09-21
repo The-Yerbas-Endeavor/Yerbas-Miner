@@ -91,6 +91,11 @@ void BatchEngine::set_active_batch_size(std::size_t batch_size)
     impl_->batch_size = batch_size;
 }
 
+void BatchEngine::set_stale_batch_cap(std::size_t batch_size)
+{
+    impl_->stale_batch_cap = batch_size;
+}
+
 int BatchEngine::device_id() const noexcept { return impl_->device_id; }
 std::size_t BatchEngine::batch_size() const noexcept { return impl_->batch_size; }
 std::size_t BatchEngine::batch_capacity() const noexcept { return impl_->batch_capacity; }
