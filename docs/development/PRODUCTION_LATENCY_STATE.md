@@ -424,3 +424,74 @@ Both GPUs must be tested. Retuning remains OFF for this first structural matrix.
 If stage-local batching produces a repeatable cross-GPU/cross-triple gain, only
 then tune the winning outer/chunk combination and consider a production policy.
 
+### Sept. 21 full Fast+Lite stage-local matrix result
+
+The full dual-GPU/four-triple matrix confirms the earlier single-case result and
+closes the stage-local batching direction.
+
+Test conditions:
+- GPUs: 0 and 1 (GTX 1080 Ti);
+- CN chunk: 3584;
+- outer sizes: 3584, 4480, 5376, 6272, 7168;
+- retuning OFF;
+- diagnostics OFF;
+- target triples:
+  Dark/Fast/Lite,
+  DarkLite/Fast/Lite,
+  Fast/Lite/Turtle,
+  Fast/Lite/TurtleLite.
+
+Across all eight GPU/triple combinations, the ordinary 3584 common batch
+remained the winner. Stage-local 3584 reproduced baseline within noise
+(average delta about -0.016%). Every larger outer batch was slower on every
+GPU/triple combination.
+
+Average delta versus each section's normal 3584 baseline:
+- outer 4480: about -0.286%;
+- outer 5376: about -0.437%;
+- outer 6272: about -0.418%;
+- outer 7168: about -0.207%.
+
+The conventional 15 GhostRider stages account for only about 0.033-0.037% of
+the measured pipeline time in these Fast+Lite rotations. Roughly 99.96% of the
+time remains in the three CryptoNight stages, so increasing the outer count
+cannot create a meaningful whole-pipeline gain. Tail CN chunks also introduce
+exact-batch selector/geometry state changes at non-3584 counts.
+
+Conclusion: KILL stage-local/outer-batch tuning as a performance direction.
+Keep the code path diagnostic-only. Do not productionize it.
+
+### Next GPU action: profiler evidence on Fast/Lite phase-2 stalls
+
+The remaining high-ceiling target is still the shared Fast/Lite phase-2 random
+memory dependency chain. Previous SASS work suggests dependent global-load
+latency / warp head-of-line blocking, but we now require runtime profiler
+evidence before designing another kernel.
+
+Runner added:
+
+`scripts/run-fastlite-phase2-profiler.sh`
+
+It profiles the production
+`cryptonight_loop_stage_ttable4_coalesced` kernel at batch 3584 for CN-Fast
+and CN-Lite on both GPUs, with all experimental kernels and retune controls off.
+The preferred path uses Nsight Compute sections:
+- SpeedOfLight;
+- SchedulerStats;
+- WarpStateStats;
+- MemoryWorkloadAnalysis;
+- Occupancy.
+
+If Nsight Compute is unavailable, the runner attempts an nvprof analysis-metric
+fallback.
+
+Metrics needed before a new kernel experiment:
+- long-scoreboard / memory-dependency stalls;
+- eligible warps per scheduler;
+- achieved vs theoretical occupancy;
+- L1/L2 behavior and DRAM traffic;
+- issue-slot utilization.
+
+Do not write another mul4/pairload/two-lane/read-only variant until this profiler
+pass identifies the dominant runtime stall.
+
