@@ -36,6 +36,7 @@ struct BatchEngine::Impl {
     bool benchmark_stage_local{false};
     std::size_t benchmark_requested_batch{0};
     std::size_t benchmark_cn_chunk{0};
+    std::size_t stale_batch_cap{0};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -54,6 +55,24 @@ struct BatchEngine::Impl {
 
         benchmark_requested_batch = requested_size;
         benchmark_cn_chunk = requested_size;
+
+        // Experimental production-only stale-work cap. A global cap can be
+        // supplied with YERBAS_GPU_STALE_BATCH_CAP, and an individual device
+        // can override it with YERBAS_GPU_STALE_BATCH_CAP_<device-id>.
+        // Zero/unset means uncapped. Benchmark modes intentionally ignore it.
+        auto parse_batch_cap = [](const char* value) -> std::size_t {
+            if (value == nullptr || *value == '\0') return 0U;
+            char* end = nullptr;
+            const unsigned long long parsed = std::strtoull(value, &end, 10);
+            if (end == value || *end != '\0') return 0U;
+            return static_cast<std::size_t>(parsed);
+        };
+        stale_batch_cap = parse_batch_cap(std::getenv("YERBAS_GPU_STALE_BATCH_CAP"));
+        const std::string device_cap_name =
+            std::string("YERBAS_GPU_STALE_BATCH_CAP_") + std::to_string(device_id);
+        if (const char* device_value = std::getenv(device_cap_name.c_str());
+            device_value != nullptr && *device_value != '\0')
+            stale_batch_cap = parse_batch_cap(device_value);
         if (benchmark_stage_local) {
             const char* chunk_env = std::getenv("YERBAS_CUDA_BENCH_CN_CHUNK");
             if (chunk_env != nullptr && *chunk_env != '\0') {
@@ -275,6 +294,25 @@ void BatchEngine::upload_job(const JobDescriptor& job)
         if (impl_->benchmark_raw_batch) {
             adaptive_batch = std::min(
                 impl_->benchmark_requested_batch, memory_safe_batch);
+        }
+    }
+
+    if (!impl_->benchmark_raw_batch && !impl_->benchmark_stage_local &&
+        impl_->stale_batch_cap > 0U) {
+        std::size_t cap = std::min(
+            impl_->stale_batch_cap,
+            std::min(impl_->batch_capacity, memory_safe_batch));
+        if (cap >= impl_->batch_quantum)
+            cap = (cap / impl_->batch_quantum) * impl_->batch_quantum;
+        cap = std::max<std::size_t>(1U, cap);
+
+        if (adaptive_batch > cap) {
+            std::cout << "[GPU " << impl_->device_id << "] stale-aware batch cap"
+                      << " | tuned=" << adaptive_batch
+                      << " -> capped=" << cap
+                      << " | requested-cap=" << impl_->stale_batch_cap
+                      << " | quantum=" << impl_->batch_quantum << '\n';
+            adaptive_batch = cap;
         }
     }
 
