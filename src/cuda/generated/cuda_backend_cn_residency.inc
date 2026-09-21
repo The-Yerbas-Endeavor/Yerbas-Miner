@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr int kCnPhase2SelectorCacheRevision = 12;
+constexpr int kCnPhase2SelectorCacheRevision = 13;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_mode{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_residency_threads{};
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_ttable4_parity{};
