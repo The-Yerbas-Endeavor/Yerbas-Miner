@@ -160,6 +160,7 @@ if [[ "$PASCAL_SELECTED" -eq 0 ]] && command -v ncu >/dev/null 2>&1; then
 elif [[ -n "$NVPROF_BIN" ]]; then
     echo
     echo "Pascal/legacy profiler path: nvprof ($NVPROF_BIN)"
+    echo "Pascal mode: unfiltered metric collection with zero benchmark warmups"
 
     for gpu in "${GPUS[@]}"; do
         query_file="$OUT_DIR/gpu${gpu}-available-metrics.txt"
@@ -174,13 +175,9 @@ elif [[ -n "$NVPROF_BIN" ]]; then
             stall_memory_dependency
             stall_memory_throttle
             stall_exec_dependency
-            stall_not_selected
             gld_efficiency
-            gld_throughput
-            dram_read_throughput
             dram_utilization
             l2_tex_read_hit_rate
-            global_hit_rate
         )
         selected_metrics=()
         for metric in "${wanted_metrics[@]}"; do
@@ -201,32 +198,8 @@ elif [[ -n "$NVPROF_BIN" ]]; then
 
         for variant in "${VARIANTS[@]}"; do
             base="$OUT_DIR/gpu${gpu}-${variant}"
-            discovery="$base-discovery.log"
-
             echo
-            echo "Discovering exact phase-2 kernel symbol for GPU $gpu CN-$variant..."
-
-            sudo env \
-                "HOME=$HOME" \
-                "XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}" \
-                "YERBAS_CUDA_BENCH_RAW_BATCH=1" \
-                "YERBAS_BENCH_FORCE_CN_VARIANT=$variant" \
-                "$NVPROF_BIN" \
-                --devices "$gpu" \
-                --profile-api-trace none \
-                --print-gpu-trace \
-                --log-file "$discovery" \
-                "$BIN" "$gpu" 3584 >/dev/null
-
-            sudo chown "$(id -u):$(id -g)" "$discovery" 2>/dev/null || true
-
-            kernel_symbol="$(grep -m1 'cryptonight_loop_stage_ttable4_coalesced' "$discovery" | awk '{print $(NF-1)}')"
-            if [[ -z "$kernel_symbol" ]]; then
-                echo "ERROR: phase-2 kernel symbol was not found in $discovery"
-                continue
-            fi
-
-            echo "Exact kernel: $kernel_symbol"
+            echo "Profiling GPU $gpu CN-$variant with no kernel filter..."
 
             (
                 unset YERBAS_CN_PHASE_RETUNE || true
@@ -246,11 +219,11 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                     "XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}" \
                     "YERBAS_CUDA_BENCH_RAW_BATCH=1" \
                     "YERBAS_BENCH_FORCE_CN_VARIANT=$variant" \
+                    "YERBAS_BENCH_WARMUP_SCANS=0" \
                     "$NVPROF_BIN" \
                     --profile-api-trace none \
                     --replay-mode kernel \
                     --devices "$gpu" \
-                    --kernels "$kernel_symbol" \
                     --metrics "$metric_csv" \
                     --export-profile "$base.nvprof" \
                     --force-overwrite \
@@ -268,13 +241,14 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                     --log-file "$base-metrics.csv" >/dev/null 2>&1 || true
 
                 if grep -q "No kernels were profiled" "$base-metrics.txt" 2>/dev/null; then
-                    echo "WARNING: exact kernel symbol still matched zero launches."
-                    echo "See $base-discovery.log and $base-nvprof.log"
+                    echo "ERROR: unfiltered nvprof still captured zero kernels."
                 else
                     echo "Decoded: $base-metrics.txt"
                     echo "Decoded: $base-metrics.csv"
-                    grep -Ei 'stall|occup|eligible|issue|ipc|dram|global|l2|throughput|efficiency' \
-                        "$base-metrics.txt" | head -100 || true
+                    echo
+                    echo "Phase-2 metric rows:"
+                    grep -A80 -B4 'cryptonight_loop_stage_ttable4_coalesced' \
+                        "$base-metrics.txt" | head -140 || true
                 fi
             elif [[ -f "$base.nvprof" ]]; then
                 echo "WARNING: profile exists but is empty: $base.nvprof"
