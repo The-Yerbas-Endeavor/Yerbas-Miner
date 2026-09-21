@@ -64,6 +64,8 @@ def main() -> int:
 
     by_gpu: dict[int, Agg] = defaultdict(Agg)
     by_cn: dict[str, Agg] = defaultdict(Agg)
+    by_batch: dict[int, Agg] = defaultdict(Agg)
+    by_gpu_batch: dict[tuple[int, int], Agg] = defaultdict(Agg)
     job_lifetimes_ms: list[float] = []
     clean_jobs = 0
     batches = 0
@@ -82,6 +84,8 @@ def main() -> int:
                 cn = "/".join(sorted(m["cn"].split("/")))
                 by_gpu[gpu].add(hashes, queue_ms, scan_ms, wall_ms, stale)
                 by_cn[cn].add(hashes, queue_ms, scan_ms, wall_ms, stale)
+                by_batch[hashes].add(hashes, queue_ms, scan_ms, wall_ms, stale)
+                by_gpu_batch[(gpu, hashes)].add(hashes, queue_ms, scan_ms, wall_ms, stale)
                 batches += 1
                 continue
 
@@ -146,7 +150,7 @@ def main() -> int:
               f"stale_hashes={pct(agg.stale_hashes, agg.hashes):6.2f}% "
               f"avg_scan={agg.scan_ms/max(1,agg.batches):8.2f}ms "
               f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")
-    return 0
+    print()\n    print("Per batch size:")\n    total_stale_hashes = max(1, total.stale_hashes)\n    for hashes, agg in sorted(by_batch.items()):\n        print(f"  batch={hashes:6d} batches={agg.batches:5d} stale={agg.stale_batches:4d} "\n              f"stale_hashes={agg.stale_hashes:8d} "\n              f"share_of_all_stale={pct(agg.stale_hashes, total_stale_hashes):6.2f}% "\n              f"avg_scan={agg.scan_ms/max(1,agg.batches):8.2f}ms "\n              f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")\n    print()\n    print("Per GPU / batch size (stale only):")\n    for (gpu, hashes), agg in sorted(by_gpu_batch.items()):\n        if not agg.stale_batches:\n            continue\n        print(f"  GPU {gpu} batch={hashes:6d} stale={agg.stale_batches:4d} "\n              f"stale_hashes={agg.stale_hashes:8d} "\n              f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")\n    return 0
 
 
 if __name__ == "__main__":
