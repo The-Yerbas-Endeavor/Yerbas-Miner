@@ -298,12 +298,17 @@ bool load_cn_phase_geometry_cache(int device_id,
         return false;
 
     threads = cached_threads;
+    const int effective_threads =
+        std::string(phase) == "setup"
+            ? cn_setup_launch_threads(device_id, VariantIndex)
+            : cn_final_launch_threads(device_id, VariantIndex);
     std::cout << "[GPU " << device_id
               << "] CryptoNight phase geometry cache loaded | "
               << cryptonight::config_value(VariantIndex).name
               << " | phase=" << phase
               << " | batch=" << count
-              << " | threads=" << threads
+              << " | cached-threads=" << threads
+              << " | effective-threads=" << effective_threads
               << " | startup-benchmark=off\n";
     return true;
 }
