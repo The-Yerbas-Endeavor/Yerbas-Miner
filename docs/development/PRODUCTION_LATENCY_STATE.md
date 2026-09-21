@@ -335,3 +335,92 @@ matched production closely. The policy is valid but not the >=100 H/s answer.
 Optimize useful accepted-work throughput, not impressive isolated benchmark
 numbers. Any future candidate must survive whole-miner validation and ultimately
 pool-side accepted-difficulty comparison.
+
+## Sept. 20-21 overnight production validation
+
+The clean post-geometry production run completed essentially 14 hours with
+normal cache-first GPU tuning and no profiling/retune tournament.
+
+Final status at 13h 59m 19s:
+
+- cumulative miner AVG: ~1.81 kH/s;
+- ending instantaneous total: ~2.15 kH/s;
+- CPU instantaneous: ~459.66 H/s;
+- GPU0 instantaneous: ~849.89 H/s;
+- GPU1 instantaneous: ~838.24 H/s;
+- accepted: 9029;
+- rejected: 5;
+- blocks: 13;
+- share acceptance: 99.9%.
+
+The prior long-run production reference is ~1.92 kH/s, so this session finished
+roughly 110 H/s / 5.7% below that reference. The last instantaneous 2.15 kH/s
+must not be used as the comparison number; the cumulative AVG had already
+settled around 1.81-1.82 kH/s by the end of the overnight window.
+
+Stability was good. The observed rejects were stale-job responses at Stratum
+job transitions, not invalid hashes or CUDA failures. No CUDA crash/OOM/illegal
+access or unintended CPU fallback was observed.
+
+The 3584-batch phase-geometry cache loaded correctly on both GPUs at
+setup=32/final=128 with startup benchmarking off. However, live larger batches
+for variants such as CN-Lite still use exact-batch selector/geometry state and
+can therefore fall back to safe 128-thread setup/final behavior when no cache
+exists for that count. Do not interpret the 3584 geometry rollout as a
+whole-batch-space rollout.
+
+### Main production bottleneck discovered
+
+Completed-rotation telemetry shows the high-ceiling target is the pair
+CN-Fast + CN-Lite, not another setup/final micro-tweak.
+
+Across the overnight run:
+
+- rotations containing both Fast and Lite occupied ~6.90h and averaged
+  ~1.449 kH/s;
+- Fast without Lite occupied ~4.36h and averaged ~1.901 kH/s;
+- Lite without Fast occupied ~1.96h and averaged ~1.914 kH/s;
+- rotations containing neither occupied ~0.74h and averaged ~2.950 kH/s.
+
+Therefore roughly half of production time was spent in the weakest class.
+
+The current production policy uses one common nonce count for all 18 GhostRider
+stages. When a rotation contains Fast, the per-variant policy can select 3584 as
+the minimum preferred batch and therefore pin the whole rotation to that count,
+even though other stages/variants can sustain larger batches.
+
+### Next campaign: stage-local batch structure
+
+Do not change the production selector yet.
+
+First use the already-existing diagnostic stage-local path to test a structural
+alternative:
+
+- keep the known-safe CN scratchpad chunk at 3584;
+- increase the outer GhostRider batch;
+- let memory-heavy CN stages execute in bounded chunks inside the existing
+  scratchpad budget;
+- allow the 15 conventional stages to process the larger outer count.
+
+This is materially different from simply forcing a larger common batch and it
+avoids requiring >11 GiB scratchpad allocation for heavy-CN rotations.
+
+Runner added on the active branch:
+
+`scripts/run-fastlite-stage-local-matrix.sh`
+
+First-pass outer candidates:
+
+`3584 4480 5376 6272 7168`
+
+Target triples:
+
+- Dark/Fast/Lite
+- DarkLite/Fast/Lite
+- Fast/Lite/Turtle
+- Fast/Lite/TurtleLite
+
+Both GPUs must be tested. Retuning remains OFF for this first structural matrix.
+If stage-local batching produces a repeatable cross-GPU/cross-triple gain, only
+then tune the winning outer/chunk combination and consider a production policy.
+
