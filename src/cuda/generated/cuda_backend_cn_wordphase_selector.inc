@@ -253,6 +253,310 @@ void save_cn_phase_backend_cache(int device_id,
     } catch (...) {}
 }
 
+
+template <std::uint8_t VariantIndex>
+std::filesystem::path cn_phase_geometry_cache_path(int device_id,
+                                                   const cudaDeviceProp& props,
+                                                   std::size_t count,
+                                                   const char* phase)
+{
+    int driver = 0, runtime = 0;
+    if (cudaDriverGetVersion(&driver) != cudaSuccess ||
+        cudaRuntimeGetVersion(&runtime) != cudaSuccess) {
+        cudaGetLastError();
+        return {};
+    }
+    const std::string key = cn_cache_key(device_id, props, count, driver, runtime);
+    return cn_cache_directory() /
+        ("cn-phase-geometry-rev" + std::to_string(kCnPhaseGeometryCacheRevision) +
+         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) +
+         '-' + phase + '-' + key + ".txt");
+}
+
+template <std::uint8_t VariantIndex>
+bool load_cn_phase_geometry_cache(int device_id,
+                                  const cudaDeviceProp& props,
+                                  std::size_t count,
+                                  const char* phase,
+                                  int& threads)
+{
+    if (cn_phase_geometry_retune_requested()) return false;
+    const auto path = cn_phase_geometry_cache_path<VariantIndex>(
+        device_id, props, count, phase);
+    if (path.empty()) return false;
+
+    std::ifstream in(path);
+    std::string magic, cached_phase;
+    int revision = 0, variant = -1, cached_threads = 0;
+    if (!(in >> magic >> revision >> variant >> cached_phase >> cached_threads) ||
+        magic != "YERBAS_CN_PHASE_GEOMETRY" ||
+        revision != kCnPhaseGeometryCacheRevision ||
+        variant != static_cast<int>(VariantIndex) ||
+        cached_phase != phase ||
+        cached_threads < 32 || cached_threads > 128 ||
+        (cached_threads % 32) != 0)
+        return false;
+
+    threads = cached_threads;
+    std::cout << "[GPU " << device_id
+              << "] CryptoNight phase geometry cache loaded | "
+              << cryptonight::config_value(VariantIndex).name
+              << " | phase=" << phase
+              << " | batch=" << count
+              << " | threads=" << threads
+              << " | startup-benchmark=off\n";
+    return true;
+}
+
+template <std::uint8_t VariantIndex>
+void save_cn_phase_geometry_cache(int device_id,
+                                  const cudaDeviceProp& props,
+                                  std::size_t count,
+                                  const char* phase,
+                                  int threads)
+{
+    try {
+        const auto path = cn_phase_geometry_cache_path<VariantIndex>(
+            device_id, props, count, phase);
+        if (path.empty()) return;
+        std::filesystem::create_directories(path.parent_path());
+        const auto temp = path.string() + ".tmp";
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out) return;
+        out << "YERBAS_CN_PHASE_GEOMETRY "
+            << kCnPhaseGeometryCacheRevision << ' '
+            << static_cast<int>(VariantIndex) << ' '
+            << phase << ' ' << threads << '\n';
+        out.close();
+        if (!out) return;
+
+        std::error_code ec;
+        std::filesystem::rename(temp, path, ec);
+        if (ec) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+            std::filesystem::rename(temp, path, ec);
+        }
+    } catch (...) {}
+}
+
+template <std::uint8_t VariantIndex>
+void ensure_cn_setup_geometry(cudaStream_t stream,
+                              int device_id,
+                              std::size_t count,
+                              int mode,
+                              std::uint8_t* states,
+                              std::uint8_t* scratchpads,
+                              cryptonight::SplitContext* contexts)
+{
+    if (device_id < 0 || device_id >= kCnWordPhaseMaxDevices) return;
+    int& selected = g_cn_setup_threads[device_id][VariantIndex];
+    if (selected != 0) return;
+
+    cudaDeviceProp props{};
+    check_cuda(cudaGetDeviceProperties(&props, device_id),
+               "cudaGetDeviceProperties setup geometry failed");
+
+    if (load_cn_phase_geometry_cache<VariantIndex>(
+            device_id, props, count, "setup", selected))
+        return;
+
+    if (!cn_phase_geometry_retune_requested()) {
+        selected = 128;
+        std::cout << "[GPU " << device_id
+                  << "] CryptoNight phase geometry safe default | "
+                  << cryptonight::config_value(VariantIndex).name
+                  << " | phase=setup | batch=" << count
+                  << " | threads=128 | startup-benchmark=off\n";
+        return;
+    }
+
+    std::uint8_t* saved_states = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&saved_states),
+                          count * kStateBytes),
+               "cudaMalloc setup geometry saved states failed");
+    check_cuda(cudaMemcpyAsync(saved_states, states, count * kStateBytes,
+                               cudaMemcpyDeviceToDevice, stream),
+               "cudaMemcpy setup geometry save states failed");
+    check_cuda(cudaStreamSynchronize(stream),
+               "cudaStreamSynchronize setup geometry save failed");
+
+    auto reset = [&]() {
+        check_cuda(cudaMemcpyAsync(states, saved_states, count * kStateBytes,
+                                   cudaMemcpyDeviceToDevice, stream),
+                   "cudaMemcpy setup geometry restore states failed");
+    };
+    auto timed = [&](int threads) {
+        reset();
+        return cn_wordphase_time(stream, [&]() {
+            cn_launch_setup_phase_threads<VariantIndex>(
+                stream, mode, threads, count, states, scratchpads, contexts);
+        });
+    };
+
+    for (const int threads : kCnPhaseGeometryCandidates)
+        (void)timed(threads);
+
+    std::array<std::array<float, kCnPhaseGeometryPasses>, 4> times{};
+    for (int pass = 0; pass < kCnPhaseGeometryPasses; ++pass) {
+        if ((pass & 1) == 0) {
+            for (std::size_t i = 0; i < kCnPhaseGeometryCandidates.size(); ++i)
+                times[i][pass] = timed(kCnPhaseGeometryCandidates[i]);
+        } else {
+            for (std::size_t n = kCnPhaseGeometryCandidates.size(); n-- > 0;)
+                times[n][pass] = timed(kCnPhaseGeometryCandidates[n]);
+        }
+    }
+
+    std::array<float, 4> medians{};
+    for (std::size_t i = 0; i < medians.size(); ++i)
+        medians[i] = cn_wordphase_median(times[i]);
+
+    selected = 128;
+    float best_ms = medians[3];
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (medians[i] < medians[3] * kCnPhaseGeometryPromotionRatio &&
+            medians[i] < best_ms) {
+            best_ms = medians[i];
+            selected = kCnPhaseGeometryCandidates[i];
+        }
+    }
+
+    save_cn_phase_geometry_cache<VariantIndex>(
+        device_id, props, count, "setup", selected);
+    reset();
+    check_cuda(cudaStreamSynchronize(stream),
+               "cudaStreamSynchronize setup geometry production reset failed");
+    cudaFree(saved_states);
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "[CUDA CN phase geometry] GPU " << device_id
+              << " | " << cryptonight::config_value(VariantIndex).name
+              << " | phase=setup | batch=" << count
+              << " | 32=" << medians[0] << " ms"
+              << " | 64=" << medians[1] << " ms"
+              << " | 96=" << medians[2] << " ms"
+              << " | 128=" << medians[3] << " ms"
+              << " | threshold=1%"
+              << " | production=" << selected
+              << std::defaultfloat << '\n';
+}
+
+template <std::uint8_t VariantIndex>
+void ensure_cn_final_geometry(cudaStream_t stream,
+                              int device_id,
+                              std::size_t count,
+                              int mode,
+                              std::uint8_t* states,
+                              std::uint8_t* scratchpads,
+                              cryptonight::SplitContext* contexts)
+{
+    if (device_id < 0 || device_id >= kCnWordPhaseMaxDevices) return;
+    int& selected = g_cn_final_threads[device_id][VariantIndex];
+    if (selected != 0) return;
+
+    cudaDeviceProp props{};
+    check_cuda(cudaGetDeviceProperties(&props, device_id),
+               "cudaGetDeviceProperties final geometry failed");
+
+    if (load_cn_phase_geometry_cache<VariantIndex>(
+            device_id, props, count, "final", selected))
+        return;
+
+    if (!cn_phase_geometry_retune_requested()) {
+        selected = 128;
+        std::cout << "[GPU " << device_id
+                  << "] CryptoNight phase geometry safe default | "
+                  << cryptonight::config_value(VariantIndex).name
+                  << " | phase=final | batch=" << count
+                  << " | threads=128 | startup-benchmark=off\n";
+        return;
+    }
+
+    std::uint8_t* saved_states = nullptr;
+    cryptonight::SplitContext* saved_contexts = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&saved_states),
+                          count * kStateBytes),
+               "cudaMalloc final geometry saved states failed");
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&saved_contexts),
+                          count * sizeof(*saved_contexts)),
+               "cudaMalloc final geometry saved contexts failed");
+    check_cuda(cudaMemcpyAsync(saved_states, states, count * kStateBytes,
+                               cudaMemcpyDeviceToDevice, stream),
+               "cudaMemcpy final geometry save states failed");
+    check_cuda(cudaMemcpyAsync(saved_contexts, contexts,
+                               count * sizeof(*saved_contexts),
+                               cudaMemcpyDeviceToDevice, stream),
+               "cudaMemcpy final geometry save contexts failed");
+    check_cuda(cudaStreamSynchronize(stream),
+               "cudaStreamSynchronize final geometry save failed");
+
+    auto reset = [&]() {
+        check_cuda(cudaMemcpyAsync(states, saved_states, count * kStateBytes,
+                                   cudaMemcpyDeviceToDevice, stream),
+                   "cudaMemcpy final geometry restore states failed");
+        check_cuda(cudaMemcpyAsync(contexts, saved_contexts,
+                                   count * sizeof(*saved_contexts),
+                                   cudaMemcpyDeviceToDevice, stream),
+                   "cudaMemcpy final geometry restore contexts failed");
+    };
+    auto timed = [&](int threads) {
+        reset();
+        return cn_wordphase_time(stream, [&]() {
+            cn_launch_final_phase_threads<VariantIndex>(
+                stream, mode, threads, count, states, scratchpads, contexts);
+        });
+    };
+
+    for (const int threads : kCnPhaseGeometryCandidates)
+        (void)timed(threads);
+
+    std::array<std::array<float, kCnPhaseGeometryPasses>, 4> times{};
+    for (int pass = 0; pass < kCnPhaseGeometryPasses; ++pass) {
+        if ((pass & 1) == 0) {
+            for (std::size_t i = 0; i < kCnPhaseGeometryCandidates.size(); ++i)
+                times[i][pass] = timed(kCnPhaseGeometryCandidates[i]);
+        } else {
+            for (std::size_t n = kCnPhaseGeometryCandidates.size(); n-- > 0;)
+                times[n][pass] = timed(kCnPhaseGeometryCandidates[n]);
+        }
+    }
+
+    std::array<float, 4> medians{};
+    for (std::size_t i = 0; i < medians.size(); ++i)
+        medians[i] = cn_wordphase_median(times[i]);
+
+    selected = 128;
+    float best_ms = medians[3];
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (medians[i] < medians[3] * kCnPhaseGeometryPromotionRatio &&
+            medians[i] < best_ms) {
+            best_ms = medians[i];
+            selected = kCnPhaseGeometryCandidates[i];
+        }
+    }
+
+    save_cn_phase_geometry_cache<VariantIndex>(
+        device_id, props, count, "final", selected);
+    reset();
+    check_cuda(cudaStreamSynchronize(stream),
+               "cudaStreamSynchronize final geometry production reset failed");
+    cudaFree(saved_contexts);
+    cudaFree(saved_states);
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "[CUDA CN phase geometry] GPU " << device_id
+              << " | " << cryptonight::config_value(VariantIndex).name
+              << " | phase=final | batch=" << count
+              << " | 32=" << medians[0] << " ms"
+              << " | 64=" << medians[1] << " ms"
+              << " | 96=" << medians[2] << " ms"
+              << " | 128=" << medians[3] << " ms"
+              << " | threshold=1%"
+              << " | production=" << selected
+              << std::defaultfloat << '\n';
+}
+
 template <std::uint8_t VariantIndex>
 bool cn_validate_setup_backend(cudaStream_t stream,
                                int candidate_mode,
