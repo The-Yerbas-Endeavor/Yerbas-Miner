@@ -830,3 +830,48 @@ Recommended next validation window: 6-12 hours.
 Relevant commits:
 - ee1b0ed: add best-known-stack production validation runner.
 
+### Sept. 21 best-known-stack production snapshot (~69 min)
+
+A live production snapshot with the proven CPU combo policy enabled and all CUDA
+experiments disabled ran from about 14:08 to 15:18 local time.
+
+Startup confirmation:
+- CPU combo policy loaded: 6 rules, experimental=yes;
+- cached CPU policy: 6 workers, batch 16, widths 1/4/1/2/4/1, ~432.70 H/s;
+- GPU tuning: auto/cache-first;
+- both GTX 1080 Ti cards active with native CUDA GhostRider coverage.
+
+Observed completed-rotation totals across 26 completed rotations (~68.93 min):
+- weighted whole-miner throughput: ~1904.8 H/s;
+- weighted CPU contribution: ~434.9 H/s;
+- weighted GPU contribution: ~1469.9 H/s.
+
+Dashboard cumulative AVG reached ~2.06 kH/s mid-run and was ~1.96 kH/s near
+the end of the uploaded snapshot. This is encouraging versus the earlier long
+run, but the snapshot is too short and rotation-mix-sensitive to declare a new
+sustained production baseline. Keep the current run unchanged for 6-12 hours.
+
+Correctness/stability in the snapshot:
+- no CUDA errors, OOM, illegal access, assertion, or CPU fallback;
+- zero pool share rejections;
+- one block found;
+- stale candidates were suppressed locally as designed.
+
+New dominant optimization signal:
+- GPU0 stale hashes ~5.1%;
+- GPU1 stale hashes ~5.4%;
+- stale work is now materially larger than any surviving phase-2 micro-kernel
+  delta.
+
+Approximate stale-hash composition in the snapshot:
+- 3584-hash scans: about half of stale hashes;
+- 5376-hash scans: about one third;
+- rare large 11648/17920 scans contribute a disproportionate remainder.
+
+The next engineering target, if the 6-12h run preserves >4% stale device work,
+should be job-change-aware batch sizing / stale-cost control rather than another
+phase-2 kernel variant.
+
+Commit b82bbc4 extends analyze-production-latency.py to report stale waste by
+batch size and by GPU/batch without changing miner behavior.
+
