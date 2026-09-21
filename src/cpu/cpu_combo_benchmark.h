@@ -128,6 +128,16 @@ inline std::uint64_t splitmix64(std::uint64_t& state)
     return z ^ (z >> 31U);
 }
 
+inline unsigned int popcount32(std::uint32_t value)
+{
+    unsigned int count = 0U;
+    while (value != 0U) {
+        value &= value - 1U;
+        ++count;
+    }
+    return count;
+}
+
 using Header = std::array<std::uint8_t, 80>;
 using HeaderSet = std::array<Header, kHeadersPerCombination>;
 
@@ -150,7 +160,7 @@ inline std::map<std::uint32_t, HeaderSet> discover_headers()
         const ghostrider::Work work{header.data(), header.size()};
         const auto schedule = ghostrider::stage_schedule_quiet(work);
         const std::uint32_t mask = combo_mask(schedule);
-        if (__builtin_popcount(mask) != 3) continue;
+        if (popcount32(mask) != 3U) continue;
 
         auto& bucket = found[mask];
         if (bucket.size() < kHeadersPerCombination) bucket.push_back(header);
