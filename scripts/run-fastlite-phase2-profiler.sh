@@ -187,9 +187,19 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                     "$BIN" "$gpu" 3584
             ) 2>&1 | tee "$base-console.log" || true
 
-            if [[ -f "$base.nvprof" ]]; then
+            if [[ -s "$base.nvprof" ]]; then
                 sudo chown "$(id -u):$(id -g)" "$base.nvprof" 2>/dev/null || true
                 echo "Saved: $base.nvprof"
+
+                "$NVPROF_BIN" --import-profile "$base.nvprof" \
+                    --log-file "$base-metrics.txt" >/dev/null 2>&1 || true
+                "$NVPROF_BIN" --csv --import-profile "$base.nvprof" \
+                    --log-file "$base-metrics.csv" >/dev/null 2>&1 || true
+
+                echo "Decoded: $base-metrics.txt"
+                echo "Decoded: $base-metrics.csv"
+            elif [[ -f "$base.nvprof" ]]; then
+                echo "WARNING: profile exists but is empty: $base.nvprof"
             fi
         done
     done
