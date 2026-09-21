@@ -181,9 +181,16 @@ elif [[ -n "$NVPROF_BIN" ]]; then
                     --replay-mode kernel \
                     --kernels "::.*$KERNEL_REGEX.*:13" \
                     --analysis-metrics \
+                    --export-profile "$base.nvprof" \
+                    --force-overwrite \
                     --log-file "$base-nvprof.log" \
                     "$BIN" "$gpu" 3584
             ) 2>&1 | tee "$base-console.log" || true
+
+            if [[ -f "$base.nvprof" ]]; then
+                sudo chown "$(id -u):$(id -g)" "$base.nvprof" 2>/dev/null || true
+                echo "Saved: $base.nvprof"
+            fi
         done
     done
 else
