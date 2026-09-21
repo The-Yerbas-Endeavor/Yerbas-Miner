@@ -543,3 +543,27 @@ GPU/variant, extract the exact mangled phase-2 kernel symbol, and then use that
 exact symbol for the Pascal metric pass. This replaces the failed substring
 selector.
 
+### Sept. 21 nvprof filter failure and unfiltered metric plan
+
+Pascal metric enumeration succeeds and exposes the required counters, but every
+attempt to scope `nvprof --metrics` with `--kernels` produced a valid profile
+container with zero profiled kernels. Trace-only profiling proves the target
+phase-2 kernel does launch normally, so this is treated as an old nvprof
+kernel-filter compatibility problem rather than a miner/runtime failure.
+
+Do not spend more cycles on kernel-name matching.
+
+Commits:
+- `e96784c`: benchmark-only `YERBAS_BENCH_WARMUP_SCANS` override;
+- `53d9834`: Pascal metric collection with no kernel filter.
+
+The Pascal profiler now forces Fast/Lite, sets warmup scans to zero, profiles one
+measured 18-stage scan unfiltered, and collects a compact first-pass counter set:
+achieved occupancy, eligible warps/cycle, issue-slot utilization, IPC,
+memory-dependency/throttle/exec stalls, global-load efficiency, DRAM utilization,
+and L2 read hit rate.
+
+This guarantees the three forced CN phase-2 launches are present while keeping
+replay time manageable. Parse the phase-2 rows after collection instead of
+filtering before collection.
+
