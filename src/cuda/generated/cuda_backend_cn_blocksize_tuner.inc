@@ -214,7 +214,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
     state.threads_dualhash = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex>,
+        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
@@ -269,7 +269,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
     const cudaError_t baseline_attr_rc = cudaFuncGetAttributes(
         &baseline_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
     const cudaError_t dualhash_attr_rc = cudaFuncGetAttributes(
-        &dualhash_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
+        &dualhash_attrs, cryptonight_loop_stage_ttable4_dualhash<VariantIndex>);
     if (baseline_attr_rc != cudaSuccess || dualhash_attr_rc != cudaSuccess)
         cudaGetLastError();
 
