@@ -16,6 +16,7 @@
 //   450 four-lane T-table through the read-only global cache
 //   451 sparse-warp T-table, 4 hashes/warp
 //   452 sparse-warp T-table, 2 hashes/warp
+//   453 lane-classed 8x shared T-table
 
 namespace {
 
@@ -79,6 +80,7 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
+    if (mode == 453) return "4-lane-ttable-bank8";
     if (mode == 452) return "4-lane-ttable-sparse2";
     if (mode == 451) return "4-lane-ttable-sparse4";
     if (mode == 450) return "4-lane-ttable-readonly";
@@ -134,12 +136,15 @@ bool load_cn_phase2_selector_cache(int device_id,
         magic != "YERBAS_CN_PHASE2" || revision != kCnPhase2SelectorCacheRevision ||
         variant != static_cast<unsigned int>(VariantIndex) ||
         (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
-         mode != 451 && mode != 452) ||
+         mode != 451 && mode != 452 && mode != 453) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0) {
         return false;
     }
 
-    if (mode == 222) {
+    if (mode == 453) {
+        cryptonight_loop_stage_ttable4_bank8<VariantIndex><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
+    } else if (mode == 222) {
         int active_blocks = 0;
         const cudaError_t rc = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &active_blocks,
@@ -175,7 +180,7 @@ void save_cn_phase2_selector_cache(int device_id,
     const int mode = g_cn_residency_mode[device_id][VariantIndex];
     const int threads = g_cn_residency_threads[device_id][VariantIndex];
     if ((mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
-         mode != 451 && mode != 452) || threads <= 0) return;
+         mode != 451 && mode != 452 && mode != 453) || threads <= 0) return;
 
     try {
         const auto path = cn_phase2_selector_cache_path<VariantIndex>(device_id, props, batch_size);
@@ -303,11 +308,11 @@ bool cn_validate_pair(cudaStream_t stream,
                       const cryptonight::SplitContext* contexts)
 {
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
-    const bool sparse_mode =
-        candidate_mode == 451 || candidate_mode == 452 ||
-        reference_mode == 451 || reference_mode == 452;
+    const bool wide_parity_mode =
+        candidate_mode == 451 || candidate_mode == 452 || candidate_mode == 453 ||
+        reference_mode == 451 || reference_mode == 452 || reference_mode == 453;
     const std::size_t parity_count =
-        sparse_mode ? 8U :
+        wide_parity_mode ? 8U :
         ((candidate_mode == 445 || reference_mode == 445) ? 2U : 1U);
     const std::size_t scratch_bytes = parity_count * cfg.page_size;
     const std::size_t context_bytes =
