@@ -7,9 +7,9 @@
 
 namespace {
 
-constexpr int kCnBlockTuneRevision = 2;
+constexpr int kCnBlockTuneRevision = 3;
 constexpr int kCnBlockTunePasses = 3;
-constexpr int kCnProductionSelectorRevision = 13;
+constexpr int kCnProductionSelectorRevision = 14;
 constexpr int kCnProductionSelectorPasses = 3;
 constexpr float kCnProductionPromotionRatio = 0.95F;
 static std::array<std::array<int, 6>, kCn2LaneMaxDevices> g_cn_block_tuned_threads{};
