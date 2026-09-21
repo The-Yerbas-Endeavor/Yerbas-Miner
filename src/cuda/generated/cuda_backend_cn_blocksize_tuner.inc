@@ -54,6 +54,12 @@ inline bool cn_sparse_warp_only_requested()
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+inline bool cn_bank8_experiment_requested()
+{
+    const char* value = std::getenv("YERBAS_CN_BANK8_EXPERIMENT");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 struct CnProductionSelectorState {
     bool initialized{false};
     bool selected{false};
@@ -174,7 +180,7 @@ bool load_cn_production_selector_cache(int device_id,
         magic != "YERBAS_CN_PRODUCTION" || revision != kCnProductionSelectorRevision ||
         variant != static_cast<int>(VariantIndex) ||
         (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
-         mode != 451 && mode != 452) ||
+         mode != 451 && mode != 452 && mode != 453) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0)
         return false;
 
@@ -250,7 +256,13 @@ void initialize_cn_production_selector(cudaStream_t stream,
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int sparse_hashes = cn_sparse_warp_hashes_requested();
-    if (sparse_hashes == 4) {
+    const bool bank8_requested = cn_bank8_experiment_requested();
+    if (bank8_requested) {
+        state.experimental_mode = 453;
+        state.threads_dualhash = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_bank8<VariantIndex>,
+            warp, props.maxThreadsPerBlock);
+    } else if (sparse_hashes == 4) {
         state.experimental_mode = 451;
         state.threads_dualhash = cn_occupancy_block_size(
             cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 4U>,
@@ -313,6 +325,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
 
     const bool sparse_requested = sparse_hashes != 0;
     const bool experimental_only =
+        bank8_requested ||
         (cn_dualhash_experiment_requested() && cn_dualhash_only_requested()) ||
         (sparse_requested && cn_sparse_warp_only_requested());
 
@@ -321,7 +334,7 @@ void initialize_cn_production_selector(cudaStream_t stream,
     state.cg_ok = !experimental_only && cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
 
-    if (sparse_requested) {
+    if (bank8_requested || sparse_requested) {
         state.dualhash_ok = cn_validate_pair<VariantIndex>(
             stream, 44, 32, state.experimental_mode, 32, scratchpads, contexts);
     } else {
@@ -336,7 +349,11 @@ void initialize_cn_production_selector(cudaStream_t stream,
         &baseline_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
 
     cudaError_t dualhash_attr_rc = cudaSuccess;
-    if (state.experimental_mode == 451) {
+    if (state.experimental_mode == 453) {
+        dualhash_attr_rc = cudaFuncGetAttributes(
+            &dualhash_attrs,
+            cryptonight_loop_stage_ttable4_bank8<VariantIndex>);
+    } else if (state.experimental_mode == 451) {
         dualhash_attr_rc = cudaFuncGetAttributes(
             &dualhash_attrs,
             cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 4U>);
@@ -371,12 +388,12 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | experimental-only=" << (experimental_only ? "yes" : "no")
               << " | baseline-regs="
               << (baseline_attr_rc == cudaSuccess ? baseline_attrs.numRegs : -1)
-              << " | dualhash-regs="
+              << " | experimental-regs="
               << (dualhash_attr_rc == cudaSuccess ? dualhash_attrs.numRegs : -1)
               << " | baseline-local="
               << (baseline_attr_rc == cudaSuccess
                       ? static_cast<unsigned long long>(baseline_attrs.localSizeBytes) : 0ULL)
-              << " | dualhash-local="
+              << " | experimental-local="
               << (dualhash_attr_rc == cudaSuccess
                       ? static_cast<unsigned long long>(dualhash_attrs.localSizeBytes) : 0ULL)
               << " | sampling=real-production-batch"
