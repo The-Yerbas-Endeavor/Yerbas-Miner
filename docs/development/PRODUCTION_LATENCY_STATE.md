@@ -276,6 +276,26 @@ phase numbers must not be used to judge the thread geometry. Commits `f756bab`
 and `6b8cce7` restore the benchmark's production dispatcher and instrument the
 exact production `word32 -> phase2 -> word32` path directly.
 
+The corrected production phase profile confirms the 32-thread signal is entirely
+a setup win:
+
+- setup 32 vs 128:
+  - Dark: `35.572 ms` vs `51.725 ms` (~`31.23%` faster)
+  - Fast: `138.764 ms` vs `180.399 ms` (~`23.08%` faster)
+  - Lite: `69.981 ms` vs `95.034 ms` (~`26.36%` faster)
+- phase-2 loop changes by only about `0.04%` or less.
+- final at 32 is slightly worse than 128:
+  Dark ~`0.18%`, Fast ~`0.49%`, Lite ~`0.91%` slower.
+- whole-pipeline diagnostic average remains `602.80 H/s` at 32/32 versus
+  `594.27 H/s` at 128/128 (~`+1.44%`).
+
+Therefore setup and final geometry must be selected independently. Commits
+`644f32b`, `57450fa`, `cb97afb`, and `5962106` add independent setup/final
+thread state, a cached real-batch 32/64/96/128 tuner, safe 128-thread cache-miss
+behavior for normal auto mode, and phase-specific reporting. Explicit
+`YERBAS_CN_PHASE_RETUNE=1` retunes only this geometry without forcing unrelated
+GPU tuning.
+
 ## CPU combo result retained
 
 Final same-binary A/B:
