@@ -11,7 +11,7 @@
 
 namespace {
 
-constexpr int kCnHardenedSelectorRevision = 14;
+constexpr int kCnHardenedSelectorRevision = 15;
 constexpr int kCnHardenedPasses = 5;
 constexpr float kCnHardenedPromotionRatio = 0.95F;
 constexpr float kCnDeepPromotionRatio = 0.985F;
