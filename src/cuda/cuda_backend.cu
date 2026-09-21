@@ -919,7 +919,10 @@ void launch_split_cryptonight_variant_phase_backend(cudaStream_t stream,
         g_cn_phase_final_ms[device_id][VariantIndex] += final_ms;
 
         const float total_ms = setup_ms + loop_ms + final_ms;
-        const int threads = cn_phase_launch_threads();
+        const int setup_threads =
+            cn_setup_launch_threads(device_id, VariantIndex);
+        const int final_threads =
+            cn_final_launch_threads(device_id, VariantIndex);
         const int loop_mode = cn_hardened_mode(device_id, VariantIndex);
         std::cout << std::fixed << std::setprecision(3)
                   << "[CUDA CN phase production] GPU " << device_id
@@ -927,8 +930,8 @@ void launch_split_cryptonight_variant_phase_backend(cudaStream_t stream,
                   << " | batch=" << count
                   << " | setup-mode=" << cn_word_setup_name(device_id, VariantIndex)
                   << " final-mode=" << cn_word_final_name(device_id, VariantIndex)
-                  << " | setup-threads=" << threads
-                  << " final-threads=" << threads
+                  << " | setup-threads=" << setup_threads
+                  << " final-threads=" << final_threads
                   << " | loop-mode=" << cn_residency_mode_name(loop_mode)
                   << " | setup=" << setup_ms << " ms"
                   << " | loop=" << loop_ms << " ms"
