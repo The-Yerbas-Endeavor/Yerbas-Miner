@@ -9,7 +9,7 @@
 //   44  promoted four-lane T-table/coalesced baseline
 //   222 two-lane T-table + 64-byte shared tile
 //   444 four-lane T-table/coalesced + cache-global (.cg) scratchpad traffic
-//   445 retired dual-hash slot (baseline alias)
+//   445 true dual-hash ILP candidate
  //   446 four-lane T-table with lane-distributed 64x64 multiply
 //   448 four-lane T-table with split-warp first random-load scheduling
 //   449 two-lane T-table with 16 independent hashes per warp
@@ -81,7 +81,7 @@ inline const char* cn_residency_mode_name(int mode)
     if (mode == 449) return "2-lane-ttable";
     if (mode == 448) return "4-lane-ttable-pairload";
     if (mode == 446) return "4-lane-ttable-mul4";
-    if (mode == 445) return "4-lane-ttable-retired";
+    if (mode == 445) return "4-lane-dualhash-ilp";
     if (mode == 444) return "4-lane-ttable-prefetch";
     if (mode == 222) return "2-lane-tile64";
     if (mode == 44) return "4-lane-ttable";
@@ -235,7 +235,7 @@ void cn_launch_mode(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_mul4<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
     } else if (mode == 445) {
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex><<<blocks, threads, 0, stream>>>(
+        cryptonight_loop_stage_ttable4_dualhash<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
     } else if (mode == 444) {
         cryptonight_loop_stage_ttable4_cg<VariantIndex><<<blocks, threads, 0, stream>>>(
@@ -343,7 +343,7 @@ void cn_residency_autoselect_once(cudaStream_t stream,
     const int threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
     const int threads_dualhash = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_coalesced<VariantIndex>,
+        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
         warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
