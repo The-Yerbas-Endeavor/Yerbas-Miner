@@ -567,3 +567,52 @@ This guarantees the three forced CN phase-2 launches are present while keeping
 replay time manageable. Parse the phase-2 rows after collection instead of
 filtering before collection.
 
+### Sept. 21 Pascal metric profiler closed; true dual-hash ILP candidate opened
+
+The unfiltered nvprof metric pass still produced a valid profile container with
+zero profiled kernels. Trace-only nvprof continues to work and shows the real
+CUDA launch stream, so the application and kernel launches are healthy. The
+hardware-counter path is therefore closed for this host/toolchain.
+
+This matches NVIDIA's current lifecycle boundary:
+- R580 is the last driver branch supporting Pascal;
+- CUDA 12.x is the last toolkit family supporting Pascal compilation;
+- CUDA 13 removes nvprof and the legacy CUPTI Event/Metric APIs.
+
+Do not spend more optimization time trying additional nvprof kernel filters or
+Nsight Compute variants on this machine.
+
+The next experiment is a benchmark-only true dual-hash ILP phase-2 kernel in
+the existing mode-445 slot. The previous mode-445 implementation was only a
+baseline alias, despite retaining dual-hash experiment scaffolding.
+
+New candidate behavior:
+- one four-lane subgroup carries two independent CN hashes;
+- first dependent random loads for hashes A and B are issued before either is
+  consumed;
+- second dependent random loads for A and B are likewise issued together;
+- both independent state chains remain live so useful arithmetic from one hash
+  can overlap memory dependency latency from the other;
+- parity uses two hashes;
+- normal production remains unchanged unless the explicit dual-hash experiment
+  gate and deep retune are enabled.
+
+Cache revisions were bumped because mode 445 changed semantics.
+
+Relevant commits:
+- 6dfb1e6: add true dual-hash CryptoNight ILP candidate;
+- b4686fd: replace CUDA-local lambdas with conservative device helpers;
+- 20f3bf2 / 3bc2cb8 / ecdf9c7: wire mode 445, occupancy and resource queries to
+  the new kernel;
+- 317e27a / c2b48b0 / efaee8d: invalidate old phase-2/block/production caches;
+- 2707e6c: add isolated dual-hash ILP A/B runner.
+
+Run:
+
+`bash scripts/run-dualhash-ilp-ab.sh`
+
+Promotion rule:
+- parity PASS on both GPUs for Fast and Lite;
+- no local-memory spill;
+- then require a repeatable >=2% phase-2 win before any production trial.
+
