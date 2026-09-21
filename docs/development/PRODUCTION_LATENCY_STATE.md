@@ -775,3 +775,58 @@ Run:
 Promotion rule remains parity PASS, no local spill, and a repeatable >=2% phase-2
 gain before any production trial.
 
+### Sept. 21 lane-classed shared T-table result; phase-2 microsearch closed
+
+The bank8 shared-table A/B tested the baseline 4 KiB shared AES T-table layout
+against a 32 KiB lane-classed eight-replica layout at batch 3584 on both GTX
+1080 Ti cards.
+
+All four cases:
+- parity PASS;
+- baseline registers: 32/thread;
+- bank8 registers: 39/thread;
+- baseline local memory: 0;
+- bank8 local memory: 0;
+- occupancy recommendation for bank8: 768 threads.
+
+Median phase-2 deltas:
+- GPU0 CN-Fast: -0.368%;
+- GPU0 CN-Lite: -0.216%;
+- GPU1 CN-Fast: +0.088%;
+- GPU1 CN-Lite: +0.097%.
+
+Conclusion: reducing cross-lane shared-memory bank conflicts through a large
+lane-classed T-table does not materially improve phase-2 throughput. Do not
+promote mode 453.
+
+Combined with the completed negative/near-zero results for phase-2 block
+geometry, stage-local batching, distributed multiply, pairload/cohorting,
+two-lane/shared-table variants, read-only table access, true dual-hash ILP,
+sparse warps, and bank8 shared tables, the current four-lane T-table phase-2
+kernel is treated as the best proven Pascal production kernel on this hardware.
+
+No more phase-2 micro-kernel experiments should be scheduled without genuinely
+new evidence or profiling capability.
+
+### Best-known-stack production validation
+
+The previous ~14 hour production run averaged about 1.81 kH/s but did not load
+the validated CPU CN-combination policy. That policy independently demonstrated
+about +20-30 H/s whole-miner improvement.
+
+New runner:
+`scripts/run-best-stack-production.sh`
+
+It:
+- explicitly disables every benchmark-only CUDA experiment;
+- leaves the proven cache-first GPU production policy in place;
+- loads `docs/development/cpu-combo-policy-20260916.txt`;
+- reuses the strongest known default CPU cache;
+- enables production-latency telemetry;
+- runs both latency and rotation analyzers after exit.
+
+Recommended next validation window: 6-12 hours.
+
+Relevant commits:
+- ee1b0ed: add best-known-stack production validation runner.
+
