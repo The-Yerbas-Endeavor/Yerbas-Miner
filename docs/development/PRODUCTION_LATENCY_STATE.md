@@ -722,3 +722,56 @@ Run:
 
 Do not productionize sparse modes unless parity passes and a >=2% win repeats.
 
+### Sept. 21 sparse-warps closed; lane-classed shared T-table queued
+
+Sparse-warp A/B tested the unchanged per-hash phase-2 state machine with fewer
+hashes sharing each warp.
+
+At batch 3584:
+- baseline: 8 hashes/warp;
+- sparse4: 4 hashes/warp, 896 warps, 28 blocks at 1024 threads;
+- sparse2: 2 hashes/warp, 1792 warps, 56 blocks at 1024 threads.
+
+All sparse candidates passed parity, stayed at 32 registers/thread and used no
+local memory. Median phase-2 deltas:
+- GPU0 Fast sparse4: -1.146%;
+- GPU0 Fast sparse2: -0.647%;
+- GPU0 Lite sparse4: +0.107%;
+- GPU0 Lite sparse2: -0.910%;
+- GPU1 Fast sparse4: +0.274%;
+- GPU1 Fast sparse2: +0.285%;
+- GPU1 Lite sparse4: +0.252%;
+- GPU1 Lite sparse2: +0.083%.
+
+Conclusion: increasing independently schedulable warp count does not materially
+improve Fast/Lite. Close the warp head-of-line hypothesis as a production path.
+
+Next experiment: lane-classed shared AES T-tables.
+
+The baseline phase-2 kernel uses one 4 KiB shared T-table set. Pascal shared
+memory uses 32 fixed four-byte banks. With random table indices, 32 lanes in a
+warp can serialize on bank conflicts even when scratchpad concurrency is already
+adequate.
+
+Mode 453 expands the four AES tables to 32 KiB by storing eight duplicate lane
+classes per logical table entry:
+- physical lookup = table[index][warp_lane & 7];
+- the low shared-memory address bits now encode a lane class;
+- AES values, scratchpad addresses and CryptoNight state transitions are
+  unchanged;
+- parity uses eight hashes so every lane class is exercised.
+
+32 KiB remains under Pascal's 48 KiB per-thread-block shared-memory limit.
+
+Relevant commits:
+- ea42d98: add lane-classed shared T-table kernel;
+- 942f478 / f7059c1: wire and audit mode 453;
+- 19369c8: expose mode 453 through the real-batch experimental selector;
+- 08a300f: add Fast/Lite dual-GPU bank8 A/B runner.
+
+Run:
+`bash scripts/run-bank8-fastlite-ab.sh`
+
+Promotion rule remains parity PASS, no local spill, and a repeatable >=2% phase-2
+gain before any production trial.
+
