@@ -20,6 +20,26 @@ inline bool cn_production_retune_requested()
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+inline bool cn_dualhash_only_requested()
+{
+    const char* value = std::getenv("YERBAS_CN_DUALHASH_ONLY");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+inline int cn_dualhash_threads_override(const cudaDeviceProp& props)
+{
+    const char* value = std::getenv("YERBAS_CN_DUALHASH_THREADS");
+    if (value == nullptr || *value == '\0') return 0;
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') return 0;
+    const int threads = static_cast<int>(parsed);
+    if (threads < props.warpSize || threads > props.maxThreadsPerBlock ||
+        (threads % props.warpSize) != 0)
+        return 0;
+    return threads;
+}
+
 struct CnProductionSelectorState {
     bool initialized{false};
     bool selected{false};
@@ -216,6 +236,11 @@ void initialize_cn_production_selector(cudaStream_t stream,
     state.threads_dualhash = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
         warp, props.maxThreadsPerBlock);
+    if (cn_dualhash_experiment_requested()) {
+        const int forced_dualhash_threads = cn_dualhash_threads_override(props);
+        if (forced_dualhash_threads > 0)
+            state.threads_dualhash = forced_dualhash_threads;
+    }
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
     const bool parity_t4 = cn_validate_pair<VariantIndex>(
@@ -256,9 +281,11 @@ void initialize_cn_production_selector(cudaStream_t stream,
         return;
     }
 
-    state.tile_ok = cn_validate_pair<VariantIndex>(
+    const bool dualhash_only =
+        cn_dualhash_experiment_requested() && cn_dualhash_only_requested();
+    state.tile_ok = !dualhash_only && cn_validate_pair<VariantIndex>(
         stream, 44, 32, 222, 32, scratchpads, contexts);
-    state.cg_ok = cn_validate_pair<VariantIndex>(
+    state.cg_ok = !dualhash_only && cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
     state.dualhash_ok = cn_dualhash_experiment_requested() &&
         cn_validate_pair<VariantIndex>(
@@ -288,6 +315,8 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
               << " | dualhash-parity=" << (state.dualhash_ok ? "PASS" : "FAIL")
+              << " | dualhash-threads=" << state.threads_dualhash
+              << " | dualhash-only=" << (dualhash_only ? "yes" : "no")
               << " | baseline-regs="
               << (baseline_attr_rc == cudaSuccess ? baseline_attrs.numRegs : -1)
               << " | dualhash-regs="
