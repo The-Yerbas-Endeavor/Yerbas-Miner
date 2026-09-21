@@ -138,8 +138,11 @@ def main() -> int:
 
     print("Per GPU:")
     for gpu, agg in sorted(by_gpu.items()):
+        raw_hps = agg.hashes * 1000.0 / agg.scan_ms if agg.scan_ms else 0.0
+        useful_hps = agg.useful_hashes * 1000.0 / agg.scan_ms if agg.scan_ms else 0.0
         print(f"  GPU {gpu}: batches={agg.batches} stale={agg.stale_batches} "
               f"hashes={agg.hashes:,} stale_hashes={pct(agg.stale_hashes, agg.hashes):.2f}% "
+              f"raw={raw_hps:.2f} H/s useful={useful_hps:.2f} H/s "
               f"avg_scan={agg.scan_ms/max(1,agg.batches):.2f}ms "
               f"avg_queue={agg.queue_ms/max(1,agg.batches):.3f}ms")
     print()
@@ -150,7 +153,27 @@ def main() -> int:
               f"stale_hashes={pct(agg.stale_hashes, agg.hashes):6.2f}% "
               f"avg_scan={agg.scan_ms/max(1,agg.batches):8.2f}ms "
               f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")
-    print()\n    print("Per batch size:")\n    total_stale_hashes = max(1, total.stale_hashes)\n    for hashes, agg in sorted(by_batch.items()):\n        print(f"  batch={hashes:6d} batches={agg.batches:5d} stale={agg.stale_batches:4d} "\n              f"stale_hashes={agg.stale_hashes:8d} "\n              f"share_of_all_stale={pct(agg.stale_hashes, total_stale_hashes):6.2f}% "\n              f"avg_scan={agg.scan_ms/max(1,agg.batches):8.2f}ms "\n              f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")\n    print()\n    print("Per GPU / batch size (stale only):")\n    for (gpu, hashes), agg in sorted(by_gpu_batch.items()):\n        if not agg.stale_batches:\n            continue\n        print(f"  GPU {gpu} batch={hashes:6d} stale={agg.stale_batches:4d} "\n              f"stale_hashes={agg.stale_hashes:8d} "\n              f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")\n    return 0
+    print()
+    print("Per batch size:")
+    total_stale_hashes = max(1, total.stale_hashes)
+    for hashes, agg in sorted(by_batch.items()):
+        raw_hps = agg.hashes * 1000.0 / agg.scan_ms if agg.scan_ms else 0.0
+        useful_hps = agg.useful_hashes * 1000.0 / agg.scan_ms if agg.scan_ms else 0.0
+        print(f"  batch={hashes:6d} batches={agg.batches:5d} stale={agg.stale_batches:4d} "
+              f"stale_hashes={agg.stale_hashes:8d} "
+              f"share_of_all_stale={pct(agg.stale_hashes, total_stale_hashes):6.2f}% "
+              f"raw={raw_hps:8.2f} H/s useful={useful_hps:8.2f} H/s "
+              f"avg_scan={agg.scan_ms/max(1,agg.batches):8.2f}ms "
+              f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")
+    print()
+    print("Per GPU / batch size (stale only):")
+    for (gpu, hashes), agg in sorted(by_gpu_batch.items()):
+        if not agg.stale_batches:
+            continue
+        print(f"  GPU {gpu} batch={hashes:6d} stale={agg.stale_batches:4d} "
+              f"stale_hashes={agg.stale_hashes:8d} "
+              f"stale_scan={agg.stale_scan_ms/1000.0:8.2f}s")
+    return 0
 
 
 if __name__ == "__main__":
