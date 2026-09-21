@@ -664,3 +664,61 @@ It tests CN-Lite on both GPUs at:
 
 Do not productionize dual-hash yet.
 
+### Sept. 21 dual-hash thread matrix closes the ILP candidate
+
+The controlled CN-Lite dual-hash thread sweep tested 128, 160, 192, 224, 256,
+288, 320, 352, 384, 448, 512 and 576 threads on both GTX 1080 Ti cards at
+batch 3584.
+
+The original GPU0/Lite +5.022% result did not reproduce. Representative
+controlled deltas:
+- GPU0 @128: +0.047%;
+- GPU0 @256 (exactly 28 blocks / one block per SM): +0.002%;
+- GPU0 @320: +0.105%;
+- GPU0 @576: +0.023%;
+- GPU1 @128: +0.688%;
+- GPU1 @256: +0.175%;
+- GPU1 @576: -0.075%.
+
+The apparent GPU0 @448 +3.097% result is rejected because its baseline median
+jumped to 2277.444 ms while surrounding GPU0 baseline medians were generally
+about 2179 ms. The candidate itself was 2206.911 ms, also slower than the
+normal ~2178-2200 ms range. This is a slow-baseline artifact, not a repeatable
+candidate win.
+
+Conclusion: true dual-hash ILP is parity-correct and proves that two independent
+chains per subgroup can replace roughly half the baseline warp population, but
+it does not create additional throughput. Keep it diagnostic only; do not
+productionize.
+
+### Next phase-2 hypothesis: sparse warps
+
+The production four-lane kernel maps eight independent hashes into each 32-lane
+warp. A random-memory miss from one subgroup can therefore hold the entire warp
+at the scoreboard and delay seven unrelated hashes. The retired pairload
+experiment could not escape this because scheduling is still warp-granular.
+
+New modes test fewer hashes per independently schedulable warp while preserving
+the exact baseline per-hash state machine:
+- mode 451: 4 hashes/warp (16 active lanes), 896 warps at batch 3584;
+- mode 452: 2 hashes/warp (8 active lanes), 1792 warps at batch 3584.
+
+At the occupancy-recommended 1024 threads/block on the GTX 1080 Ti:
+- sparse4 -> 28 blocks, naturally one block per 28 SMs;
+- sparse2 -> 56 blocks, naturally two blocks per 28 SMs.
+
+Unlike dual-hash, these candidates do not add a second state chain per active
+lane. They isolate warp-level head-of-line blocking by trading inactive lanes
+for more independently schedulable warps.
+
+Relevant commits:
+- 64b197e: add sparse-warp phase-2 kernels;
+- 48caa4e: wire modes 451/452 and parity launch geometry;
+- 8f7fd0b: generalize the real-batch selector for sparse-warp experiments;
+- 0a3354e: add isolated Fast/Lite sparse-warp A/B runner.
+
+Run:
+`bash scripts/run-sparse-warp-fastlite-ab.sh`
+
+Do not productionize sparse modes unless parity passes and a >=2% win repeats.
+
