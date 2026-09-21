@@ -289,6 +289,17 @@ a setup win:
 - whole-pipeline diagnostic average remains `602.80 H/s` at 32/32 versus
   `594.27 H/s` at 128/128 (~`+1.44%`).
 
+A clean non-diagnostic A/B/A/B then confirmed the production effect using
+setup=32/final=128 versus setup=128/final=128:
+
+- baseline: `585.09 / 585.53 H/s` -> `585.31 H/s` average
+- tuned: `592.00 / 601.96 H/s` -> `596.98 H/s` average
+- average improvement: `+11.67 H/s`, approximately `+1.99%`
+
+Both tuned passes beat their paired baseline. Together with the earlier
+forward/reverse 32-thread sweep (~`+1.45%`), setup geometry is considered a
+real production optimization rather than benchmark noise.
+
 Therefore setup and final geometry must be selected independently. Commits
 `644f32b`, `57450fa`, `cb97afb`, and `5962106` add independent setup/final
 thread state, a cached real-batch 32/64/96/128 tuner, safe 128-thread cache-miss
