@@ -968,3 +968,64 @@ Relevant commits:
 - 46419cc: repair/extend latency analyzer with useful H/s;
 - 6433728: 30-minute crossover production A/B.
 
+### Sept. 21 first fixed-role stale crossover was not informative yet
+
+Phase A (GPU0 adaptive, GPU1 cap=5376) completed about 15 minutes, but the
+observed workload was almost entirely Fast-heavy:
+- 360 completed GPU batches;
+- every completed batch was 3584 hashes;
+- GPU0 useful ~718.50 H/s;
+- GPU1 useful ~742.19 H/s;
+- total stale hashes ~2.22%.
+
+Because the normal adaptive policy was already 3584 for those rotations, the
+5376 cap never activated. This phase therefore validates that the cap is
+non-invasive below its threshold, but it does not measure the benefit/cost of
+capping the 11648/17920 large-batch rotations.
+
+Phase B upload was only a few minutes into its 15-minute window and likewise had
+only 3584-hash batches at the time of inspection. Do not infer a cap result from
+the partial fixed-role crossover.
+
+### Continuous live crossover replacement
+
+The next experiment removes the restart/job-mix problem.
+
+New runtime API:
+- `BatchEngine::set_stale_batch_cap()` allows a cap to change safely between
+  drained job uploads.
+
+New env:
+- `YERBAS_GPU_STALE_CROSSOVER_CAP=5376`
+
+When enabled, each Stratum generation assigns the cap to one GPU and leaves the
+other fully adaptive. The capped role alternates by generation. Because
+`upload_gpu_job()` drains active scans before changing policy, this does not
+mutate a running CUDA scan.
+
+Only generations where the adaptive peer actually selects a batch above the cap
+count as eligible evidence. Fast-heavy 3584/3584 generations are ignored by the
+crossover analyzer.
+
+New analyzer:
+`scripts/analyze-stale-crossover.py`
+
+It reports:
+- capped vs adaptive raw H/s;
+- capped vs adaptive useful H/s after stale hashes;
+- stale percentage;
+- same-GPU capped/adaptive splits;
+- batch-size and CN-combination breakdowns.
+
+New runner:
+`scripts/run-stale-live-crossover.sh`
+
+Default observation window: 45 minutes. This should collect enough rotation/job
+diversity without restarting the miner between roles.
+
+Relevant commits:
+- deeade1 / 00cc32b: runtime stale-cap setter;
+- 9629e63: alternate cap by live Stratum generation;
+- 000874e: crossover analyzer;
+- c3ef023: continuous live crossover runner.
+
