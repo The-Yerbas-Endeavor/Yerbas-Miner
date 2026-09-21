@@ -14,6 +14,8 @@
 //   448 four-lane T-table with split-warp first random-load scheduling
 //   449 two-lane T-table with 16 independent hashes per warp
 //   450 four-lane T-table through the read-only global cache
+//   451 sparse-warp T-table, 4 hashes/warp
+//   452 sparse-warp T-table, 2 hashes/warp
 
 namespace {
 
@@ -77,6 +79,8 @@ int cn_tile64_block_size(const cudaDeviceProp& props)
 
 inline const char* cn_residency_mode_name(int mode)
 {
+    if (mode == 452) return "4-lane-ttable-sparse2";
+    if (mode == 451) return "4-lane-ttable-sparse4";
     if (mode == 450) return "4-lane-ttable-readonly";
     if (mode == 449) return "2-lane-ttable";
     if (mode == 448) return "4-lane-ttable-pairload";
@@ -129,7 +133,8 @@ bool load_cn_phase2_selector_cache(int device_id,
     if (!(in >> magic >> revision >> variant >> mode >> threads) ||
         magic != "YERBAS_CN_PHASE2" || revision != kCnPhase2SelectorCacheRevision ||
         variant != static_cast<unsigned int>(VariantIndex) ||
-        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) ||
+        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
+         mode != 451 && mode != 452) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0) {
         return false;
     }
@@ -169,7 +174,8 @@ void save_cn_phase2_selector_cache(int device_id,
     if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return;
     const int mode = g_cn_residency_mode[device_id][VariantIndex];
     const int threads = g_cn_residency_threads[device_id][VariantIndex];
-    if ((mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) || threads <= 0) return;
+    if ((mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
+         mode != 451 && mode != 452) || threads <= 0) return;
 
     try {
         const auto path = cn_phase2_selector_cache_path<VariantIndex>(device_id, props, batch_size);
@@ -210,10 +216,19 @@ void cn_launch_mode(cudaStream_t stream,
                     std::uint8_t* scratchpads,
                     const cryptonight::SplitContext* contexts)
 {
-    const std::size_t total_threads =
-        mode == 445
-            ? ((count + 1U) / 2U) * 4U
-            : count * static_cast<std::size_t>(mode == 222 ? 2 : 4);
+    std::size_t total_threads = 0U;
+    if (mode == 445) {
+        total_threads = ((count + 1U) / 2U) * 4U;
+    } else if (mode == 451) {
+        const std::size_t warps = (count + 3U) / 4U;
+        total_threads = warps * 32U;
+    } else if (mode == 452) {
+        const std::size_t warps = (count + 1U) / 2U;
+        total_threads = warps * 32U;
+    } else {
+        total_threads =
+            count * static_cast<std::size_t>(mode == 222 ? 2 : 4);
+    }
     const int blocks = static_cast<int>(
         (total_threads + static_cast<std::size_t>(threads) - 1U) /
         static_cast<std::size_t>(threads));
@@ -222,6 +237,12 @@ void cn_launch_mode(cudaStream_t stream,
         cryptonight_loop_stage_ttable2_tile64<VariantIndex><<<
             blocks, threads, cn_tile64_dynamic_shared_bytes(threads), stream>>>(
                 count, scratchpads, contexts);
+    } else if (mode == 452) {
+        cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 2U><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
+    } else if (mode == 451) {
+        cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 4U><<<blocks, threads, 0, stream>>>(
+            count, scratchpads, contexts);
     } else if (mode == 450) {
         cryptonight_loop_stage_ttable4_readonly<VariantIndex><<<blocks, threads, 0, stream>>>(
             count, scratchpads, contexts);
@@ -282,8 +303,12 @@ bool cn_validate_pair(cudaStream_t stream,
                       const cryptonight::SplitContext* contexts)
 {
     constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    const bool sparse_mode =
+        candidate_mode == 451 || candidate_mode == 452 ||
+        reference_mode == 451 || reference_mode == 452;
     const std::size_t parity_count =
-        (candidate_mode == 445 || reference_mode == 445) ? 2U : 1U;
+        sparse_mode ? 8U :
+        ((candidate_mode == 445 || reference_mode == 445) ? 2U : 1U);
     const std::size_t scratch_bytes = parity_count * cfg.page_size;
     const std::size_t context_bytes =
         parity_count * sizeof(cryptonight::SplitContext);
