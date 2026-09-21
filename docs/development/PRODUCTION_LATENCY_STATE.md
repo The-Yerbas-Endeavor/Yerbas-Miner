@@ -300,6 +300,18 @@ Both tuned passes beat their paired baseline. Together with the earlier
 forward/reverse 32-thread sweep (~`+1.45%`), setup geometry is considered a
 real production optimization rather than benchmark noise.
 
+Full six-variant rollout at batch 3584 then confirmed the same geometry on both
+GTX 1080 Ti devices:
+
+- GPU0: Dark, DarkLite, Fast, Lite, Turtle, TurtleLite -> setup=32, final=128
+- GPU1: Dark, DarkLite, Fast, Lite, Turtle, TurtleLite -> setup=32, final=128
+- setup reductions versus 128 threads are consistently about 25-30%
+- final differences stay below the 1% promotion threshold, so 128 remains selected
+
+The phase-geometry cache is therefore populated for every CN variant on both
+test GPUs at the current 3584 production batch. Normal auto mode can now start
+without a phase-geometry tournament and reuse the measured values directly.
+
 Therefore setup and final geometry must be selected independently. Commits
 `644f32b`, `57450fa`, `cb97afb`, and `5962106` add independent setup/final
 thread state, a cached real-batch 32/64/96/128 tuner, safe 128-thread cache-miss
