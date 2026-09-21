@@ -58,6 +58,21 @@ if command -v ncu >/dev/null 2>&1; then
     echo
     echo "Profiler: Nsight Compute ($(ncu --version 2>/dev/null | tail -1 || true))"
 
+    NCU_RUN=(ncu)
+    NCU_ELEVATED=0
+    if [[ "${YERBAS_NCU_SUDO:-0}" != "0" ]]; then
+        NCU_ELEVATED=1
+        NCU_RUN=(sudo -E env
+            "HOME=$HOME"
+            "XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}"
+            ncu)
+        echo "Profiler counters: elevated via sudo (target only)"
+    else
+        echo "Profiler counters: normal user"
+        echo "If NVIDIA reports ERR_NVGPUCTRPERM, rerun with:"
+        echo "  YERBAS_NCU_SUDO=1 bash scripts/run-fastlite-phase2-profiler.sh"
+    fi
+
     for gpu in "${GPUS[@]}"; do
         for variant in "${VARIANTS[@]}"; do
             base="$OUT_DIR/gpu${gpu}-${variant}"
@@ -91,7 +106,7 @@ if command -v ncu >/dev/null 2>&1; then
                 export YERBAS_CUDA_BENCH_RAW_BATCH=1
                 export YERBAS_BENCH_FORCE_CN_VARIANT="$variant"
 
-                ncu \
+                "${NCU_RUN[@]}" \
                     --target-processes all \
                     --kernel-name-base demangled \
                     --kernel-name "regex:$KERNEL_REGEX" \
@@ -109,6 +124,9 @@ if command -v ncu >/dev/null 2>&1; then
 
             report="$base.ncu-rep"
             if [[ -f "$report" ]]; then
+                if [[ "$NCU_ELEVATED" -eq 1 ]]; then
+                    sudo chown "$(id -u):$(id -g)" "$report" 2>/dev/null || true
+                fi
                 ncu --import "$report" --page details --csv > "$base-details.csv" 2>/dev/null || true
                 ncu --import "$report" --page raw --csv > "$base-raw.csv" 2>/dev/null || true
                 echo "Saved: $report"
@@ -116,8 +134,9 @@ if command -v ncu >/dev/null 2>&1; then
                 echo "Saved: $base-raw.csv"
             else
                 echo "WARNING: Nsight Compute did not produce $report"
-                echo "If the console reports ERR_NVGPUCTRPERM or unsupported GPU,"
-                echo "upload $console and we will use the appropriate fallback."
+                echo "If the console reports ERR_NVGPUCTRPERM, rerun with:"
+                echo "  YERBAS_NCU_SUDO=1 bash scripts/run-fastlite-phase2-profiler.sh"
+                echo "If it reports unsupported GPU instead, upload $console."
             fi
         done
     done
