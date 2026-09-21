@@ -26,7 +26,7 @@ echo " YERBAS NVPROF KERNEL DISCOVERY"
 echo "============================================================"
 echo " GPU:      $GPU"
 echo " Variant:  $VARIANT"
-echo " Metric:   achieved_occupancy"
+echo " Metric:   NONE (trace-only discovery)"
 echo " Filter:   NONE"
 echo " Log:      $OUT"
 echo "============================================================"
@@ -39,8 +39,6 @@ sudo env \
     "$NVPROF_BIN" \
     --devices "$GPU" \
     --profile-api-trace none \
-    --replay-mode kernel \
-    --metrics achieved_occupancy \
     --print-gpu-trace \
     --log-file "$OUT" \
     "$BIN" "$GPU" 3584
