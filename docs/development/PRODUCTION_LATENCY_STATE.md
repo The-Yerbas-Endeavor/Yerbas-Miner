@@ -495,3 +495,26 @@ Metrics needed before a new kernel experiment:
 Do not write another mul4/pairload/two-lane/read-only variant until this profiler
 pass identifies the dominant runtime stall.
 
+### Sept. 21 profiler compatibility finding
+
+The first Nsight Compute pass failed with ERR_NVGPUCTRPERM. Elevating the
+profiler cleared that permission barrier, but the next pass reported that
+profiling is not supported on device 0.
+
+The test GPUs are GTX 1080 Ti / compute capability 6.1 (Pascal). Current Nsight
+Compute no longer supports Pascal performance-counter profiling. The elevated
+attempt also showed that this host's sudo configuration ignores `-E`, so the
+forced CN-Fast environment was not preserved and the benchmark fell back to the
+normal Dark/DarkLite/Fast schedule.
+
+Commit `cb338716` updates `scripts/run-fastlite-phase2-profiler.sh` to:
+- detect compute capability 6.x and bypass Nsight Compute;
+- locate `nvprof` from PATH or an installed `/usr/local/cuda-*/bin/nvprof`;
+- pass the forced Fast/Lite benchmark environment explicitly through sudo;
+- scope profiling to the 13th production four-lane phase-2 launch;
+- use kernel replay/analysis metrics on Pascal.
+
+If nvprof is not installed, do not install or downgrade a CUDA toolkit blindly.
+First capture the current nvcc version and installed /usr/local CUDA trees so the
+least-invasive compatible profiler package can be chosen.
+
