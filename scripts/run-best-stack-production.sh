@@ -35,7 +35,7 @@ unset YERBAS_CUDA_RETUNE || true
 unset YERBAS_CUDA_OVERLAP || true
 unset YERBAS_GPU_AUTOTUNE || true
 unset YERBAS_GPU_VARIANT_AUTOTUNE || true
-unset YERBAS_CN_PHASE_RETUNE || true
+export YERBAS_CN_PHASE_RETUNE=1
 unset YERBAS_CN_PHASE_THREADS || true
 unset YERBAS_CN_SETUP_THREADS || true
 unset YERBAS_CN_FINAL_THREADS || true
@@ -121,9 +121,12 @@ echo " CPU cache file:   $CACHE_FILE"
 echo " Cached CPU H/s:   $CACHE_HPS"
 echo " GPU experiments:  OFF"
 echo " GPU policy:       cache-first production"
+echo " Phase geometry:   retune setup/final only"
 echo " Telemetry:        ON"
 echo " Log:              $LOG"
 echo
+echo "Setup/final geometry will retune once per CN variant on first use."
+echo "Phase-2 kernel selection remains cache-first and experiments stay OFF."
 echo "Recommended validation window: 6-12 hours."
 echo "Press Ctrl+C when you want to stop."
 echo "============================================================"
