@@ -54,7 +54,20 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         --format=csv,noheader 2>/dev/null || true
 fi
 
-if command -v ncu >/dev/null 2>&1; then
+PASCAL_SELECTED=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+    for gpu in "${GPUS[@]}"; do
+        cc="$(nvidia-smi -i "$gpu" --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+        [[ "$cc" == 6.* ]] && PASCAL_SELECTED=1
+    done
+fi
+
+NVPROF_BIN="$(command -v nvprof 2>/dev/null || true)"
+if [[ -z "$NVPROF_BIN" ]]; then
+    NVPROF_BIN="$(find /usr/local -maxdepth 3 -type f -name nvprof -path '*/cuda*/bin/nvprof' 2>/dev/null | sort -V | tail -1 || true)"
+fi
+
+if [[ "$PASCAL_SELECTED" -eq 0 ]] && command -v ncu >/dev/null 2>&1; then
     echo
     echo "Profiler: Nsight Compute ($(ncu --version 2>/dev/null | tail -1 || true))"
 
@@ -140,9 +153,9 @@ if command -v ncu >/dev/null 2>&1; then
             fi
         done
     done
-elif command -v nvprof >/dev/null 2>&1; then
+elif [[ -n "$NVPROF_BIN" ]]; then
     echo
-    echo "Nsight Compute not found; falling back to nvprof analysis metrics."
+    echo "Pascal/legacy profiler path: nvprof ($NVPROF_BIN)"
 
     for gpu in "${GPUS[@]}"; do
         for variant in "${VARIANTS[@]}"; do
@@ -158,9 +171,16 @@ elif command -v nvprof >/dev/null 2>&1; then
                 export YERBAS_CUDA_BENCH_RAW_BATCH=1
                 export YERBAS_BENCH_FORCE_CN_VARIANT="$variant"
 
-                nvprof \
+                sudo env \
+                    "HOME=$HOME" \
+                    "XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}" \
+                    "YERBAS_CUDA_BENCH_RAW_BATCH=1" \
+                    "YERBAS_BENCH_FORCE_CN_VARIANT=$variant" \
+                    "$NVPROF_BIN" \
+                    --profile-api-trace none \
+                    --replay-mode kernel \
+                    --kernels "::.*$KERNEL_REGEX.*:13" \
                     --analysis-metrics \
-                    --kernels "$KERNEL_REGEX" \
                     --log-file "$base-nvprof.log" \
                     "$BIN" "$gpu" 3584
             ) 2>&1 | tee "$base-console.log" || true
@@ -168,10 +188,17 @@ elif command -v nvprof >/dev/null 2>&1; then
     done
 else
     echo
-    echo "ERROR: neither ncu (Nsight Compute) nor nvprof is installed."
-    echo "No source changes are needed. Upload this console output and the output of:"
-    echo "  nvidia-smi"
-    echo "  nvcc --version"
+    if [[ "$PASCAL_SELECTED" -eq 1 ]]; then
+        echo "ERROR: Pascal GPU detected, but nvprof was not found."
+        echo "Current Nsight Compute cannot profile Pascal performance counters."
+        echo "Checked PATH and /usr/local/cuda-*/bin/nvprof."
+        echo
+        echo "Run and send me:"
+        echo "  nvcc --version"
+        echo "  ls -ld /usr/local/cuda* /usr/local/cuda*/bin/nvprof 2>/dev/null"
+    else
+        echo "ERROR: neither ncu nor nvprof is available."
+    fi
     exit 2
 fi
 
