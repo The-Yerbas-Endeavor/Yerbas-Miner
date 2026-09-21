@@ -802,8 +802,13 @@ void launch_cn_setup_selected(cudaStream_t stream,int device_id,std::size_t coun
         return;
     }
     cn_select_setup_word<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
-    cn_launch_setup_phase<VariantIndex>(stream, g_cn_word_setup[device_id][VariantIndex],
-                                        count, states, scratchpads, contexts);
+    ensure_cn_setup_geometry<VariantIndex>(
+        stream, device_id, count, g_cn_word_setup[device_id][VariantIndex],
+        states, scratchpads, contexts);
+    cn_launch_setup_phase_threads<VariantIndex>(
+        stream, g_cn_word_setup[device_id][VariantIndex],
+        cn_setup_launch_threads(device_id, VariantIndex),
+        count, states, scratchpads, contexts);
 }
 
 template <std::uint8_t VariantIndex>
@@ -816,8 +821,13 @@ void launch_cn_final_selected(cudaStream_t stream,int device_id,std::size_t coun
         return;
     }
     cn_select_final_word<VariantIndex>(stream, device_id, count, states, scratchpads, contexts);
-    cn_launch_final_phase<VariantIndex>(stream, g_cn_word_final[device_id][VariantIndex],
-                                        count, states, scratchpads, contexts);
+    ensure_cn_final_geometry<VariantIndex>(
+        stream, device_id, count, g_cn_word_final[device_id][VariantIndex],
+        states, scratchpads, contexts);
+    cn_launch_final_phase_threads<VariantIndex>(
+        stream, g_cn_word_final[device_id][VariantIndex],
+        cn_final_launch_threads(device_id, VariantIndex),
+        count, states, scratchpads, contexts);
 }
 
 inline const char* cn_word_setup_name(int device_id,std::uint8_t variant)
