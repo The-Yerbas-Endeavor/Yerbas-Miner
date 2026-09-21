@@ -900,3 +900,71 @@ Commit 4d7aa16 changes only the best-stack validation runner:
 
 The next long validation should therefore exercise the actual best-known stack.
 
+### Sept. 21 corrected best-stack snapshot exposes stale-work bottleneck
+
+The corrected best-stack production run beginning 15:26 local time loaded the
+validated CPU combo policy and both GTX 1080 Ti cards in cache-first mode.
+
+At about 23 minutes:
+- instantaneous whole-miner rate: ~1.99 kH/s;
+- cumulative AVG: ~1.91 kH/s;
+- GPU0 stale hashes: 12.81%;
+- GPU1 stale hashes: 14.05%;
+- accepted shares: 331, rejected: 1;
+- block found: 1.
+
+The stale loss is now much larger than any surviving CUDA micro-kernel delta.
+
+Observed batch-size stale rates in the uploaded sample:
+- batch 3584: 26 stale / 388 completed (~6.7% stale hashes);
+- batch 5376: 20 stale / 99 completed (~20.2%);
+- batch 11648: 3 stale / 9 completed (~33.3%);
+- batch 17920: 3 stale / 7 completed (~42.9%).
+
+The most obvious pathological event was a short ~15 s job while the pure
+512-KiB rotation selected 11648 hashes on GPU0 and 17920 on GPU1. The job
+changed while both scans were still running, wasting ~9.75 s on GPU0 and
+~14.43 s on GPU1.
+
+This does not prove that globally shrinking batches is a win: larger batches
+also have higher raw H/s. The correct production metric is useful H/s after
+stale work, not stale percentage alone.
+
+### Stale-aware batch crossover experiment
+
+Branch: `feature/stale-aware-batching`
+
+Experimental controls:
+- `YERBAS_GPU_STALE_BATCH_CAP`: global production batch cap;
+- `YERBAS_GPU_STALE_BATCH_CAP_<device>`: per-device override;
+- unset/0 means normal fully adaptive production.
+
+The cap is applied inside `BatchEngine::upload_job()` after the normal
+variant/class policy and memory safety limit, but before the batch-keyed
+CryptoNight runtime selectors are activated. This preserves selector/cache
+semantics at the actual capped count. Benchmark paths ignore the stale cap.
+
+Initial test cap: 5376 hashes. It is already a normal production count on these
+cards, aligns exactly to the 896-hash Pascal device quantum, and avoids the
+11,648/17,920-hash long scans without forcing Fast rotations below their normal
+3584 count.
+
+Runner:
+`scripts/run-stale-batch-crossover-ab.sh`
+
+Default design:
+- Phase A, 15 min: GPU0 adaptive, GPU1 capped at 5376;
+- Phase B, 15 min: GPU0 capped at 5376, GPU1 adaptive;
+- same CPU combo policy and cache root;
+- all other CUDA experiments disabled;
+- production latency telemetry enabled.
+
+The analyzer now reports raw H/s and useful H/s after stale work. A real stale
+cap win must follow the capped role when it swaps GPUs and improve useful H/s,
+not merely reduce stale percentage.
+
+Relevant commits:
+- e7698e9: per-GPU stale-work batch cap;
+- 46419cc: repair/extend latency analyzer with useful H/s;
+- 6433728: 30-minute crossover production A/B.
+
