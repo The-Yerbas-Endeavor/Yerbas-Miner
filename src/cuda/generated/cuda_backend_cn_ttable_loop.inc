@@ -258,6 +258,273 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
 
 template <std::uint8_t VariantIndex>
+__global__ void cryptonight_loop_stage_ttable4_dualhash(std::size_t count,
+                                                        std::uint8_t* __restrict__ scratchpads,
+                                                        const cryptonight::SplitContext* __restrict__ contexts)
+{
+    __shared__ std::uint32_t tables[1024];
+    cryptonight::init_shared_aes_ttables(tables);
+    __syncthreads();
+
+    constexpr auto cfg = cryptonight::config_value(VariantIndex);
+    constexpr std::size_t address_mask = cfg.aes_rounds - 1U;
+    constexpr std::uint32_t byte_address_mask =
+        static_cast<std::uint32_t>(address_mask << 4U);
+
+    const unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int lane = threadIdx.x & 3U;
+    const unsigned int warp_lane = threadIdx.x & 31U;
+    const unsigned int base = warp_lane & ~3U;
+    const unsigned int pair = global_thread >> 2U;
+    const std::size_t group_a = static_cast<std::size_t>(pair) * 2U;
+    if (group_a >= count) return;
+    const std::size_t group_b = group_a + 1U;
+    const bool have_b = group_b < count;
+    const unsigned int mask = 0xFU << base;
+
+    const std::uint32_t* t0 = tables;
+    const std::uint32_t* t1 = tables + 256;
+    const std::uint32_t* t2 = tables + 512;
+    const std::uint32_t* t3 = tables + 768;
+
+    std::uint8_t* scratch_a =
+        scratchpads + group_a * cfg.page_size;
+    std::uint8_t* scratch_b =
+        scratchpads + (have_b ? group_b : group_a) * cfg.page_size;
+
+    const auto& ctx_a = contexts[group_a];
+    const auto& ctx_b = contexts[have_b ? group_b : group_a];
+
+    std::uint32_t aw_a = cryptonight::load32le_aligned(ctx_a.a + lane * 4U);
+    std::uint32_t bw_a = cryptonight::load32le_aligned(ctx_a.b + lane * 4U);
+    std::uint32_t aw_b = cryptonight::load32le_aligned(ctx_b.a + lane * 4U);
+    std::uint32_t bw_b = cryptonight::load32le_aligned(ctx_b.b + lane * 4U);
+
+    std::uint32_t aw1_shadow_a = 0U;
+    std::uint32_t aw1_shadow_b = 0U;
+    if (lane == 0U) {
+        aw1_shadow_a = cryptonight::load32le_aligned(ctx_a.a + 4U);
+        aw1_shadow_b = cryptonight::load32le_aligned(ctx_b.a + 4U);
+    }
+
+    const std::uint64_t tweak_a = ctx_a.tweak;
+    const std::uint64_t tweak_b = ctx_b.tweak;
+    const std::uint32_t tweak_lo_a = static_cast<std::uint32_t>(tweak_a);
+    const std::uint32_t tweak_hi_a = static_cast<std::uint32_t>(tweak_a >> 32U);
+    const std::uint32_t tweak_lo_b = static_cast<std::uint32_t>(tweak_b);
+    const std::uint32_t tweak_hi_b = static_cast<std::uint32_t>(tweak_b >> 32U);
+
+    #pragma unroll 1
+    for (std::uint32_t iter = 0; iter < cfg.iterations; ++iter) {
+        const std::uint32_t aw0_a = __shfl_sync(mask, aw_a, base);
+        const std::uint32_t aw0_b = __shfl_sync(mask, aw_b, base);
+        const std::uint32_t aw1_a = lane == 0U ? aw1_shadow_a : 0U;
+        const std::uint32_t aw1_b = lane == 0U ? aw1_shadow_b : 0U;
+
+        std::uint8_t* slot_a =
+            scratch_a + static_cast<std::size_t>(aw0_a & byte_address_mask);
+        std::uint8_t* slot_b =
+            scratch_b + static_cast<std::size_t>(aw0_b & byte_address_mask);
+
+        // True per-lane ILP: issue both independent random scratchpad reads
+        // before consuming either result.  Unlike the retired split-warp
+        // experiment, every participating lane carries state for two hashes.
+        const auto* own_addr_a =
+            reinterpret_cast<const std::uint32_t*>(slot_a) + lane;
+        const auto* own_addr_b =
+            reinterpret_cast<const std::uint32_t*>(slot_b) + lane;
+        std::uint32_t own_a = 0U;
+        std::uint32_t own_b = 0U;
+        asm volatile(
+            "ld.global.u32 %0, [%2];\n\t"
+            "ld.global.u32 %1, [%3];\n\t"
+            : "=r"(own_a), "=r"(own_b)
+            : "l"(own_addr_a), "l"(own_addr_b));
+
+        auto aes_word = [&](std::uint32_t own, std::uint32_t aw) {
+            std::uint32_t cw = 0U;
+            if constexpr (VariantIndex == 2) {
+                const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
+                const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
+                const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
+                const std::uint32_t q3_local = t3[static_cast<std::uint8_t>(own >> 24U)];
+                const std::uint32_t q1 =
+                    __shfl_sync(mask, q1_local, base + ((lane + 1U) & 3U));
+                const std::uint32_t q2 =
+                    __shfl_sync(mask, q2_local, base + ((lane + 2U) & 3U));
+                const std::uint32_t q3 =
+                    __shfl_sync(mask, q3_local, base + ((lane + 3U) & 3U));
+                cw = q0 ^ q1 ^ q2 ^ q3 ^ aw;
+            } else {
+                const std::uint32_t w1 =
+                    __shfl_sync(mask, own, base + ((lane + 1U) & 3U));
+                const std::uint32_t w2 =
+                    __shfl_sync(mask, own, base + ((lane + 2U) & 3U));
+                const std::uint32_t w3 =
+                    __shfl_sync(mask, own, base + ((lane + 3U) & 3U));
+                const std::uint8_t x0 = static_cast<std::uint8_t>(own);
+                const std::uint8_t x1 = static_cast<std::uint8_t>(w1 >> 8U);
+                const std::uint8_t x2 = static_cast<std::uint8_t>(w2 >> 16U);
+                const std::uint8_t x3 = static_cast<std::uint8_t>(w3 >> 24U);
+                cw = t0[x0] ^ t1[x1] ^ t2[x2] ^ t3[x3] ^ aw;
+            }
+            return cw;
+        };
+
+        const std::uint32_t cw_a = aes_word(own_a, aw_a);
+        const std::uint32_t cw_b = aes_word(own_b, aw_b);
+
+        auto first_store = [&](std::uint32_t cw, std::uint32_t bw) {
+            std::uint32_t word = cw ^ bw;
+            if (lane == 2U) {
+                const std::uint8_t tmp =
+                    static_cast<std::uint8_t>(word >> 24U);
+                constexpr std::uint32_t table = 0x75310U;
+                const std::uint8_t mutate_index =
+                    static_cast<std::uint8_t>((((tmp >> 3U) & 6U) |
+                                               (tmp & 1U)) << 1U);
+                word ^= ((table >> mutate_index) & 0x30U) << 24U;
+            }
+            return word;
+        };
+
+        reinterpret_cast<std::uint32_t*>(slot_a)[lane] =
+            first_store(cw_a, bw_a);
+        if (have_b) {
+            reinterpret_cast<std::uint32_t*>(slot_b)[lane] =
+                first_store(cw_b, bw_b);
+        }
+
+        const std::uint32_t c0_a = __shfl_sync(mask, cw_a, base);
+        const std::uint32_t c0_b = __shfl_sync(mask, cw_b, base);
+        std::uint8_t* slot2_a =
+            scratch_a + static_cast<std::size_t>(c0_a & byte_address_mask);
+        std::uint8_t* slot2_b =
+            scratch_b + static_cast<std::size_t>(c0_b & byte_address_mask);
+
+        const auto* t_addr_a =
+            reinterpret_cast<const std::uint32_t*>(slot2_a) + lane;
+        const auto* t_addr_b =
+            reinterpret_cast<const std::uint32_t*>(slot2_b) + lane;
+        std::uint32_t t_word_a = 0U;
+        std::uint32_t t_word_b = 0U;
+        asm volatile(
+            "ld.global.u32 %0, [%2];\n\t"
+            "ld.global.u32 %1, [%3];\n\t"
+            : "=r"(t_word_a), "=r"(t_word_b)
+            : "l"(t_addr_a), "l"(t_addr_b));
+
+        const std::uint32_t c1_a =
+            __shfl_sync(mask, cw_a, base + 1U);
+        const std::uint32_t c1_b =
+            __shfl_sync(mask, cw_b, base + 1U);
+        const std::uint32_t t0_hi_a =
+            __shfl_sync(mask, t_word_a, base + 1U);
+        const std::uint32_t t0_hi_b =
+            __shfl_sync(mask, t_word_b, base + 1U);
+        const std::uint32_t old_a2_a =
+            __shfl_sync(mask, aw_a, base + 2U);
+        const std::uint32_t old_a3_a =
+            __shfl_sync(mask, aw_a, base + 3U);
+        const std::uint32_t old_a2_b =
+            __shfl_sync(mask, aw_b, base + 2U);
+        const std::uint32_t old_a3_b =
+            __shfl_sync(mask, aw_b, base + 3U);
+
+        std::uint32_t na0_lo_a = 0U, na0_hi_a = 0U;
+        std::uint32_t na1_lo_a = 0U, na1_hi_a = 0U;
+        std::uint32_t na0_lo_b = 0U, na0_hi_b = 0U;
+        std::uint32_t na1_lo_b = 0U, na1_hi_b = 0U;
+
+        if (lane == 0U) {
+            const std::uint32_t t0_lo_a = t_word_a;
+            const std::uint64_t c_low_a =
+                static_cast<std::uint64_t>(c0_a) |
+                (static_cast<std::uint64_t>(c1_a) << 32U);
+            const std::uint64_t t0v_a =
+                static_cast<std::uint64_t>(t0_lo_a) |
+                (static_cast<std::uint64_t>(t0_hi_a) << 32U);
+            const std::uint64_t lo_a = c_low_a * t0v_a;
+            const std::uint64_t hi_a = __umul64hi(c_low_a, t0v_a);
+            const std::uint64_t olda0_a =
+                static_cast<std::uint64_t>(aw0_a) |
+                (static_cast<std::uint64_t>(aw1_a) << 32U);
+            const std::uint64_t olda1_a =
+                static_cast<std::uint64_t>(old_a2_a) |
+                (static_cast<std::uint64_t>(old_a3_a) << 32U);
+            const std::uint64_t next0_a = olda0_a + hi_a;
+            const std::uint64_t next1_a = olda1_a + lo_a;
+            na0_lo_a = static_cast<std::uint32_t>(next0_a);
+            na0_hi_a = static_cast<std::uint32_t>(next0_a >> 32U);
+            na1_lo_a = static_cast<std::uint32_t>(next1_a);
+            na1_hi_a = static_cast<std::uint32_t>(next1_a >> 32U);
+            aw1_shadow_a = na0_hi_a ^ t0_hi_a;
+
+            const std::uint32_t t0_lo_b = t_word_b;
+            const std::uint64_t c_low_b =
+                static_cast<std::uint64_t>(c0_b) |
+                (static_cast<std::uint64_t>(c1_b) << 32U);
+            const std::uint64_t t0v_b =
+                static_cast<std::uint64_t>(t0_lo_b) |
+                (static_cast<std::uint64_t>(t0_hi_b) << 32U);
+            const std::uint64_t lo_b = c_low_b * t0v_b;
+            const std::uint64_t hi_b = __umul64hi(c_low_b, t0v_b);
+            const std::uint64_t olda0_b =
+                static_cast<std::uint64_t>(aw0_b) |
+                (static_cast<std::uint64_t>(aw1_b) << 32U);
+            const std::uint64_t olda1_b =
+                static_cast<std::uint64_t>(old_a2_b) |
+                (static_cast<std::uint64_t>(old_a3_b) << 32U);
+            const std::uint64_t next0_b = olda0_b + hi_b;
+            const std::uint64_t next1_b = olda1_b + lo_b;
+            na0_lo_b = static_cast<std::uint32_t>(next0_b);
+            na0_hi_b = static_cast<std::uint32_t>(next0_b >> 32U);
+            na1_lo_b = static_cast<std::uint32_t>(next1_b);
+            na1_hi_b = static_cast<std::uint32_t>(next1_b >> 32U);
+            aw1_shadow_b = na0_hi_b ^ t0_hi_b;
+        }
+
+        na0_lo_a = __shfl_sync(mask, na0_lo_a, base);
+        na0_hi_a = __shfl_sync(mask, na0_hi_a, base);
+        na1_lo_a = __shfl_sync(mask, na1_lo_a, base);
+        na1_hi_a = __shfl_sync(mask, na1_hi_a, base);
+        na0_lo_b = __shfl_sync(mask, na0_lo_b, base);
+        na0_hi_b = __shfl_sync(mask, na0_hi_b, base);
+        na1_lo_b = __shfl_sync(mask, na1_lo_b, base);
+        na1_hi_b = __shfl_sync(mask, na1_hi_b, base);
+
+        const std::uint32_t na_word_a =
+            lane == 0U ? na0_lo_a :
+            lane == 1U ? na0_hi_a :
+            lane == 2U ? na1_lo_a : na1_hi_a;
+        const std::uint32_t na_word_b =
+            lane == 0U ? na0_lo_b :
+            lane == 1U ? na0_hi_b :
+            lane == 2U ? na1_lo_b : na1_hi_b;
+
+        std::uint32_t store_a = na_word_a;
+        if (lane == 2U) store_a ^= tweak_lo_a;
+        if (lane == 3U) store_a ^= tweak_hi_a;
+        reinterpret_cast<std::uint32_t*>(slot2_a)[lane] = store_a;
+
+        if (have_b) {
+            std::uint32_t store_b = na_word_b;
+            if (lane == 2U) store_b ^= tweak_lo_b;
+            if (lane == 3U) store_b ^= tweak_hi_b;
+            reinterpret_cast<std::uint32_t*>(slot2_b)[lane] = store_b;
+        }
+
+        aw_a = na_word_a ^ t_word_a;
+        bw_a = cw_a;
+        if (have_b) {
+            aw_b = na_word_b ^ t_word_b;
+            bw_b = cw_b;
+        }
+    }
+}
+
+
+template <std::uint8_t VariantIndex>
 __global__ void cryptonight_loop_stage_ttable4_readonly(std::size_t count,
                                                          std::uint8_t* __restrict__ scratchpads,
                                                          const cryptonight::SplitContext* __restrict__ contexts)
