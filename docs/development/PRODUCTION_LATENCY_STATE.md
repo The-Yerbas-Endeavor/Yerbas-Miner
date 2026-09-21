@@ -616,3 +616,51 @@ Promotion rule:
 - no local-memory spill;
 - then require a repeatable >=2% phase-2 win before any production trial.
 
+### Sept. 21 true dual-hash ILP first A/B result
+
+The first full dual-GPU Fast/Lite A/B produced a mixed but useful result.
+
+All four cases:
+- dual-hash parity PASS;
+- baseline registers 32/thread;
+- dual-hash registers 54/thread;
+- baseline local memory 0;
+- dual-hash local memory 0.
+
+Median phase-2 deltas versus the existing four-lane baseline:
+- GPU0 CN-Fast: -2.316% (dual-hash slower);
+- GPU0 CN-Lite: +5.022% (dual-hash faster);
+- GPU1 CN-Fast: -0.980% (dual-hash slower);
+- GPU1 CN-Lite: -0.842% (dual-hash slower).
+
+GPU0 CN-Lite is not dismissed as simple noise: the three dual-hash samples were
+2196.954 / 2218.265 / 2219.682 ms, while the baseline median was 2335.563 ms.
+However GPU1 CN-Lite is a stable negative result, so the candidate is not a
+universal per-variant promotion.
+
+Important geometry observation:
+- batch 3584 dual-hash requires 7168 CUDA threads total;
+- occupancy-recommended 576 threads/block produces only 13 blocks;
+- GTX 1080 Ti has 28 SMs;
+- 256 threads/block produces exactly 28 blocks (one per SM);
+- 128 threads/block produces exactly 56 blocks (two per SM).
+
+Because the dual-hash kernel raises registers from 32 to 54, occupancy-based
+block selection and device-wide block coverage can disagree. The next test must
+therefore sweep dual-hash threads explicitly before deciding whether GPU0/Lite
+is a one-card special case or whether the current 576-thread geometry is hiding
+a cross-device win.
+
+New controls:
+- `YERBAS_CN_DUALHASH_THREADS`: benchmark-only explicit dual-hash block size;
+- `YERBAS_CN_DUALHASH_ONLY=1`: skip tile64/prefetch candidates and compare
+  baseline directly against dual-hash.
+
+Runner:
+`scripts/run-dualhash-lite-thread-matrix.sh`
+
+It tests CN-Lite on both GPUs at:
+128, 160, 192, 224, 256, 288, 320, 352, 384, 448, 512, 576 threads.
+
+Do not productionize dual-hash yet.
+
