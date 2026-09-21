@@ -40,6 +40,20 @@ inline int cn_dualhash_threads_override(const cudaDeviceProp& props)
     return threads;
 }
 
+inline int cn_sparse_warp_hashes_requested()
+{
+    const char* value = std::getenv("YERBAS_CN_SPARSE_WARP_HASHES");
+    if (value == nullptr || *value == '\0') return 0;
+    const int hashes = std::atoi(value);
+    return (hashes == 2 || hashes == 4) ? hashes : 0;
+}
+
+inline bool cn_sparse_warp_only_requested()
+{
+    const char* value = std::getenv("YERBAS_CN_SPARSE_WARP_ONLY");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 struct CnProductionSelectorState {
     bool initialized{false};
     bool selected{false};
@@ -52,6 +66,7 @@ struct CnProductionSelectorState {
     int threads_tile{128};
     int threads_cg{128};
     int threads_dualhash{128};
+    int experimental_mode{445};
     int baseline_samples{0};
     int tile_samples{0};
     int cg_samples{0};
@@ -158,7 +173,8 @@ bool load_cn_production_selector_cache(int device_id,
     if (!(in >> magic >> revision >> variant >> mode >> threads) ||
         magic != "YERBAS_CN_PRODUCTION" || revision != kCnProductionSelectorRevision ||
         variant != static_cast<int>(VariantIndex) ||
-        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) ||
+        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
+         mode != 451 && mode != 452) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0)
         return false;
 
@@ -233,13 +249,27 @@ void initialize_cn_production_selector(cudaStream_t stream,
         cryptonight_loop_stage_ttable4_coalesced<VariantIndex>, warp, props.maxThreadsPerBlock);
     state.threads_cg = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_cg<VariantIndex>, warp, props.maxThreadsPerBlock);
-    state.threads_dualhash = cn_occupancy_block_size(
-        cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
-        warp, props.maxThreadsPerBlock);
-    if (cn_dualhash_experiment_requested()) {
-        const int forced_dualhash_threads = cn_dualhash_threads_override(props);
-        if (forced_dualhash_threads > 0)
-            state.threads_dualhash = forced_dualhash_threads;
+    const int sparse_hashes = cn_sparse_warp_hashes_requested();
+    if (sparse_hashes == 4) {
+        state.experimental_mode = 451;
+        state.threads_dualhash = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 4U>,
+            warp, props.maxThreadsPerBlock);
+    } else if (sparse_hashes == 2) {
+        state.experimental_mode = 452;
+        state.threads_dualhash = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 2U>,
+            warp, props.maxThreadsPerBlock);
+    } else {
+        state.experimental_mode = 445;
+        state.threads_dualhash = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
+            warp, props.maxThreadsPerBlock);
+        if (cn_dualhash_experiment_requested()) {
+            const int forced_dualhash_threads = cn_dualhash_threads_override(props);
+            if (forced_dualhash_threads > 0)
+                state.threads_dualhash = forced_dualhash_threads;
+        }
     }
     state.threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
@@ -281,22 +311,43 @@ void initialize_cn_production_selector(cudaStream_t stream,
         return;
     }
 
-    const bool dualhash_only =
-        cn_dualhash_experiment_requested() && cn_dualhash_only_requested();
-    state.tile_ok = !dualhash_only && cn_validate_pair<VariantIndex>(
+    const bool sparse_requested = sparse_hashes != 0;
+    const bool experimental_only =
+        (cn_dualhash_experiment_requested() && cn_dualhash_only_requested()) ||
+        (sparse_requested && cn_sparse_warp_only_requested());
+
+    state.tile_ok = !experimental_only && cn_validate_pair<VariantIndex>(
         stream, 44, 32, 222, 32, scratchpads, contexts);
-    state.cg_ok = !dualhash_only && cn_validate_pair<VariantIndex>(
+    state.cg_ok = !experimental_only && cn_validate_pair<VariantIndex>(
         stream, 44, 32, 444, 32, scratchpads, contexts);
-    state.dualhash_ok = cn_dualhash_experiment_requested() &&
-        cn_validate_pair<VariantIndex>(
-            stream, 44, 32, 445, 32, scratchpads, contexts);
+
+    if (sparse_requested) {
+        state.dualhash_ok = cn_validate_pair<VariantIndex>(
+            stream, 44, 32, state.experimental_mode, 32, scratchpads, contexts);
+    } else {
+        state.dualhash_ok = cn_dualhash_experiment_requested() &&
+            cn_validate_pair<VariantIndex>(
+                stream, 44, 32, 445, 32, scratchpads, contexts);
+    }
 
     cudaFuncAttributes baseline_attrs{};
     cudaFuncAttributes dualhash_attrs{};
     const cudaError_t baseline_attr_rc = cudaFuncGetAttributes(
         &baseline_attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
-    const cudaError_t dualhash_attr_rc = cudaFuncGetAttributes(
-        &dualhash_attrs, cryptonight_loop_stage_ttable4_dualhash<VariantIndex>);
+
+    cudaError_t dualhash_attr_rc = cudaSuccess;
+    if (state.experimental_mode == 451) {
+        dualhash_attr_rc = cudaFuncGetAttributes(
+            &dualhash_attrs,
+            cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 4U>);
+    } else if (state.experimental_mode == 452) {
+        dualhash_attr_rc = cudaFuncGetAttributes(
+            &dualhash_attrs,
+            cryptonight_loop_stage_ttable4_sparsewarp<VariantIndex, 2U>);
+    } else {
+        dualhash_attr_rc = cudaFuncGetAttributes(
+            &dualhash_attrs, cryptonight_loop_stage_ttable4_dualhash<VariantIndex>);
+    }
     if (baseline_attr_rc != cudaSuccess || dualhash_attr_rc != cudaSuccess)
         cudaGetLastError();
 
@@ -314,9 +365,10 @@ void initialize_cn_production_selector(cudaStream_t stream,
               << " | threshold=5%"
               << " | tile64-parity=" << (state.tile_ok ? "PASS" : "FAIL")
               << " | prefetch-parity=" << (state.cg_ok ? "PASS" : "FAIL")
-              << " | dualhash-parity=" << (state.dualhash_ok ? "PASS" : "FAIL")
-              << " | dualhash-threads=" << state.threads_dualhash
-              << " | dualhash-only=" << (dualhash_only ? "yes" : "no")
+              << " | experimental=" << cn_residency_mode_name(state.experimental_mode)
+              << " | experimental-parity=" << (state.dualhash_ok ? "PASS" : "FAIL")
+              << " | experimental-threads=" << state.threads_dualhash
+              << " | experimental-only=" << (experimental_only ? "yes" : "no")
               << " | baseline-regs="
               << (baseline_attr_rc == cudaSuccess ? baseline_attrs.numRegs : -1)
               << " | dualhash-regs="
@@ -336,7 +388,8 @@ inline int cn_production_trial_mode(const CnProductionSelectorState& state)
     if (state.baseline_samples < kCnProductionSelectorPasses) return 44;
     if (state.tile_ok && state.tile_samples < kCnProductionSelectorPasses) return 222;
     if (state.cg_ok && state.cg_samples < kCnProductionSelectorPasses) return 444;
-    if (state.dualhash_ok && state.dualhash_samples < kCnProductionSelectorPasses) return 445;
+    if (state.dualhash_ok && state.dualhash_samples < kCnProductionSelectorPasses)
+        return state.experimental_mode;
     return 44;
 }
 
@@ -344,7 +397,7 @@ inline int cn_production_trial_threads(const CnProductionSelectorState& state, i
 {
     if (mode == 222) return state.threads_tile;
     if (mode == 444) return state.threads_cg;
-    if (mode == 445) return state.threads_dualhash;
+    if (mode == state.experimental_mode) return state.threads_dualhash;
     if (mode == 44) return state.threads_t4;
     return state.threads_ref;
 }
@@ -370,9 +423,10 @@ void record_cn_production_sample(int device_id,
         state.cg_ms[state.cg_samples++] = elapsed_ms;
         candidate = "prefetch";
         sample = state.cg_samples;
-    } else if (mode == 445 && state.dualhash_samples < kCnProductionSelectorPasses) {
+    } else if (mode == state.experimental_mode &&
+               state.dualhash_samples < kCnProductionSelectorPasses) {
         state.dualhash_ms[state.dualhash_samples++] = elapsed_ms;
-        candidate = "dualhash";
+        candidate = cn_residency_mode_name(mode);
         sample = state.dualhash_samples;
     }
 
@@ -417,7 +471,7 @@ void record_cn_production_sample(int device_id,
         best_ms = cg;
     }
     if (state.dualhash_ok && dualhash < baseline * kCnProductionPromotionRatio && dualhash < best_ms) {
-        best_mode = 445;
+        best_mode = state.experimental_mode;
         best_threads = state.threads_dualhash;
         best_ms = dualhash;
     }
@@ -437,8 +491,9 @@ void record_cn_production_sample(int device_id,
               << " | tile64-vs-baseline=" << tile_delta << "%"
               << " | prefetch-median=" << cg << " ms@" << state.threads_cg
               << " | prefetch-vs-baseline=" << prefetch_delta << "%"
-              << " | dualhash-median=" << dualhash << " ms@" << state.threads_dualhash
-              << " | dualhash-vs-baseline=" << dualhash_delta << "%"
+              << " | experimental=" << cn_residency_mode_name(state.experimental_mode)
+              << " | experimental-median=" << dualhash << " ms@" << state.threads_dualhash
+              << " | experimental-vs-baseline=" << dualhash_delta << "%"
               << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected=" << best_ms << " ms"
               << std::defaultfloat << '\n';
