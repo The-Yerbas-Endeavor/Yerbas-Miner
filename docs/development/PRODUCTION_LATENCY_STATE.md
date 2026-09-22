@@ -1342,3 +1342,64 @@ The final merge gate is still an actual production job where both GPUs'
 uncapped variant-min choice is >=8960 and the automatic policy logs
 `stale-aware batch cap ... -> capped=3584`.
 
+### Sept. 21 one-hour narrowed-threshold production validation
+
+The ~1 h production candidate with `cap=3584, minimum-tuned=8960`
+successfully exercised the automatic stale-aware policy on both GTX 1080 Ti
+cards.
+
+Observed automatic cap activations:
+- GPU0: 7 events, tuned 11648 -> 3584;
+- GPU1: 7 events, tuned 17920 -> 3584;
+- 14 cap events total.
+
+The capped large rotations completed near the expected low-latency range
+(~2.3-3.0 s scans in the observed 512-KiB rotations) instead of the prior
+~9-15 s long scans.
+
+One-hour production-latency analysis:
+- GPU batches: 1297;
+- completed GPU hashes: 5,173,504;
+- useful hashes: 4,644,864;
+- stale hashes: 528,640 (10.22%);
+- GPU scan time: ~6844.1 s;
+- stale scan time: ~674.6 s (9.86%);
+- job lifetime median: ~29.99 s, p10 ~8.26 s, p90 ~118.03 s;
+- GPU0 raw/useful: ~746.68 / 666.90 H/s;
+- GPU1 raw/useful: ~765.59 / 691.02 H/s.
+
+Final visible production status was approximately:
+- AVG 1.77 kH/s;
+- 505 accepted / 1 rejected at 58m45s;
+- 7 blocks at that status, with an eighth block found shortly afterward.
+
+The remaining stale work is now concentrated in ordinary 3584 plus the
+preserved 5376/7168 mid-size paths, so the narrowed policy is behaving as
+designed rather than indiscriminately shrinking every rotation.
+
+### Overnight endurance validation
+
+The next production-candidate run should cover a full night rather than another
+short sample.
+
+`scripts/run-stale-aware-production.sh` now defaults to:
+- 36,000 seconds;
+- approximately 10 hours;
+- production latency telemetry enabled;
+- shipped/default stale-aware policy;
+- all experimental CUDA controls disabled.
+
+The duration remains overridable with
+`YERBAS_STALE_PRODUCTION_SECONDS=<seconds>`.
+
+Overnight validation goals:
+- repeated 11648/17920 -> 3584 cap activations across many rotation/job mixes;
+- stable accepted/rejected share quality;
+- no CUDA errors, OOM, illegal access, assertion, or CPU fallback;
+- observe multiple developer-fee windows;
+- capture enough job-lifetime distribution to judge remaining stale loss;
+- compare sustained whole-run and useful-GPU throughput to the one-hour run.
+
+Relevant commit:
+- 959ee42: make stale-aware production validation a 10-hour overnight run by default.
+
