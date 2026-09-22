@@ -1029,3 +1029,76 @@ Relevant commits:
 - 000874e: crossover analyzer;
 - c3ef023: continuous live crossover runner.
 
+### Sept. 21 live stale crossover result: 5376 is promising
+
+The 45-minute continuous crossover finally exercised large-batch rotations.
+
+Overall production-latency summary:
+- 848 GPU batches;
+- 3,941,504 GPU hashes;
+- 350,336 stale hashes (8.89%);
+- median job lifetime ~47.05 s;
+- p10 job lifetime ~5.10 s;
+- p90 job lifetime ~187.51 s.
+
+There were 34 crossover generations and 5 eligible large-batch generations
+where the adaptive peer selected more than the 5376 cap.
+
+Eligible-role totals:
+- capped: 161,280 hashes, 16.67% stale, 1230.60 raw H/s, 1025.50 useful H/s;
+- adaptive: 404,096 hashes, 20.62% stale, 1235.88 raw H/s, 981.03 useful H/s;
+- useful-H/s delta: +4.53% for the 5376 cap;
+- raw-H/s delta was only about -0.43%.
+
+Same-GPU split is not yet balanced enough for final production promotion:
+- GPU0: capped useful 999.38 vs adaptive 1038.52 H/s (-3.77%);
+- GPU1: capped useful 1099.40 vs adaptive 966.13 H/s (+13.79%);
+- GPU1 only had one eligible generation in the capped role.
+
+Paired eligible generations were directionally favorable in four of five cases:
+- generation 2: short ~15 s job; adaptive 17920 scan ended entirely stale while
+  capped 5376 completed useful work before the change;
+- generation 3: capped useful ~1099.4 vs adaptive ~1038.5 H/s;
+- generation 10: capped ~917.5 vs adaptive ~828.8 H/s;
+- generation 28: capped ~1050.3 vs adaptive ~1034.2 H/s;
+- generation 32: capped ~1081.5 vs adaptive ~1087.2 H/s (essentially flat/slightly negative).
+
+Conclusion: 5376 is promising and has a far stronger signal than the retired
+phase-2 micro-kernel experiments, but five eligible generations are not enough
+to hard-code it globally yet.
+
+### Large-batch throughput/latency frontier
+
+Before converting the cap into production policy, measure whether large batches
+actually buy meaningful raw throughput.
+
+New runner:
+`scripts/run-large-batch-latency-frontier.sh`
+
+It benchmarks two observed large-rotation families:
+- Dark/DarkLite/Turtle;
+- Dark/DarkLite/TurtleLite.
+
+Candidate batches:
+3584, 4480, 5376, 6272, 7168, 8960, 10752, 11648, 13440, 16128, 17920.
+
+Method:
+- both GPUs;
+- full 18-stage raw common batch;
+- setup/final geometry fixed at proven 32/128 for a fair comparison;
+- no stale caps or experimental kernels;
+- two passes, ascending then descending candidate order;
+- analyzer reports median raw H/s, median scan latency, and the smallest batch
+  within 99% of peak throughput.
+
+If 5376 (or another small batch) is inside the 99% raw-throughput plateau on
+both GPUs/triples, the production autotuner should be changed from
+"absolute maximum H/s wins" to "smallest batch inside the throughput plateau."
+That generalizes stale protection to other GPUs without hard-coding a Pascal
+batch size.
+
+Relevant commits:
+- 866bb93: paired-generation crossover reporting;
+- 183301c: throughput/latency frontier analyzer;
+- ad27164: two-pass large-batch frontier runner.
+
