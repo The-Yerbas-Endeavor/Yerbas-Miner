@@ -1102,3 +1102,68 @@ Relevant commits:
 - 183301c: throughput/latency frontier analyzer;
 - ad27164: two-pass large-batch frontier runner.
 
+### Sept. 21 large-batch frontier harness limitation
+
+The first `run-large-batch-latency-frontier.sh` run did not produce a complete
+3584..17920 frontier.
+
+The benchmark constructs a fresh raw-batch `BatchEngine` for each requested
+size. In raw-batch mode its scratchpad budget is based on
+`requested_size * max_scratchpad_stride` (2 MiB/hash), even though the forced
+Dark/DarkLite/Turtle and Dark/DarkLite/TurtleLite triples need only 512 KiB/hash
+at runtime. As a result, GPU0 could measure only 3584 and 4480 before allocation
+failure, and GPU1 could measure only 3584/4480 plus one 5376 sample.
+
+Therefore the generated frontier recommendation of 3584 is not a complete
+3584..17920 comparison and must not be treated as such.
+
+The valid samples are nevertheless useful:
+- GPU0 Dark/DarkLite/Turtle:
+  - 3584: ~1231.88 H/s median;
+  - 4480: ~1228.35 H/s;
+- GPU0 Dark/DarkLite/TurtleLite:
+  - 3584: ~1231.43 H/s;
+  - 4480: ~1228.95 H/s;
+- GPU1 Dark/DarkLite/Turtle:
+  - 3584: ~1257.41 H/s;
+  - 4480: ~1255.98 H/s;
+  - 5376: ~1256.03 H/s;
+- GPU1 Dark/DarkLite/TurtleLite:
+  - 3584: ~1257.14 H/s;
+  - 4480: ~1253.77 H/s;
+  - 5376: ~1255.77 H/s.
+
+Within the sizes that actually ran, larger batches bought no raw-throughput
+gain. This is consistent with the live crossover, where 5376 lost only ~0.43%
+raw H/s versus 11648/17920 while improving useful H/s by ~4.53%.
+
+### Thresholded 3584-vs-large live crossover
+
+Rather than rely on the incomplete synthetic frontier, the next production test
+directly asks whether 3584 is better than 5376 specifically on the large
+11648/17920 rotations.
+
+New runtime threshold:
+- `YERBAS_GPU_STALE_CROSSOVER_MIN_TUNED`
+
+The experimental cap applies only when the normal tuned batch is at or above
+this threshold. This lets a 3584 cap target only genuinely large rotations while
+leaving normal 5376 CN-Lite rotations unchanged.
+
+Next test:
+- cap: 3584;
+- minimum tuned batch: 6272;
+- role switches every Stratum generation;
+- eligible evidence requires the adaptive peer to use >=6272.
+
+Run:
+`YERBAS_STALE_LIVE_CAP=3584 YERBAS_STALE_LIVE_MIN_TUNED=6272 bash scripts/run-stale-live-crossover.sh`
+
+The paired-generation analyzer now includes the threshold in its output.
+
+Relevant commits:
+- ba68fc3 / f12bec3 / 1666f21: thresholded runtime cap;
+- edb5e50: thresholded per-generation crossover wiring;
+- 7e85b7e: threshold-aware crossover analyzer;
+- 0013c68: runner support.
+
