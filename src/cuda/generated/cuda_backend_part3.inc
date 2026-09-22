@@ -37,6 +37,7 @@ struct BatchEngine::Impl {
     std::size_t benchmark_requested_batch{0};
     std::size_t benchmark_cn_chunk{0};
     std::size_t stale_batch_cap{0};
+    std::size_t stale_batch_cap_min_tuned{0};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -298,7 +299,9 @@ void BatchEngine::upload_job(const JobDescriptor& job)
     }
 
     if (!impl_->benchmark_raw_batch && !impl_->benchmark_stage_local &&
-        impl_->stale_batch_cap > 0U) {
+        impl_->stale_batch_cap > 0U &&
+        (impl_->stale_batch_cap_min_tuned == 0U ||
+         adaptive_batch >= impl_->stale_batch_cap_min_tuned)) {
         std::size_t cap = std::min(
             impl_->stale_batch_cap,
             std::min(impl_->batch_capacity, memory_safe_batch));
@@ -311,6 +314,7 @@ void BatchEngine::upload_job(const JobDescriptor& job)
                       << " | tuned=" << adaptive_batch
                       << " -> capped=" << cap
                       << " | requested-cap=" << impl_->stale_batch_cap
+                      << " | minimum-tuned=" << impl_->stale_batch_cap_min_tuned
                       << " | quantum=" << impl_->batch_quantum << '\n';
             adaptive_batch = cap;
         }
