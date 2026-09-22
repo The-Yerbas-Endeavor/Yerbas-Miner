@@ -8,7 +8,7 @@ BUILD_DIR="${YERBAS_BUILD_DIR:-$ROOT/build-7168-live}"
 BIN="$BUILD_DIR/yerbas-miner"
 LOG_DIR="$ROOT/logs"
 POLICY_FILE="$ROOT/docs/development/cpu-combo-policy-20260916.txt"
-DURATION="${YERBAS_7168_LIVE_SECONDS:-7200}"
+DURATION="${YERBAS_7168_LIVE_SECONDS:-43200}"
 mkdir -p "$LOG_DIR"
 
 if [[ ! -f "$POLICY_FILE" ]]; then
@@ -54,7 +54,7 @@ echo
 echo "============================================================"
 echo " YERBAS BATCH-7168 LIVE VALIDATION"
 echo "============================================================"
-echo " Duration:         ${DURATION}s (~$((DURATION / 3600))h)"
+echo " Duration:         ${DURATION}s (~$((DURATION / 3600))h $(((DURATION % 3600) / 60))m)"
 echo " Expected 7168:    setup=32 final=128 on GTX 1080 Ti"
 echo " 5376 behavior:    unchanged"
 echo " Stale-aware cap:  shipped/main policy"
