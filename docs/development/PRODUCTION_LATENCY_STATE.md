@@ -1312,3 +1312,33 @@ Relevant commits:
 - fc945da: narrow 1080 Ti stale cap to large rotations;
 - 6d71bf4: update production validation expectation to >=8960.
 
+### Sept. 21 narrowed-threshold live snapshot (~2 min)
+
+The first production candidate with the narrowed automatic threshold
+(`cap=3584, minimum-tuned=8960`) started cleanly on both GTX 1080 Ti cards.
+
+Observed behavior:
+- CPU combo policy loaded from cache at ~432.70 H/s;
+- both GPUs detected the validated 1080 Ti stale-aware policy;
+- first Fast/Lite/TurtleLite rotation stayed at 3584 on both cards;
+- next DarkLite/Lite/Turtle rotation selected 7168 on GPU0 and 5376 on GPU1;
+- no stale-aware cap activation occurred, which is correct because both tuned
+  counts are below 8960;
+- 7168 and 5376 scans produced accepted shares;
+- no CUDA errors, OOM, illegal access, assertion, CPU fallback, or rejected
+  shares appeared in the uploaded snapshot.
+
+This confirms the 8960 threshold preserves the mid-size 5376/7168 paths and
+targets only the measured long-scan class.
+
+New optimization opportunity observed:
+- cache misses at batch 5376/7168 use conservative 128-thread setup geometry for
+  some CN variants.
+- Do not hard-code 32 threads at these counts yet: the 32/128 validation was
+  performed at batch 3584. Measure 5376/7168 independently before changing the
+  production fallback.
+
+The final merge gate is still an actual production job where both GPUs'
+uncapped variant-min choice is >=8960 and the automatic policy logs
+`stale-aware batch cap ... -> capped=3584`.
+
