@@ -132,6 +132,35 @@ def main() -> int:
             by_role_batch[(role, hashes)].add(hashes, scan_ms, stale)
             by_cn_role[(cn, role)].add(hashes, scan_ms, stale)
 
+    print("Eligible generation pairs:")
+    for generation in sorted(eligible):
+        capped_gpu, cap = roles[generation]
+        capped_rows = [r for r in by_generation[generation] if int(r["gpu"]) == capped_gpu]
+        adaptive_rows = [r for r in by_generation[generation] if int(r["gpu"]) != capped_gpu]
+
+        def summarize(rows):
+            hashes = sum(int(r["hashes"]) for r in rows)
+            stale_hashes = sum(int(r["hashes"]) for r in rows if bool(r["stale"]))
+            scan_ms = sum(float(r["scan_ms"]) for r in rows)
+            raw = hashes * 1000.0 / scan_ms if scan_ms else 0.0
+            useful = (hashes - stale_hashes) * 1000.0 / scan_ms if scan_ms else 0.0
+            stale_pct = 100.0 * stale_hashes / hashes if hashes else 0.0
+            batches = sorted({int(r["hashes"]) for r in rows})
+            cn = str(rows[0]["cn"]) if rows else "?"
+            return raw, useful, stale_pct, batches, cn
+
+        c_raw, c_useful, c_stale, c_batches, cn = summarize(capped_rows)
+        a_raw, a_useful, a_stale, a_batches, _ = summarize(adaptive_rows)
+        delta = 100.0 * (c_useful / a_useful - 1.0) if a_useful else float("inf")
+        delta_text = "+inf%" if delta == float("inf") else f"{delta:+.2f}%"
+        print(
+            f"  gen={generation:3d} CN={cn:42s} capped_gpu={capped_gpu} "
+            f"capped_batch={','.join(map(str, c_batches))} useful={c_useful:8.2f} H/s "
+            f"stale={c_stale:6.2f}% | adaptive_batch={','.join(map(str, a_batches))} "
+            f"useful={a_useful:8.2f} H/s stale={a_stale:6.2f}% | delta={delta_text}"
+        )
+    print()
+
     print("Role totals on eligible generations:")
     for role in ("capped", "adaptive"):
         a = by_role[role]
