@@ -1403,3 +1403,65 @@ Overnight validation goals:
 Relevant commit:
 - 959ee42: make stale-aware production validation a 10-hour overnight run by default.
 
+### Sept. 21-22 overnight stale-aware production validation: PASS
+
+The overnight production candidate began at 22:41:38 and the uploaded snapshot
+covers approximately 9 h 50 min of uninterrupted mining, effectively the full
+10-hour endurance window.
+
+Final visible production status near 9 h 50 min:
+- instantaneous total: ~1.91 kH/s;
+- cumulative AVG: ~1.92 kH/s;
+- accepted: 7,090;
+- rejected: 10;
+- share acceptance display: 99.9%;
+- blocks found: 9;
+- GPU0 stale hashes: 5.87%;
+- GPU1 stale hashes: 5.43%.
+
+All 10 rejected shares were pool error 21, "stale job". No invalid-hash or
+correctness rejection was observed.
+
+Automatic stale-aware policy coverage:
+- GPU0 11648 -> 3584 cap activations: 41;
+- GPU1 17920 -> 3584 cap activations: 41;
+- total cap activations: 82 across 41 large-rotation jobs.
+
+The narrowed 8960 threshold also preserved the intended mid-size paths:
+- GPU0 7168 remained 7168;
+- GPU1 5376 remained 5376.
+
+The capped 512-KiB large rotations consistently ran near roughly 2.3-3.0 s per
+scan instead of the old ~9-15 s large scans.
+
+Overnight telemetry calculated from the uploaded log:
+- completed GPU batches: 13,576;
+- completed GPU hashes: 53,548,544;
+- stale hashes: 3,021,312 (~5.64%);
+- job-lifetime samples: 337;
+- median job lifetime: ~47.73 s;
+- p10: ~5.35 s;
+- p90: ~203.02 s;
+- GPU0 raw/useful: ~789.80 / 743.55 H/s;
+- GPU1 raw/useful: ~791.91 / 748.99 H/s.
+
+For comparison, the prior one-hour production sample had ~10.22% stale hashes.
+The rotation/job mix differs, so this is not a strict A/B percentage claim, but
+the overnight endurance result confirms that the stale-aware policy remains
+stable under a much broader production workload.
+
+The run crossed 10 developer-fee windows and returned to the configured pool
+after each completed window. No CUDA error, OOM, illegal access, assertion,
+segmentation fault, or CPU fallback was observed.
+
+Production gate result: PASS.
+
+The validated GTX 1080 Ti default is ready for main:
+- tuned batch <8960: preserve normal adaptive choice;
+- tuned batch >=8960: cap to 3584;
+- validated batch-3584 phase geometry: setup=32, final=128;
+- explicit environment stale-cap settings remain available as overrides.
+
+Next step: fast-forward main to the validated stale-aware branch and run the
+full GitHub Actions build matrix.
+
