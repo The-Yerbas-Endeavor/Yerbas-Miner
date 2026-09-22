@@ -76,8 +76,8 @@ echo " Telemetry:        ON"
 echo " Log:              $LOG"
 echo
 echo "Expected on GTX 1080 Ti:"
-echo "  stale-aware production policy | cap=3584 | minimum-tuned=6272"
-echo "  large tuned rotations >=6272 -> 3584"
+echo "  stale-aware production policy | cap=3584 | minimum-tuned=8960"
+echo "  large tuned rotations >=8960 -> 3584"
 echo "  normal 3584/5376 rotations unchanged"
 echo "============================================================"
 echo
