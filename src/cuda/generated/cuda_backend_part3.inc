@@ -103,7 +103,22 @@ struct BatchEngine::Impl {
         const std::size_t heavy_budget_batch = benchmark_stage_local
             ? std::min(benchmark_cn_chunk, requested_size)
             : base_batch_size;
-        scratchpad_budget_bytes = heavy_budget_batch * kCnScratchpadStride;
+
+        std::size_t scratchpad_budget_stride = kCnScratchpadStride;
+        if (benchmark_raw_batch) {
+            if (const char* value = std::getenv("YERBAS_CUDA_BENCH_SCRATCHPAD_STRIDE");
+                value != nullptr && *value != '\0') {
+                char* end = nullptr;
+                const unsigned long long parsed = std::strtoull(value, &end, 10);
+                if (end != value && *end == '\0' &&
+                    parsed >= min_cn_scratchpad &&
+                    parsed <= kCnScratchpadStride &&
+                    (parsed % min_cn_scratchpad) == 0U)
+                    scratchpad_budget_stride = static_cast<std::size_t>(parsed);
+            }
+        }
+
+        scratchpad_budget_bytes = heavy_budget_batch * scratchpad_budget_stride;
         const std::size_t slot_limit = scratchpad_budget_bytes / min_cn_scratchpad;
         batch_capacity = benchmark_stage_local
             ? requested_size
