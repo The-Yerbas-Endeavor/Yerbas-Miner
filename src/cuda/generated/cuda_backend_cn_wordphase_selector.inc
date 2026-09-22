@@ -81,6 +81,12 @@ inline bool cn_phase_geometry_retune_requested()
     return false;
 }
 
+inline bool cn_phase_cache_writes_disabled()
+{
+    const char* value = std::getenv("YERBAS_CN_PHASE_NOSAVE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 inline int cn_phase_launch_threads()
 {
     const int global = cn_phase_global_threads_override();
@@ -232,6 +238,7 @@ void save_cn_phase_backend_cache(int device_id,
                                  const char* phase,
                                  int mode)
 {
+    if (cn_phase_cache_writes_disabled()) return;
     try {
         const auto path = cn_phase_backend_cache_path<VariantIndex>(device_id, props, count, phase);
         if (path.empty()) return;
@@ -320,6 +327,7 @@ void save_cn_phase_geometry_cache(int device_id,
                                   const char* phase,
                                   int threads)
 {
+    if (cn_phase_cache_writes_disabled()) return;
     try {
         const auto path = cn_phase_geometry_cache_path<VariantIndex>(
             device_id, props, count, phase);
