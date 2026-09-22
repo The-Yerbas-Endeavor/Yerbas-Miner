@@ -1161,6 +1161,15 @@ void Client::upload_gpu_job()
             crossover_cap = static_cast<std::size_t>(parsed);
     }
 
+    std::size_t crossover_min_tuned = 0U;
+    if (const char* value = std::getenv("YERBAS_GPU_STALE_CROSSOVER_MIN_TUNED");
+        value != nullptr && *value != '\0') {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end != value && *end == '\0')
+            crossover_min_tuned = static_cast<std::size_t>(parsed);
+    }
+
     std::size_t crossover_slot = 0U;
     if (crossover_cap > 0U && !gpu_workers_.empty()) {
         crossover_slot = static_cast<std::size_t>(
@@ -1168,13 +1177,16 @@ void Client::upload_gpu_job()
         std::cout << "[stale crossover] generation=" << MiningJob::generation()
                   << " capped_gpu=" << gpu_workers_[crossover_slot].device_id
                   << " cap=" << crossover_cap
+                  << " minimum_tuned=" << crossover_min_tuned
                   << " adaptive_peers=" << (gpu_workers_.size() - 1U) << '\n';
     }
 
     for (std::size_t i = 0; i < gpu_workers_.size(); ++i) {
         auto& worker = gpu_workers_[i];
         if (crossover_cap > 0U)
-            worker.engine->set_stale_batch_cap(i == crossover_slot ? crossover_cap : 0U);
+            worker.engine->set_stale_batch_cap(
+                i == crossover_slot ? crossover_cap : 0U,
+                i == crossover_slot ? crossover_min_tuned : 0U);
         worker.engine->upload_job(descriptor);
         const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
         worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start;
