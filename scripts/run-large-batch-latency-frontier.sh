@@ -47,6 +47,7 @@ echo " Triples:    ${TRIPLES[*]}"
 echo " Candidates: ${CANDIDATES[*]}"
 echo " Passes:     2 (ascending then descending)"
 echo " Setup/final geometry: forced 32/128 for fair comparison"
+echo " Scratchpad budget: 512 KiB/hash (matches tested triples)"
 echo " Metric:     raw full-pipeline H/s and scan latency"
 echo " Production: unchanged"
 echo " Log:        $LOG"
@@ -86,6 +87,7 @@ run_case() {
         -u YERBAS_CN_2LANE_TTABLE_EXPERIMENT \
         -u YERBAS_CN_READONLY_TTABLE_EXPERIMENT \
         YERBAS_CUDA_BENCH_RAW_BATCH=1 \
+        YERBAS_CUDA_BENCH_SCRATCHPAD_STRIDE=524288 \
         YERBAS_BENCH_FORCE_CN_TRIPLE="$triple" \
         YERBAS_BENCH_WARMUP_SCANS=1 \
         YERBAS_CN_SETUP_THREADS=32 \
