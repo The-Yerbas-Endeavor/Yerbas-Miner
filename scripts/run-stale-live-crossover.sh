@@ -10,6 +10,7 @@ LOG_DIR="$ROOT/logs"
 POLICY_FILE="$ROOT/docs/development/cpu-combo-policy-20260916.txt"
 DURATION="${YERBAS_STALE_LIVE_SECONDS:-2700}"
 CAP="${YERBAS_STALE_LIVE_CAP:-5376}"
+MIN_TUNED="${YERBAS_STALE_LIVE_MIN_TUNED:-0}"
 
 mkdir -p "$LOG_DIR"
 
@@ -77,6 +78,7 @@ export XDG_CACHE_HOME="$CACHE_ROOT"
 export YERBAS_CPU_COMBO_POLICY_FILE="$POLICY_FILE"
 export YERBAS_PRODUCTION_LATENCY_TELEMETRY=1
 export YERBAS_GPU_STALE_CROSSOVER_CAP="$CAP"
+export YERBAS_GPU_STALE_CROSSOVER_MIN_TUNED="$MIN_TUNED"
 
 # Keep this as a one-variable production experiment.
 unset YERBAS_GPU_STALE_BATCH_CAP || true
@@ -110,13 +112,18 @@ echo " YERBAS LIVE STALE-BATCH CROSSOVER"
 echo "============================================================"
 echo " Duration:         ${DURATION}s"
 echo " Cap:              $CAP"
+echo " Minimum tuned:    $MIN_TUNED (0 = any batch above cap)"
 echo " Role switching:   every Stratum generation"
 echo " CPU combo policy: ON"
 echo " CPU cache:        $CACHE_FILE ($CACHE_HPS H/s)"
 echo " CUDA experiments: OFF"
 echo " Log:              $LOG"
 echo
-echo "Only generations where the adaptive GPU selects >$CAP hashes"
+if [[ "$MIN_TUNED" -gt 0 ]]; then
+    echo "Only generations where the adaptive GPU selects >=$MIN_TUNED hashes"
+else
+    echo "Only generations where the adaptive GPU selects >$CAP hashes"
+fi
 echo "count toward the final capped-vs-adaptive comparison."
 echo "============================================================"
 echo
