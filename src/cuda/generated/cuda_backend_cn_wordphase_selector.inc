@@ -367,12 +367,21 @@ void ensure_cn_setup_geometry(cudaStream_t stream,
         return;
 
     if (!cn_phase_geometry_retune_requested()) {
-        selected = 128;
+        const bool validated_1080ti_3584 =
+            count == 3584U &&
+            props.major == 6 && props.minor == 1 &&
+            std::string(props.name).find("GeForce GTX 1080 Ti") != std::string::npos;
+        selected = validated_1080ti_3584 ? 32 : 128;
         std::cout << "[GPU " << device_id
                   << "] CryptoNight phase geometry safe default | "
                   << cryptonight::config_value(VariantIndex).name
                   << " | phase=setup | batch=" << count
-                  << " | threads=128 | startup-benchmark=off\n";
+                  << " | threads=" << selected
+                  << " | source="
+                  << (validated_1080ti_3584
+                          ? "validated-1080ti-3584"
+                          : "conservative")
+                  << " | startup-benchmark=off\n";
         return;
     }
 
@@ -470,11 +479,20 @@ void ensure_cn_final_geometry(cudaStream_t stream,
 
     if (!cn_phase_geometry_retune_requested()) {
         selected = 128;
+        const bool validated_1080ti_3584 =
+            count == 3584U &&
+            props.major == 6 && props.minor == 1 &&
+            std::string(props.name).find("GeForce GTX 1080 Ti") != std::string::npos;
         std::cout << "[GPU " << device_id
                   << "] CryptoNight phase geometry safe default | "
                   << cryptonight::config_value(VariantIndex).name
                   << " | phase=final | batch=" << count
-                  << " | threads=128 | startup-benchmark=off\n";
+                  << " | threads=128"
+                  << " | source="
+                  << (validated_1080ti_3584
+                          ? "validated-1080ti-3584"
+                          : "conservative")
+                  << " | startup-benchmark=off\n";
         return;
     }
 
