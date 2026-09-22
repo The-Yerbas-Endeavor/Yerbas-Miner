@@ -8,7 +8,7 @@ BUILD_DIR="${YERBAS_BUILD_DIR:-$ROOT/build-stale-aware-production}"
 BIN="$BUILD_DIR/yerbas-miner"
 LOG_DIR="$ROOT/logs"
 POLICY_FILE="$ROOT/docs/development/cpu-combo-policy-20260916.txt"
-DURATION="${YERBAS_STALE_PRODUCTION_SECONDS:-3600}"
+DURATION="${YERBAS_STALE_PRODUCTION_SECONDS:-36000}"
 mkdir -p "$LOG_DIR"
 
 if [[ ! -f "$POLICY_FILE" ]]; then
@@ -68,11 +68,12 @@ echo
 echo "============================================================"
 echo " YERBAS STALE-AWARE PRODUCTION CANDIDATE"
 echo "============================================================"
-echo " Duration:         ${DURATION}s"
+echo " Duration:         ${DURATION}s (~$((DURATION / 3600))h $(((DURATION % 3600) / 60))m)"
 echo " CPU combo policy: ON"
 echo " GPU experiments:  OFF"
 echo " Stale policy:     shipped/default hardware policy"
 echo " Telemetry:        ON"
+echo " Validation:       overnight endurance / rotation coverage"
 echo " Log:              $LOG"
 echo
 echo "Expected on GTX 1080 Ti:"
