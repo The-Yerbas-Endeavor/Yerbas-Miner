@@ -1465,3 +1465,54 @@ The validated GTX 1080 Ti default is ready for main:
 Next step: fast-forward main to the validated stale-aware branch and run the
 full GitHub Actions build matrix.
 
+### Sept. 22 next target: 5376/7168 phase geometry
+
+After the overnight stale-aware policy passed production validation, the next
+safe optimization target is the preserved mid-size 1-MiB paths:
+- GPU0 commonly selects 7168;
+- GPU1 commonly selects 5376.
+
+Overnight logs show some CN setup/final geometry cache misses at those batch
+sizes falling back to the conservative 128-thread launch geometry. The 32/128
+specialization validated for batch 3584 must not be assumed valid at 5376 or
+7168 without measurement.
+
+Branch:
+`feature/midsize-phase-geometry`
+
+New benchmark-only protection:
+- `YERBAS_CN_PHASE_NOSAVE=1`
+- when enabled, CN phase backend/geometry benchmark results are not written to
+  persistent cache.
+- production behavior is unchanged when the variable is unset.
+
+Runner:
+`scripts/run-midsize-phase-geometry.sh`
+
+Coverage:
+- GPUs 0 and 1;
+- exact batches 5376 and 7168;
+- representative observed triples:
+  - Dark/Lite/TurtleLite;
+  - DarkLite/Lite/Turtle;
+- two independent process repeats per case;
+- setup/final geometry candidates 32/64/96/128;
+- raw-batch scratchpad budget fixed at 1 MiB/hash to match these triples;
+- production stale policy and all unrelated tuning controls are disabled for
+  the benchmark.
+
+Analyzer:
+`scripts/analyze-midsize-phase-geometry.py`
+
+Promotion gate:
+- candidate must satisfy the existing >=1% improvement threshold versus 128;
+- result should repeat across both independent runs;
+- direction should be consistent across both GTX 1080 Ti cards for the same
+  batch/variant/phase;
+- do not generalize a 5376 result to 7168 or vice versa without evidence.
+
+Relevant commits:
+- c95bc5e: no-save CN phase benchmark mode;
+- 0a005c6: mid-size phase geometry runner;
+- b876ce8: mid-size geometry analyzer.
+
