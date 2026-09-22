@@ -1644,3 +1644,26 @@ Relevant commits:
 - fab2b01: promote validated GTX 1080 Ti batch-7168 setup geometry;
 - 088be0a: add 2-hour live validation runner.
 
+### Sept. 22 batch-7168 live validation duration extended
+
+The live-production validation window for the batch-7168 setup=32 candidate is
+now 12 hours by default.
+
+Runner:
+`scripts/run-7168-live-validation.sh`
+
+Default duration:
+- 43,200 seconds;
+- approximately 12 hours.
+
+The duration remains overridable with:
+`YERBAS_7168_LIVE_SECONDS=<seconds>`
+
+The longer window is intended to cover a broad mix of rotations, stale events,
+developer-fee cycles, 5376/7168 mid-size paths, and >=8960 stale-aware cap
+activations before deciding whether to merge the 7168 geometry specialization
+to main.
+
+Relevant commit:
+- 2706248: make batch-7168 live validation a 12-hour run by default.
+
