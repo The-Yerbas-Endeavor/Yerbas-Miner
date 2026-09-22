@@ -153,7 +153,7 @@ struct BatchEngine::Impl {
         if (!benchmark_raw_batch && !benchmark_stage_local &&
             !stale_batch_cap_explicit && validated_1080ti) {
             stale_batch_cap = 3584U;
-            stale_batch_cap_min_tuned = 6272U;
+            stale_batch_cap_min_tuned = 8960U;
             std::cout << "[GPU " << device_id
                       << "] stale-aware production policy"
                       << " | hardware=GTX-1080-Ti"
