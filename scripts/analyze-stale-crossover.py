@@ -13,6 +13,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 CROSS_RE = re.compile(
     r"\[stale crossover\] generation=(?P<generation>\d+) "
     r"capped_gpu=(?P<gpu>\d+) cap=(?P<cap>\d+)"
+    r"(?: minimum_tuned=(?P<minimum_tuned>\d+))?"
 )
 BATCH_RE = re.compile(
     r"\[latency batch\] GPU (?P<gpu>\d+) "
@@ -61,7 +62,7 @@ def main() -> int:
     ap.add_argument("log", type=Path)
     args = ap.parse_args()
 
-    roles: dict[int, tuple[int, int]] = {}
+    roles: dict[int, tuple[int, int, int]] = {}
     batches: list[dict[str, object]] = []
 
     for raw in args.log.read_text(errors="replace").splitlines():
@@ -70,7 +71,11 @@ def main() -> int:
         c = CROSS_RE.search(line)
         if c:
             generation = int(c["generation"])
-            roles[generation] = (int(c["gpu"]), int(c["cap"]))
+            roles[generation] = (
+                int(c["gpu"]),
+                int(c["cap"]),
+                int(c["minimum_tuned"] or 0),
+            )
             continue
 
         b = BATCH_RE.search(line)
@@ -100,8 +105,9 @@ def main() -> int:
         role = roles.get(generation)
         if role is None:
             continue
-        capped_gpu, cap = role
-        if any(int(r["gpu"]) != capped_gpu and int(r["hashes"]) > cap for r in rows):
+        capped_gpu, cap, minimum_tuned = role
+        threshold = minimum_tuned if minimum_tuned > 0 else (cap + 1)
+        if any(int(r["gpu"]) != capped_gpu and int(r["hashes"]) >= threshold for r in rows):
             eligible.add(generation)
 
     print("=== Yerbas stale-batch live crossover ===")
@@ -119,7 +125,7 @@ def main() -> int:
     by_cn_role: dict[tuple[str, str], Agg] = defaultdict(Agg)
 
     for generation in sorted(eligible):
-        capped_gpu, cap = roles[generation]
+        capped_gpu, cap, minimum_tuned = roles[generation]
         for row in by_generation[generation]:
             gpu = int(row["gpu"])
             role = "capped" if gpu == capped_gpu else "adaptive"
@@ -134,7 +140,7 @@ def main() -> int:
 
     print("Eligible generation pairs:")
     for generation in sorted(eligible):
-        capped_gpu, cap = roles[generation]
+        capped_gpu, cap, minimum_tuned = roles[generation]
         capped_rows = [r for r in by_generation[generation] if int(r["gpu"]) == capped_gpu]
         adaptive_rows = [r for r in by_generation[generation] if int(r["gpu"]) != capped_gpu]
 
@@ -155,6 +161,7 @@ def main() -> int:
         delta_text = "+inf%" if delta == float("inf") else f"{delta:+.2f}%"
         print(
             f"  gen={generation:3d} CN={cn:42s} capped_gpu={capped_gpu} "
+            f"min_tuned={minimum_tuned:5d} "
             f"capped_batch={','.join(map(str, c_batches))} useful={c_useful:8.2f} H/s "
             f"stale={c_stale:6.2f}% | adaptive_batch={','.join(map(str, a_batches))} "
             f"useful={a_useful:8.2f} H/s stale={a_stale:6.2f}% | delta={delta_text}"
