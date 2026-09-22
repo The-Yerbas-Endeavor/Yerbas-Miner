@@ -1516,3 +1516,69 @@ Relevant commits:
 - 0a005c6: mid-size phase geometry runner;
 - b876ce8: mid-size geometry analyzer.
 
+### Sept. 22 mid-size phase-geometry result
+
+The no-save 5376/7168 geometry sweep completed on both GTX 1080 Ti cards.
+
+5376 result:
+- no cross-card production promotion;
+- GPU1 consistently preferred the conservative 128-thread setup/final geometry;
+- GPU0 showed a few isolated 96/64 candidates, but several did not repeat across
+  runs or did not agree with GPU1;
+- keep 5376 production fallback unchanged at 128.
+
+7168 result:
+- setup=32 was selected on both GPUs, both repeats, for every tested non-Fast
+  CN variant:
+  - CN-Dark;
+  - CN-DarkLite;
+  - CN-Lite;
+  - CN-Turtle;
+  - CN-TurtleLite.
+- setup gains versus 128 were approximately 3.3% to 7.0% at the phase level;
+- final geometry remained 128 across the repeatable cross-card result set.
+
+Representative aggregate setup gains at batch 7168:
+- GPU0:
+  - Dark +5.23%;
+  - DarkLite +6.99%;
+  - Lite +6.45%;
+  - Turtle +4.14%;
+  - TurtleLite +3.39%;
+- GPU1:
+  - Dark +5.94%;
+  - DarkLite +6.27%;
+  - Lite +5.84%;
+  - Turtle +3.26%;
+  - TurtleLite +3.34%.
+
+Although the phase-local signal is strong, setup is only a small fraction of a
+full 6-8 second GhostRider scan. Do not promote the fallback on phase timing
+alone.
+
+Next gate:
+`scripts/run-7168-setup-ab.sh`
+
+Whole-pipeline A/B design:
+- exact batch 7168;
+- both GTX 1080 Ti cards;
+- representative triples Dark/Lite/TurtleLite and DarkLite/Lite/Turtle;
+- setup=32 versus setup=128;
+- final fixed at 128;
+- four paired repeats per GPU/triple;
+- A/B execution order alternates each repeat to reduce thermal/order bias;
+- no persistent cache writes;
+- production stale-aware policy unchanged.
+
+Analyzer:
+`scripts/analyze-7168-setup-ab.py`
+
+Promotion requirement:
+- positive median whole-pipeline H/s delta;
+- directionally positive paired results on both cards/triples;
+- live-production validation after synthetic A/B before merging.
+
+Relevant commits:
+- b14d4ff: batch-7168 setup geometry whole-pipeline A/B runner;
+- 237def1: batch-7168 A/B analyzer.
+
