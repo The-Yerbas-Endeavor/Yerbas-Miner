@@ -1582,3 +1582,65 @@ Relevant commits:
 - b14d4ff: batch-7168 setup geometry whole-pipeline A/B runner;
 - 237def1: batch-7168 A/B analyzer.
 
+### Sept. 22 batch-7168 whole-pipeline setup A/B: PASS candidate
+
+The full-pipeline A/B compared setup=32 versus setup=128 at exact batch 7168,
+with final fixed at 128. Coverage was both GTX 1080 Ti cards, two representative
+mid-size rotation families, four paired repeats, and alternating execution
+order.
+
+Summary:
+- GPU0 Dark/Lite/TurtleLite:
+  - median setup32: 871.44 H/s;
+  - median setup128: 837.95 H/s;
+  - nominal delta +3.997%, but dominated by the first two warm/order-sensitive
+    pairs; the last two paired deltas were +0.262% and -0.216%.
+  - Treat the +4% headline as non-production evidence.
+- GPU0 DarkLite/Lite/Turtle:
+  - 890.79 vs 888.98 H/s;
+  - +0.204%;
+  - all four paired repeats positive (+0.253/+0.209/+0.178/+0.175%).
+- GPU1 Dark/Lite/TurtleLite:
+  - 896.00 vs 894.08 H/s;
+  - +0.214%;
+  - all four paired repeats positive (+0.209/+0.167/+0.213/+0.283%).
+- GPU1 DarkLite/Lite/Turtle:
+  - 895.85 vs 894.30 H/s;
+  - +0.173%;
+  - all four paired repeats positive (+0.124/+0.190/+0.248/+0.164%).
+
+Overall sample median:
+- setup32: 893.31 H/s;
+- setup128: 891.36 H/s;
+- +0.219%.
+
+Interpretation:
+- the credible whole-pipeline benefit is approximately +0.2%, not +4%;
+- the direction is repeatable on both cards and both representative rotation
+  families after excluding the obvious early GPU0 warm/order transient;
+- batch 5376 remains unchanged because its geometry sweep did not meet the
+  cross-card consistency gate.
+
+Feature-branch production candidate:
+- GTX 1080 Ti + batch 3584: setup=32, final=128 (existing validated policy);
+- GTX 1080 Ti + batch 7168: setup=32, final=128;
+- batch 5376: conservative/default behavior unchanged;
+- other GPU families: unchanged.
+
+Live validation runner:
+`scripts/run-7168-live-validation.sh`
+
+Default live window: 2 hours. The runner clears all CN geometry and stale-policy
+overrides, enables production latency telemetry, and exercises the branch's
+default policy. Live gate:
+- observe `source=validated-1080ti-7168` on actual batch-7168 production work;
+- no CUDA errors, fallback, correctness rejects, or abnormal stale/share loss;
+- 5376 remains unchanged;
+- stale-aware >=8960 -> 3584 behavior remains intact;
+- sustained production H/s remains at least neutral versus the overnight
+  baseline, with the expected improvement small (~0.2% on affected rotations).
+
+Relevant commits:
+- fab2b01: promote validated GTX 1080 Ti batch-7168 setup geometry;
+- 088be0a: add 2-hour live validation runner.
+
