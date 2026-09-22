@@ -1167,3 +1167,63 @@ Relevant commits:
 - 7e85b7e: threshold-aware crossover analyzer;
 - 0013c68: runner support.
 
+### Sept. 21 thresholded 3584-vs-large crossover: strong win
+
+The 45-minute live crossover tested a 3584 cap only when the normal tuned batch
+was >=6272, leaving normal 3584 and 5376 rotations untouched.
+
+Run summary:
+- 55 crossover generations;
+- 6 eligible large-batch generations;
+- capped role: 68,096 hashes, 31.58% stale, 1405.33 raw H/s,
+  961.54 useful H/s;
+- adaptive role: 181,888 hashes, 45.32% stale, 1371.42 raw H/s,
+  749.89 useful H/s;
+- useful-H/s delta: +28.22% for the thresholded 3584 cap.
+
+Eligible paired generations:
+- gen 5: +38.89% useful H/s;
+- gen 12: +30.57%;
+- gen 37: capped side completed useful work; adaptive side was 100% stale;
+- gen 39: +10.99%;
+- gen 47: +16.10%;
+- gen 48: both sides 100% stale on an approximately 5 s job.
+
+The role balance was not symmetric enough for a same-GPU final verdict:
+- GPU0 capped/adaptive useful delta: -8.63% (only 4 capped batches);
+- GPU1 capped/adaptive useful delta: +95.46% (only 3 adaptive batches).
+However, the same-job paired comparisons are overwhelmingly favorable and the
+gen 12 result favors the capped GPU even though GPU0 is the slower of the two
+cards.
+
+Whole-run production telemetry still shows substantial stale opportunity:
+- 1,015 GPU batches;
+- 12.30% stale hashes overall;
+- median job lifetime 23.27 s;
+- p10 job lifetime 5.09 s;
+- theoretical upper-bound uplift if every stale hash were recoverable: 14.02%.
+
+The thresholded cap targets the pathological large scans without touching the
+normal 5376 CN-Lite path.
+
+### Corrected large-batch frontier harness
+
+The first frontier harness over-allocated raw-batch scratchpad memory using the
+global maximum 2 MiB/hash stride, so 512-KiB rotations could not reach their
+real production batch sizes.
+
+Benchmark-only control added:
+- `YERBAS_CUDA_BENCH_SCRATCHPAD_STRIDE`
+
+For the Dark/DarkLite/Turtle and Dark/DarkLite/TurtleLite frontiers the runner
+now sets the stride to 524288 bytes/hash, matching the maximum active CN
+scratchpad size in those forced triples. Production allocation behavior is
+unchanged.
+
+This should allow the synthetic frontier to measure 3584 through 17920 using the
+same effective scratchpad budget production already exercises.
+
+Relevant commits:
+- 2ba2818: realistic raw-benchmark scratchpad budget;
+- 5e65fad: corrected frontier runner.
+
