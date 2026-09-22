@@ -38,6 +38,7 @@ struct BatchEngine::Impl {
     std::size_t benchmark_cn_chunk{0};
     std::size_t stale_batch_cap{0};
     std::size_t stale_batch_cap_min_tuned{0};
+    bool stale_batch_cap_explicit{false};
     bool job_loaded{false};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
@@ -68,12 +69,22 @@ struct BatchEngine::Impl {
             if (end == value || *end != '\0') return 0U;
             return static_cast<std::size_t>(parsed);
         };
-        stale_batch_cap = parse_batch_cap(std::getenv("YERBAS_GPU_STALE_BATCH_CAP"));
+        if (const char* global_cap = std::getenv("YERBAS_GPU_STALE_BATCH_CAP");
+            global_cap != nullptr && *global_cap != '\0') {
+            stale_batch_cap = parse_batch_cap(global_cap);
+            stale_batch_cap_explicit = true;
+        }
+        if (const char* minimum_tuned = std::getenv("YERBAS_GPU_STALE_BATCH_MIN_TUNED");
+            minimum_tuned != nullptr && *minimum_tuned != '\0')
+            stale_batch_cap_min_tuned = parse_batch_cap(minimum_tuned);
+
         const std::string device_cap_name =
             std::string("YERBAS_GPU_STALE_BATCH_CAP_") + std::to_string(device_id);
         if (const char* device_value = std::getenv(device_cap_name.c_str());
-            device_value != nullptr && *device_value != '\0')
+            device_value != nullptr && *device_value != '\0') {
             stale_batch_cap = parse_batch_cap(device_value);
+            stale_batch_cap_explicit = true;
+        }
         if (benchmark_stage_local) {
             const char* chunk_env = std::getenv("YERBAS_CUDA_BENCH_CN_CHUNK");
             if (chunk_env != nullptr && *chunk_env != '\0') {
@@ -130,6 +141,32 @@ struct BatchEngine::Impl {
         const std::size_t warp = static_cast<std::size_t>(std::max(1, props.warpSize));
         const std::size_t sms = static_cast<std::size_t>(std::max(1, props.multiProcessorCount));
         batch_quantum = std::max<std::size_t>(warp, warp * sms);
+
+        // Production latency guard validated on dual GTX 1080 Ti (Pascal 6.1).
+        // The measured live crossover showed that large 11,648/17,920 scans
+        // produced substantially more stale work without improving raw H/s.
+        // Keep the policy hardware-specific until other GPU families are
+        // measured. An explicit cap (including 0) always overrides this.
+        const bool validated_1080ti =
+            props.major == 6 && props.minor == 1 &&
+            std::string(props.name).find("GeForce GTX 1080 Ti") != std::string::npos;
+        if (!benchmark_raw_batch && !benchmark_stage_local &&
+            !stale_batch_cap_explicit && validated_1080ti) {
+            stale_batch_cap = 3584U;
+            stale_batch_cap_min_tuned = 6272U;
+            std::cout << "[GPU " << device_id
+                      << "] stale-aware production policy"
+                      << " | hardware=GTX-1080-Ti"
+                      << " | cap=" << stale_batch_cap
+                      << " | minimum-tuned=" << stale_batch_cap_min_tuned
+                      << " | source=validated-live-crossover\n";
+        } else if (stale_batch_cap_explicit) {
+            std::cout << "[GPU " << device_id
+                      << "] stale-aware production policy"
+                      << " | cap=" << stale_batch_cap
+                      << " | minimum-tuned=" << stale_batch_cap_min_tuned
+                      << " | source=environment\n";
+        }
 
         host_states.resize(batch_capacity * kStateBytes);
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
