@@ -1227,3 +1227,50 @@ Relevant commits:
 - 2ba2818: realistic raw-benchmark scratchpad budget;
 - 5e65fad: corrected frontier runner.
 
+### Sept. 21 stale-aware production candidate
+
+The thresholded 3584 live crossover is strong enough to promote into a
+hardware-specific production candidate for the measured GTX 1080 Ti platform.
+
+Default policy on NVIDIA GeForce GTX 1080 Ti (CC 6.1):
+- normal tuned batch <6272: unchanged;
+- normal tuned batch >=6272: cap to 3584;
+- normal 3584 Fast rotations: unchanged;
+- normal 5376 Lite rotations: unchanged.
+
+The policy is deliberately restricted to GTX 1080 Ti until other GPU families
+are measured. Other GPUs keep the existing adaptive batch policy.
+
+Overrides:
+- `YERBAS_GPU_STALE_BATCH_CAP=<n>` explicitly sets the cap;
+- setting `YERBAS_GPU_STALE_BATCH_CAP=0` disables the validated default;
+- `YERBAS_GPU_STALE_BATCH_MIN_TUNED=<n>` overrides the threshold.
+
+The 3584 setup/final geometry cache-miss path is also specialized only for the
+validated GTX 1080 Ti case:
+- setup: 32 threads;
+- final: 128 threads.
+This prevents newly capped Dark/DarkLite/Turtle/TurtleLite rotations from
+falling back to the conservative 128-thread setup geometry when no cache entry
+exists.
+
+Production-validation runner:
+`scripts/run-stale-aware-production.sh`
+
+It clears all benchmark/crossover/stale override environment variables and runs
+the default candidate with telemetry enabled. Default observation window: 1 h.
+
+Promotion gate to main:
+- automatic policy detected on both GTX 1080 Ti cards;
+- large tuned rotations cap to 3584;
+- normal 3584/5376 rotations remain unchanged;
+- no CUDA errors or CPU fallback;
+- no unexpected share rejection increase;
+- whole-run useful GPU throughput/stale loss improves or remains clearly better
+  than the uncapped best-stack observations.
+
+Relevant commits:
+- 919f261: promote validated 1080 Ti stale-aware batch policy;
+- e4b9f01: validated GTX 1080 Ti 3584 setup/final geometry;
+- f4381ff: production validation runner.
+
