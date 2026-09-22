@@ -1274,3 +1274,41 @@ Relevant commits:
 - e4b9f01: validated GTX 1080 Ti 3584 setup/final geometry;
 - f4381ff: production validation runner.
 
+### Sept. 21 production-candidate snapshot: healthy, but threshold tightened
+
+The first shipped-policy production snapshot started at 20:44 and the uploaded
+log currently covers about 23 minutes.
+
+Validated:
+- automatic GTX 1080 Ti stale-aware policy detected on both GPUs;
+- CPU combo policy loaded from cache;
+- native CUDA coverage 15/15 cores and 6/6 CryptoNight variants;
+- no CUDA errors, OOM, illegal access, assertion, or CPU fallback;
+- no rejected shares observed in the uploaded snapshot;
+- last complete status block: 406 accepted / 0 rejected;
+- GPU stale rate at ~20m: ~2.23% GPU0 and ~2.22% GPU1.
+
+Important limitation:
+- every observed rotation in this snapshot contained CN-Fast, so normal
+  variant-min batching already selected 3584;
+- zero stale-aware cap activations occurred;
+- therefore this snapshot validates non-interference/stability when the policy is
+  idle, but is not yet the final both-GPUs-large-rotation validation.
+
+New edge case discovered from startup cache state:
+- GPU0 CN-Lite cache is currently 7168;
+- GPU1 CN-Lite cache is 5376.
+The previous automatic threshold of 6272 could therefore cap GPU0's 7168 Lite
+path even though the live crossover win was measured on 11648/17920-class
+rotations.
+
+The hardware-specific default threshold is tightened to 8960:
+- tuned 3584/5376/6272/7168: unchanged;
+- tuned >=8960: cap to 3584.
+This keeps the production rule aligned with the measured pathological
+11648/17920 scan class.
+
+Relevant commits:
+- fc945da: narrow 1080 Ti stale cap to large rotations;
+- 6d71bf4: update production validation expectation to >=8960.
+
