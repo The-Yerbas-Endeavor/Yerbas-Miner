@@ -375,11 +375,14 @@ void ensure_cn_setup_geometry(cudaStream_t stream,
         return;
 
     if (!cn_phase_geometry_retune_requested()) {
-        const bool validated_1080ti_3584 =
-            count == 3584U &&
+        const bool validated_1080ti =
             props.major == 6 && props.minor == 1 &&
             std::string(props.name).find("GeForce GTX 1080 Ti") != std::string::npos;
-        selected = validated_1080ti_3584 ? 32 : 128;
+        const bool validated_1080ti_3584 =
+            validated_1080ti && count == 3584U;
+        const bool validated_1080ti_7168 =
+            validated_1080ti && count == 7168U;
+        selected = (validated_1080ti_3584 || validated_1080ti_7168) ? 32 : 128;
         std::cout << "[GPU " << device_id
                   << "] CryptoNight phase geometry safe default | "
                   << cryptonight::config_value(VariantIndex).name
@@ -388,7 +391,9 @@ void ensure_cn_setup_geometry(cudaStream_t stream,
                   << " | source="
                   << (validated_1080ti_3584
                           ? "validated-1080ti-3584"
-                          : "conservative")
+                          : (validated_1080ti_7168
+                                 ? "validated-1080ti-7168"
+                                 : "conservative"))
                   << " | startup-benchmark=off\n";
         return;
     }
