@@ -1667,3 +1667,66 @@ to main.
 Relevant commit:
 - 2706248: make batch-7168 live validation a 12-hour run by default.
 
+### Sept. 22 batch-7168 live validation: PASS
+
+The batch-7168 setup=32 specialization completed a long production run plus an
+independent restart validation.
+
+Primary production run:
+- approximately 9 h 55 min captured before the user stopped/restarted the miner;
+- final visible AVG: ~1.90 kH/s;
+- accepted/rejected: 6201 / 5 (99.9%);
+- blocks: 10;
+- all five rejects were pool error 21, "stale job";
+- GPU0 useful-device rate near the end: ~93.9%;
+- GPU1 useful-device rate near the end: ~94.4%;
+- 10 completed developer-fee windows returned normally to the configured pool;
+- no CUDA error, OOM, illegal access, assertion, segmentation fault, or CPU
+  fallback was observed.
+
+Production geometry behaved exactly as intended:
+- GPU0 batch 7168 setup=32 with source=validated-1080ti-7168;
+- GPU0 batch 7168 final=128;
+- GPU1 batch 5376 remained conservative setup/final=128;
+- the existing GTX 1080 Ti stale-aware >=8960 -> 3584 policy remained active.
+
+Primary-run latency analysis:
+- GPU batches: 13,907;
+- stale batches: 726 (5.22%);
+- completed GPU hashes: 54,405,120;
+- useful hashes: 51,238,656 (94.18%);
+- stale hashes: 3,166,464 (5.82%);
+- GPU0 raw/useful: 796.36 / 748.08 H/s;
+- GPU1 raw/useful: 799.91 / 755.36 H/s;
+- batch 7168 raw/useful: 872.04 / 760.51 H/s;
+- batch 5376 raw/useful: 883.73 / 781.08 H/s.
+
+Independent restart validation:
+- ~40m44s snapshot;
+- AVG ~2.01 kH/s;
+- 694 accepted / 1 rejected (99.9%);
+- the only reject was pool error 21, "stale job";
+- GPU0 useful-device ~96.25%;
+- GPU1 useful-device ~96.56%;
+- 7168 setup=32 and 5376 setup=128 were re-selected correctly after restart;
+- three paired large-rotation stale-aware cap events were observed on each GPU.
+
+Conclusion:
+- PASS for the GTX 1080 Ti batch-7168 setup geometry specialization;
+- merge setup=32 at batch 7168 to main;
+- keep final=128;
+- keep batch 5376 unchanged;
+- keep other GPU families unchanged.
+
+Next optimization target:
+The long-run aggregate suggests batch 5376 may produce more useful work than
+7168 on the 1-MiB path once stale loss is included, despite 7168's slightly
+different raw characteristics. This is not a valid cross-GPU comparison by
+itself. Run a matched GPU0 7168-vs-5376 live useful-throughput crossover next.
+
+Relevant validation commits:
+- fab2b01: promote validated GTX 1080 Ti batch-7168 setup geometry;
+- 088be0a: add live validation runner;
+- 2706248: extend live validation to 12h default;
+- 0687712: document extended endurance window.
+
