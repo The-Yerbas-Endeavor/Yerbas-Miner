@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <streambuf>
 #include <string>
@@ -200,6 +201,25 @@ int main(int argc, char** argv)
         auto config = yerbas::load_config(argc, argv);
         yerbas::first_run::apply(config);
 
+        const bool terminal_capable =
+            yerbas::console::detail::terminal_supports_color();
+
+        bool use_dashboard = false;
+        if (config.logging.console_mode == "tui") {
+            use_dashboard = terminal_capable && session_log.active();
+        } else if (config.logging.console_mode == "auto") {
+            use_dashboard =
+                terminal_capable &&
+                session_log.active() &&
+                config.logging.level != "debug";
+        }
+
+        if (config.logging.console_mode == "tui" && !use_dashboard) {
+            std::cerr
+                << "Dashboard unavailable: requires an interactive terminal "
+                << "and an active session log; using plain console.\n";
+        }
+
         // The startup autotuner has already selected the production worker count,
         // lane grouping and per-CryptoNight widths. Do not spend live mining time
         // re-probing those choices rotation-by-rotation unless explicitly asked.
@@ -225,6 +245,11 @@ int main(int argc, char** argv)
             std::cout << "Performance CSV: " << config.logging.perf_csv << '\n';
         }
         yerbas::Miner miner(config);
+
+        std::unique_ptr<yerbas::console::DashboardScreen> dashboard;
+        if (use_dashboard)
+            dashboard = std::make_unique<yerbas::console::DashboardScreen>();
+
         const int result = miner.run();
         write_startup_log("Yerbas Miner exited with code " + std::to_string(result));
         return result;
