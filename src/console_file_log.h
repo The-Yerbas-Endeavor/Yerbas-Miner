@@ -247,7 +247,7 @@ private:
     bool muteable_terminal_{false};
 };
 
-thread_local std::unordered_map<const DirectMirrorBuf*, std::string>
+inline thread_local std::unordered_map<const DirectMirrorBuf*, std::string>
     DirectMirrorBuf::thread_buffers_;
 
 class SessionFileLog final {
