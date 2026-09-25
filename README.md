@@ -54,12 +54,26 @@ Example:
     "skip_validation": false
   },
   "logging": {
-    "level": "info"
+    "level": "info",
+    "console": "auto"
   }
 }
 ```
 
 `config.json` is ignored by Git so local wallet/pool information is not accidentally committed. `config.example.json` is included in release artifacts.
+
+### Console modes
+
+Yerbas-Miner now uses a single-screen mining dashboard automatically when stdout is an interactive terminal and the session log is active. Detailed mining events continue to the session log while the terminal is refreshed in place.
+
+```text
+auto   default; use the TUI on an interactive terminal and plain output otherwise
+tui    request the single-screen dashboard
+plain  traditional scrolling console
+```
+
+The default session log is written under `logs/`. Use `--console plain` for redirected output, troubleshooting, or the traditional scrolling view. `--log-level debug` keeps the plain diagnostic console behavior when console mode is `auto`.
+
 
 ### CPU tuning modes
 
