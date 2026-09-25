@@ -13,6 +13,14 @@
 #include <streambuf>
 #include <string>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#endif
+
 namespace yerbas::console {
 
 inline std::streambuf*& native_terminal_stdout()
@@ -57,6 +65,7 @@ class DashboardScreen final {
 public:
     DashboardScreen()
     {
+        configure_input();
         dashboard_active_flag() = true;
         terminal_stdout_enabled() = false;
         terminal_write("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
@@ -72,12 +81,77 @@ public:
         try {
             terminal_write("\x1b[0m\x1b[?25h\x1b[?1049l");
         } catch (...) {}
+
         dashboard_active_flag() = false;
         terminal_stdout_enabled() = true;
+        restore_input();
     }
 
 private:
+    void configure_input() noexcept
+    {
+#ifdef _WIN32
+        input_handle_ = GetStdHandle(STD_INPUT_HANDLE);
+        if (input_handle_ == INVALID_HANDLE_VALUE || input_handle_ == nullptr)
+            return;
+
+        DWORD mode = 0;
+        if (!GetConsoleMode(input_handle_, &mode))
+            return;
+
+        saved_input_mode_ = mode;
+        input_mode_saved_ = true;
+
+        // Keep ENABLE_PROCESSED_INPUT so Ctrl+C continues to generate the
+        // normal console control event, but stop ordinary keys/mouse-wheel
+        // escape sequences from being echoed into the dashboard.
+        mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
+        SetConsoleMode(input_handle_, mode);
+        FlushConsoleInputBuffer(input_handle_);
+#else
+        if (tcgetattr(STDIN_FILENO, &saved_termios_) != 0)
+            return;
+
+        termios_saved_ = true;
+
+        struct termios tui = saved_termios_;
+        tui.c_lflag &= static_cast<tcflag_t>(~(ECHO | ECHONL));
+
+        // Leave ISIG enabled so Ctrl+C keeps working normally. We do not make
+        // the miner interactive here; this only prevents terminal input from
+        // being visibly echoed over the alternate-screen dashboard.
+        tcsetattr(STDIN_FILENO, TCSANOW, &tui);
+        tcflush(STDIN_FILENO, TCIFLUSH);
+#endif
+    }
+
+    void restore_input() noexcept
+    {
+#ifdef _WIN32
+        if (!input_mode_saved_)
+            return;
+
+        FlushConsoleInputBuffer(input_handle_);
+        SetConsoleMode(input_handle_, saved_input_mode_);
+#else
+        if (!termios_saved_)
+            return;
+
+        tcflush(STDIN_FILENO, TCIFLUSH);
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios_);
+#endif
+    }
+
     bool active_{false};
+
+#ifdef _WIN32
+    HANDLE input_handle_{INVALID_HANDLE_VALUE};
+    DWORD saved_input_mode_{0};
+    bool input_mode_saved_{false};
+#else
+    struct termios saved_termios_ {};
+    bool termios_saved_{false};
+#endif
 };
 
 class DirectMirrorBuf final : public std::streambuf {
