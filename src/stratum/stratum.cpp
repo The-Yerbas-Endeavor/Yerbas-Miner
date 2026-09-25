@@ -77,9 +77,17 @@ constexpr std::uint64_t kDevFeePeriodSeconds = 60ULL * 60ULL;
 constexpr std::uint64_t kDevFeeStartSeconds = 3ULL * 60ULL;
 constexpr std::uint64_t kDevFeeDurationSeconds = 60ULL;
 
-std::unordered_map<int, std::string> g_pending_share_sources;
+struct PendingShareInfo {
+    std::string source{"unknown"};
+    std::string job_id;
+    std::uint32_t nonce{0};
+    std::uint64_t sequence{0};
+    bool dev_fee{false};
+};
+
+std::unordered_map<int, PendingShareInfo> g_pending_shares;
 std::unordered_map<std::string, std::uint64_t> g_source_accepted;
-std::mutex g_pending_share_sources_mutex;
+std::mutex g_pending_shares_mutex;
 std::uint64_t g_blocks_found = 0;
 bool g_dev_fee_switch_requested = false;
 std::string g_active_login_user;
@@ -113,7 +121,7 @@ std::string timestamp()
 void record_activity(const std::string& message)
 {
     g_recent_activity.push_front(timestamp() + message);
-    while (g_recent_activity.size() > 5U)
+    while (g_recent_activity.size() > 10U)
         g_recent_activity.pop_back();
 }
 
@@ -645,29 +653,51 @@ void Client::handle_message(const std::string& line)
                 const auto& result = message["result"];
                 result_ok = result.is_boolean() ? result.get<bool>() : !result.is_null();
             }
-            std::string source = "unknown";
+            PendingShareInfo pending;
+            bool have_pending = false;
             {
-                std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex);
-                const auto source_it = g_pending_share_sources.find(id);
-                if (source_it != g_pending_share_sources.end()) { source = source_it->second; g_pending_share_sources.erase(source_it); }
+                std::lock_guard<std::mutex> lock(g_pending_shares_mutex);
+                const auto pending_it = g_pending_shares.find(id);
+                if (pending_it != g_pending_shares.end()) {
+                    pending = pending_it->second;
+                    have_pending = true;
+                    g_pending_shares.erase(pending_it);
+                }
             }
+
+            const std::string source = pending.source;
             const bool accepted = error.is_null() && result_ok;
+
             if (accepted) {
                 ++shares_accepted_;
                 ++g_source_accepted[source];
                 record_activity("✓ share accepted  " + source + "  total=" + std::to_string(shares_accepted_));
-                std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset
-                          << " SRC: " << source_color(source) << source << kColorReset
-                          << " | accepted=" << kAcceptColor << shares_accepted_ << kColorReset
-                          << " rejected=" << shares_rejected_ << '\n';
+
+                std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset;
+                if (have_pending)
+                    std::cout << " #" << pending.sequence;
+                std::cout << " SRC: " << source_color(source) << source << kColorReset;
+                if (have_pending)
+                    std::cout << " | job=" << pending.job_id << " nonce=" << nonce_hex(pending.nonce);
+                std::cout << " | accepted=" << kAcceptColor << shares_accepted_ << kColorReset
+                          << " rejected=" << shares_rejected_
+                          << (have_pending && pending.dev_fee ? " | DEV FEE" : "")
+                          << '\n';
             } else {
                 ++shares_rejected_;
                 record_activity("! share rejected  " + source + "  total=" + std::to_string(shares_rejected_));
-                std::cout << timestamp() << kRejectBadge << " SHARE REJECTED " << kColorReset
-                          << " SRC: " << source_color(source) << source << kColorReset
-                          << " | accepted=" << shares_accepted_
+
+                std::cout << timestamp() << kRejectBadge << " SHARE REJECTED " << kColorReset;
+                if (have_pending)
+                    std::cout << " #" << pending.sequence;
+                std::cout << " SRC: " << source_color(source) << source << kColorReset;
+                if (have_pending)
+                    std::cout << " | job=" << pending.job_id << " nonce=" << nonce_hex(pending.nonce);
+                std::cout << " | accepted=" << shares_accepted_
                           << " rejected=" << kRejectColor << shares_rejected_ << kColorReset
-                          << " | response=" << message.dump() << '\n';
+                          << " | response=" << message.dump()
+                          << (have_pending && pending.dev_fee ? " | DEV FEE" : "")
+                          << '\n';
             }
         }
         return;
@@ -822,7 +852,8 @@ bool Client::mine_one(std::intptr_t socket_value)
             std::cout << timestamp() << "[CPU] stale candidate suppressed | old_job=" << work_job_id << " new_job=" << job_.job_id << '\n';
             return true;
         }
-        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
+        if (config_.logging.level == "debug")
+            std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(nonce) << kColorReset << '\n';
         return submit_share(socket_value, extranonce2, nonce, "CPU");
     }
     if (nonce_ == 0) ++extranonce2_counter_;
@@ -879,7 +910,8 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
             return true;
         }
         const auto& candidate = candidates[index];
-        std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        if (config_.logging.level == "debug")
+            std::cout << timestamp() << kCpuColor << "[CPU] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
         if (!submit_share(socket_value, extranonce2, candidate.nonce, "CPU")) return false;
     }
     return true;
@@ -1303,7 +1335,8 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                     break;
                 }
                 const auto& candidate = candidates[index];
-                std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        if (config_.logging.level == "debug")
+            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
                 if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
             }
         }
@@ -1405,7 +1438,8 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
                     break;
                 }
                 const auto& candidate = candidates[index];
-                std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+        if (config_.logging.level == "debug")
+            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
                 if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
             }
         }
@@ -1449,13 +1483,29 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
     const int request_id = 1000 + static_cast<int>(shares_submitted_ % 1000000);
     const nlohmann::json submit = {{"id",request_id},{"method","mining.submit"},{"params",nlohmann::json::array({g_active_login_user,job_.job_id,extranonce2_hex,job_.ntime,nonce_hex(nonce)})}};
     if (!send_all(socket_handle, json_line(submit))) { std::cerr << "[share] Failed to send candidate share\n"; return false; }
-    { std::lock_guard<std::mutex> lock(g_pending_share_sources_mutex); g_pending_share_sources[request_id] = source; }
-    ++shares_submitted_;
     const std::string dev_fee_login = std::string(kDevFeeAddress) + "." + kDevFeeWorker;
-    std::cout << timestamp() << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << " #" << shares_submitted_
-              << " SRC: " << source_color(source) << source << kColorReset << " | job=" << job_.job_id
-              << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce)
-              << (g_active_login_user == dev_fee_login ? " | DEV FEE" : "") << '\n';
+    const bool dev_fee_share = g_active_login_user == dev_fee_login;
+    const std::uint64_t sequence = shares_submitted_ + 1U;
+
+    {
+        std::lock_guard<std::mutex> lock(g_pending_shares_mutex);
+        g_pending_shares[request_id] = PendingShareInfo{
+            source,
+            job_.job_id,
+            nonce,
+            sequence,
+            dev_fee_share
+        };
+    }
+
+    ++shares_submitted_;
+
+    if (config_.logging.level == "debug") {
+        std::cout << timestamp() << kSubmitBadge << " SHARE SUBMITTED " << kColorReset << " #" << shares_submitted_
+                  << " SRC: " << source_color(source) << source << kColorReset << " | job=" << job_.job_id
+                  << " extranonce2=" << extranonce2_hex << " ntime=" << job_.ntime << " nonce=" << nonce_hex(nonce)
+                  << (dev_fee_share ? " | DEV FEE" : "") << '\n';
+    }
     return true;
 }
 
