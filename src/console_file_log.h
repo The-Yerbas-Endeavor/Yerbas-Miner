@@ -155,7 +155,10 @@ public:
         cout_native_ = std::cout.rdbuf();
         cerr_native_ = std::cerr.rdbuf();
         cout_mirror_ = std::make_unique<DirectMirrorBuf>(cout_native_, file_.rdbuf(), true);
-        cerr_mirror_ = std::make_unique<DirectMirrorBuf>(cerr_native_, file_.rdbuf(), false);
+        // While the alternate-screen dashboard is active, stderr is logged but
+        // not allowed to scribble over the TUI. Fatal startup/exit errors still
+        // appear normally after DashboardScreen restores the terminal.
+        cerr_mirror_ = std::make_unique<DirectMirrorBuf>(cerr_native_, file_.rdbuf(), true);
         std::cout.rdbuf(cout_mirror_.get());
         std::cerr.rdbuf(cerr_mirror_.get());
         active_ = true;
