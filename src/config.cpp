@@ -90,6 +90,7 @@ void apply_json(AppConfig& cfg, const json& root)
     if (root.contains("logging")) {
         const auto& l = root.at("logging");
         if (l.contains("level")) cfg.logging.level = l.at("level").get<std::string>();
+        if (l.contains("console")) cfg.logging.console_mode = l.at("console").get<std::string>();
         if (l.contains("perf_csv")) cfg.logging.perf_csv = l.at("perf_csv").get<std::string>();
     }
 }
@@ -137,6 +138,7 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--no-gpu") cfg.gpu.enabled = false;
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
+        else if (arg == "--console") cfg.logging.console_mode = require_value(argc, argv, i, "--console");
         else if (arg == "--perf-log") cfg.logging.perf_csv = require_value(argc, argv, i, "--perf-log");
         else if (arg == "--help" || arg == "-h") {}
         else throw std::runtime_error("Unknown option: " + arg);
@@ -144,6 +146,15 @@ AppConfig load_config(int argc, char** argv)
 
     cfg.miner.cpu_tune = normalize_tune_mode(cfg.miner.cpu_tune);
     cfg.gpu.gpu_tune = normalize_gpu_tune_mode(cfg.gpu.gpu_tune);
+
+    if (cfg.logging.console_mode != "auto" &&
+        cfg.logging.console_mode != "tui" &&
+        cfg.logging.console_mode != "plain") {
+        throw std::runtime_error(
+            "Invalid console mode: " + cfg.logging.console_mode +
+            " (expected auto, tui, or plain)");
+    }
+
     if (cfg.miner.cpu_batch == 0) cfg.miner.cpu_batch = 16;
     return cfg;
 }
@@ -170,6 +181,7 @@ void print_config_help(const char* program)
         << "  --no-gpu            Disable GPU backend\n"
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
+        << "  --console MODE      auto, tui, plain\n"
         << "  --perf-log FILE     Append rotation performance records to CSV\n"
         << "  -h, --help          Show this help\n\n"
         << "Autotune:\n"
