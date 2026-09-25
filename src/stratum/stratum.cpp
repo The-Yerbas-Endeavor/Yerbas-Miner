@@ -1502,50 +1502,188 @@ void Client::report_stats(bool force)
             telemetry_updated = now;
         }
 
+        const std::size_t terminal_cols =
+            yerbas::console::detail::terminal_columns();
+        const std::size_t inner_width =
+            std::clamp<std::size_t>(
+                terminal_cols > 2U ? terminal_cols - 2U : 118U,
+                100U,
+                220U);
+
+        const auto repeat = [](const char* token, std::size_t count) {
+            std::string out;
+            for (std::size_t i = 0; i < count; ++i) out += token;
+            return out;
+        };
+
+        const auto display_width = [](const std::string& text) {
+            const std::string clean =
+                yerbas::console::detail::strip_ansi(text);
+            std::size_t width = 0U;
+            for (unsigned char c : clean) {
+                if ((c & 0xc0U) != 0x80U)
+                    ++width;
+            }
+            return width;
+        };
+
         const auto fit = [](std::string text, std::size_t width) {
-            if (text.size() > width) text.resize(width);
-            if (text.size() < width) text.append(width - text.size(), ' ');
+            if (text.size() > width)
+                text.resize(width);
+            if (text.size() < width)
+                text.append(width - text.size(), ' ');
             return text;
         };
 
         const auto push_history = [](std::vector<double>& history, double value) {
-            constexpr std::size_t kHistory = 45U;
+            constexpr std::size_t kHistory = 220U;
             history.push_back(std::max(0.0, value));
-            if (history.size() > kHistory)
-                history.erase(history.begin(), history.begin() +
-                    static_cast<std::ptrdiff_t>(history.size() - kHistory));
+            if (history.size() > kHistory) {
+                history.erase(
+                    history.begin(),
+                    history.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            history.size() - kHistory));
+            }
         };
 
-        const auto sparkline = [](const std::vector<double>& history, std::size_t width) {
+        const auto history_range = [](
+            const std::vector<double>& history,
+            std::size_t width) {
+            if (history.empty())
+                return std::pair<double, double>{0.0, 1.0};
+
+            const std::size_t count =
+                std::min(width, history.size());
+            const auto begin =
+                history.end() -
+                static_cast<std::ptrdiff_t>(count);
+
+            const auto range =
+                std::minmax_element(begin, history.end());
+
+            const double low_raw = *range.first;
+            const double high_raw = *range.second;
+            const double spread = high_raw - low_raw;
+            const double pad = std::max(
+                {1.0, high_raw * 0.03, spread * 0.15});
+
+            return std::pair<double, double>{
+                std::max(0.0, low_raw - pad),
+                high_raw + pad
+            };
+        };
+
+        const auto sparkline = [&history_range](
+            const std::vector<double>& history,
+            std::size_t width) {
             static constexpr const char* kBlocks[] = {
                 "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
             };
 
             std::string graph;
-            const std::size_t count = std::min(width, history.size());
+            const std::size_t count =
+                std::min(width, history.size());
+
             if (count < width)
                 graph.append(width - count, ' ');
 
             if (count == 0U)
                 return graph;
 
-            const auto begin = history.end() - static_cast<std::ptrdiff_t>(count);
-            const double peak = std::max(1.0, *std::max_element(begin, history.end()));
+            const auto [low, high] =
+                history_range(history, width);
+            const double span =
+                std::max(1.0, high - low);
+
+            const auto begin =
+                history.end() -
+                static_cast<std::ptrdiff_t>(count);
 
             for (auto it = begin; it != history.end(); ++it) {
-                const double ratio = std::clamp(*it / peak, 0.0, 1.0);
-                const std::size_t level = std::min<std::size_t>(
-                    7U, static_cast<std::size_t>(ratio * 7.0 + 0.5));
+                const double ratio =
+                    std::clamp((*it - low) / span, 0.0, 1.0);
+                const std::size_t level =
+                    std::min<std::size_t>(
+                        7U,
+                        static_cast<std::size_t>(
+                            ratio * 7.0 + 0.5));
                 graph += kBlocks[level];
             }
             return graph;
         };
 
+        const auto area_graph = [&history_range](
+            const std::vector<double>& history,
+            std::size_t width,
+            std::size_t height) {
+            static constexpr const char* kPartial[] = {
+                " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇"
+            };
+
+            std::vector<std::string> rows(
+                height, std::string{});
+
+            const std::size_t count =
+                std::min(width, history.size());
+            const std::size_t leading =
+                width - count;
+
+            for (auto& row : rows)
+                row.append(leading, ' ');
+
+            if (count == 0U)
+                return rows;
+
+            const auto [low, high] =
+                history_range(history, width);
+            const double span =
+                std::max(1.0, high - low);
+
+            const auto begin =
+                history.end() -
+                static_cast<std::ptrdiff_t>(count);
+
+            for (auto it = begin; it != history.end(); ++it) {
+                const double ratio =
+                    std::clamp((*it - low) / span, 0.0, 1.0);
+                const double level =
+                    ratio * static_cast<double>(height);
+
+                for (std::size_t row = 0; row < height; ++row) {
+                    const double row_bottom =
+                        static_cast<double>(height - row - 1U);
+                    const double amount =
+                        level - row_bottom;
+
+                    if (amount >= 1.0) {
+                        rows[row] += "█";
+                    } else if (amount > 0.0) {
+                        const std::size_t part =
+                            std::min<std::size_t>(
+                                7U,
+                                static_cast<std::size_t>(
+                                    amount * 8.0));
+                        rows[row] += kPartial[part];
+                    } else {
+                        rows[row] += ' ';
+                    }
+                }
+            }
+
+            return rows;
+        };
+
         const auto gauge = [](double value, double maximum, std::size_t width) {
-            double ratio = maximum > 0.0 ? value / maximum : 0.0;
-            ratio = std::clamp(ratio, 0.0, 1.0);
-            const std::size_t filled = std::min(
-                width, static_cast<std::size_t>(ratio * static_cast<double>(width) + 0.5));
+            const double ratio =
+                maximum > 0.0
+                    ? std::clamp(value / maximum, 0.0, 1.0)
+                    : 0.0;
+            const std::size_t filled =
+                std::min(
+                    width,
+                    static_cast<std::size_t>(
+                        ratio * static_cast<double>(width) + 0.5));
 
             std::string bar;
             for (std::size_t i = 0; i < width; ++i)
@@ -1556,8 +1694,8 @@ void Client::report_stats(bool force)
         struct GpuView {
             int id{-1};
             double hps{0.0};
-            std::size_t batch{0};
-            std::uint64_t accepted{0};
+            std::size_t batch{0U};
+            std::uint64_t accepted{0U};
             std::string temp{"n/a"};
             std::string power{"n/a"};
             std::string fan{"n/a"};
@@ -1567,33 +1705,57 @@ void Client::report_stats(bool force)
 #ifdef YERBAS_HAS_CUDA
         if (config_.gpu.enabled && !gpu_workers_.empty()) {
             gpu_views.reserve(gpu_workers_.size());
+
             for (auto& worker : gpu_workers_) {
                 const std::uint64_t gpu_window_hashes =
                     worker.hashes_done >= worker.hashes_at_last_report
-                        ? worker.hashes_done - worker.hashes_at_last_report
-                        : 0;
+                        ? worker.hashes_done -
+                              worker.hashes_at_last_report
+                        : 0U;
 
                 const double gpu_hps =
                     since_report > 0.0
-                        ? static_cast<double>(gpu_window_hashes) / since_report
+                        ? static_cast<double>(
+                              gpu_window_hashes) /
+                              since_report
                         : 0.0;
 
                 GpuView view;
                 view.id = worker.device_id;
-                view.hps = gpu_pipeline_ready_ ? gpu_hps : 0.0;
-                view.batch = worker.engine->batch_size();
+                view.hps =
+                    gpu_pipeline_ready_ ? gpu_hps : 0.0;
+                view.batch =
+                    worker.engine->batch_size();
 
-                const std::string source = "GPU " + std::to_string(worker.device_id);
-                view.accepted = g_source_accepted[source];
+                const std::string source =
+                    "GPU " +
+                    std::to_string(worker.device_id);
 
-                const auto telemetry_it = gpu_telemetry.devices.find(worker.device_id);
-                if (telemetry_it != gpu_telemetry.devices.end()) {
-                    view.temp = yerbas::console::detail::format_temperature(telemetry_it->second);
-                    view.power = yerbas::console::detail::format_power(telemetry_it->second);
-                    view.fan = yerbas::console::detail::format_fan(telemetry_it->second);
+                view.accepted =
+                    g_source_accepted[source];
+
+                const auto telemetry_it =
+                    gpu_telemetry.devices.find(
+                        worker.device_id);
+
+                if (telemetry_it !=
+                    gpu_telemetry.devices.end()) {
+                    view.temp =
+                        yerbas::console::detail::
+                            format_temperature(
+                                telemetry_it->second);
+                    view.power =
+                        yerbas::console::detail::
+                            format_power(
+                                telemetry_it->second);
+                    view.fan =
+                        yerbas::console::detail::
+                            format_fan(
+                                telemetry_it->second);
                 }
 
-                gpu_views.push_back(std::move(view));
+                gpu_views.push_back(
+                    std::move(view));
             }
         }
 #endif
@@ -1601,39 +1763,59 @@ void Client::report_stats(bool force)
         push_history(total_history, total_hps);
         push_history(cpu_history, cpu_hps);
         for (const auto& gpu : gpu_views)
-            push_history(gpu_history[gpu.id], gpu.hps);
+            push_history(
+                gpu_history[gpu.id], gpu.hps);
 
         std::ostringstream diff_text;
-        diff_text << std::defaultfloat << std::setprecision(8) << difficulty_;
+        diff_text
+            << std::defaultfloat
+            << std::setprecision(8)
+            << difficulty_;
 
         std::ostringstream rotation_text;
-        rotation_text << std::right << std::hex << std::setfill('0') << std::setw(16)
-                      << static_cast<std::uint64_t>(active_rotation_fingerprint_)
-                      << std::dec << std::setfill(' ');
+        rotation_text
+            << std::right
+            << std::hex
+            << std::setfill('0')
+            << std::setw(16)
+            << static_cast<std::uint64_t>(
+                   active_rotation_fingerprint_)
+            << std::dec
+            << std::setfill(' ');
 
 #ifdef YERBAS_HAS_CUDA
         const std::string cn_text =
-            gpu_active_cn_mask_ != 0U ? cn_mask_names(gpu_active_cn_mask_) : "pending";
+            gpu_active_cn_mask_ != 0U
+                ? cn_mask_names(gpu_active_cn_mask_)
+                : "pending";
 #else
         const std::string cn_text = "CPU";
 #endif
 
-        std::uint64_t gpu_completed = 0;
-        std::uint64_t gpu_stale = 0;
+        std::uint64_t gpu_completed = 0U;
+        std::uint64_t gpu_stale = 0U;
 #ifdef YERBAS_HAS_CUDA
         for (const auto& worker : gpu_workers_) {
-            gpu_completed += worker.telemetry_hashes_completed;
-            gpu_stale += worker.telemetry_hashes_stale;
+            gpu_completed +=
+                worker.telemetry_hashes_completed;
+            gpu_stale +=
+                worker.telemetry_hashes_stale;
         }
 #endif
 
         const double gpu_waste_pct =
-            gpu_completed == 0U ? 0.0 :
-            100.0 * static_cast<double>(gpu_stale) /
-            static_cast<double>(gpu_completed);
+            gpu_completed == 0U
+                ? 0.0
+                : 100.0 *
+                      static_cast<double>(gpu_stale) /
+                      static_cast<double>(gpu_completed);
 
         const std::string connection =
-            authorized_ ? "ONLINE" : (subscribed_ ? "AUTHORIZING" : "CONNECTING");
+            authorized_
+                ? "ONLINE"
+                : (subscribed_
+                       ? "AUTHORIZING"
+                       : "CONNECTING");
 
         const std::string green = "\x1b[1;92m";
         const std::string cyan = "\x1b[1;96m";
@@ -1644,171 +1826,370 @@ void Client::report_stats(bool force)
         const std::string bold = "\x1b[1m";
         const std::string reset = "\x1b[0m";
 
+        const auto line = [&](
+            const std::string& content) {
+            std::ostringstream out;
+            const std::size_t used =
+                display_width(content);
+            out << "│ " << content;
+            if (used + 2U < inner_width)
+                out << std::string(
+                    inner_width - used - 2U, ' ');
+            out << " │\n";
+            return out.str();
+        };
+
+        const auto section = [&](
+            const std::string& title) {
+            const std::size_t used =
+                3U + title.size();
+            std::ostringstream out;
+            out << green
+                << "├─ " << title << ' '
+                << repeat(
+                       "─",
+                       inner_width > used
+                           ? inner_width - used
+                           : 0U)
+                << "┤"
+                << reset
+                << '\n';
+            return out.str();
+        };
+
+        const std::string top_left =
+            "─[ YERBAS MINER ]";
+        const std::string top_right =
+            "[ PROOF OF GRASS ]─";
+        const std::size_t top_used =
+            display_width(top_left) +
+            display_width(top_right);
+
         std::ostringstream frame;
         frame << "\x1b[H";
 
         frame << green
-              << "╭─[ YERBAS MINER ]────────────────────────────────────────────────────────────────────[ PROOF OF GRASS ]─╮"
-              << reset << '\n';
+              << '╭'
+              << top_left
+              << repeat(
+                     "─",
+                     inner_width > top_used
+                         ? inner_width - top_used
+                         : 0U)
+              << top_right
+              << '╮'
+              << reset
+              << '\n';
 
-        frame << "│ "
-              << bold << "POOL " << reset
-              << fit(endpoint_.host + ":" + std::to_string(endpoint_.port), 28)
-              << " " << (authorized_ ? green : yellow) << fit(connection, 12) << reset
-              << "  "
-              << bold << "UP " << reset << fit(format_duration(uptime), 12)
-              << " "
-              << bold << "DEV FEE " << reset
-              << (dev_fee_session_active_ ? yellow + "ACTIVE" + reset : dim + "off" + reset)
-              << "                         │\n";
+        {
+            std::ostringstream status;
+            status
+                << bold << "POOL " << reset
+                << fit(
+                       endpoint_.host + ":" +
+                           std::to_string(
+                               endpoint_.port),
+                       28)
+                << ' '
+                << (authorized_ ? green : yellow)
+                << fit(connection, 12)
+                << reset
+                << "  "
+                << bold << "UP " << reset
+                << fit(format_duration(uptime), 12)
+                << "  "
+                << bold << "DEV FEE " << reset
+                << (dev_fee_session_active_
+                        ? yellow + "ACTIVE" + reset
+                        : dim + "off" + reset);
+            frame << line(status.str());
+        }
 
-        frame << "│ "
-              << bold << "JOB  " << reset << fit(job_.valid ? job_.job_id : "-", 28)
-              << " "
-              << bold << "DIFF " << reset << fit(diff_text.str(), 14)
-              << " "
-              << bold << "ROT " << reset << fit(rotation_text.str(), 18)
-              << " "
-              << bold << "CN " << reset << fit(cn_text, 30)
-              << " │\n";
+        {
+            std::ostringstream work;
+            work
+                << bold << "JOB " << reset
+                << fit(
+                       job_.valid
+                           ? job_.job_id
+                           : "-",
+                       24)
+                << "  "
+                << bold << "DIFF " << reset
+                << fit(diff_text.str(), 13)
+                << "  "
+                << bold << "ROT " << reset
+                << fit(rotation_text.str(), 16)
+                << "  "
+                << bold << "CN " << reset
+                << cn_text;
+            frame << line(work.str());
+        }
 
-        frame << green
-              << "├─ PERFORMANCE ─────────────────────────────────────────────────────────────────────────────────────┤"
-              << reset << '\n';
+        frame << section("HASHRATE HISTORY");
 
-        frame << "│ "
-              << green << bold << "TOTAL " << reset
-              << fit(format_rate(total_hps), 12)
-              << green << sparkline(total_history, 45) << reset
-              << "  AVG " << fit(format_rate(average_hps), 12)
-              << " ETA " << fit(format_duration(eta), 9)
-              << " │\n";
+        const std::size_t graph_label_width = 18U;
+        const std::size_t graph_width =
+            inner_width > graph_label_width + 4U
+                ? inner_width - graph_label_width - 4U
+                : 60U;
+
+        const auto total_graph =
+            area_graph(
+                total_history,
+                graph_width,
+                4U);
+
+        const auto [history_low, history_high] =
+            history_range(
+                total_history,
+                graph_width);
+
+        for (std::size_t row = 0U;
+             row < total_graph.size();
+             ++row) {
+            std::ostringstream content;
+
+            if (row == 0U) {
+                content
+                    << green << bold << "TOTAL "
+                    << reset
+                    << fit(
+                           format_rate(total_hps),
+                           11);
+            } else if (row == 1U) {
+                content
+                    << "AVG   "
+                    << fit(
+                           format_rate(average_hps),
+                           11);
+            } else if (row == 2U) {
+                content
+                    << "HIGH  "
+                    << fit(
+                           format_rate(history_high),
+                           11);
+            } else {
+                content
+                    << "LOW   "
+                    << fit(
+                           format_rate(history_low),
+                           11);
+            }
+
+            content
+                << green
+                << total_graph[row]
+                << reset;
+
+            frame << line(content.str());
+        }
+
+        frame << section("WORKERS");
+
+        const std::size_t worker_prefix =
+            48U;
+        const std::size_t mini_graph_width =
+            inner_width > worker_prefix + 4U
+                ? inner_width - worker_prefix - 4U
+                : 24U;
 
         if (config_.miner.cpu_enabled) {
-            frame << "│ "
-                  << yellow << "CPU   " << reset
-                  << fit(format_rate(cpu_hps), 12)
-                  << yellow << sparkline(cpu_history, 45) << reset
-                  << "  TEMP " << fit(yerbas::console::detail::format_temperature(cpu_telemetry), 7)
-                  << " PWR " << fit(yerbas::console::detail::format_power(cpu_telemetry), 9)
-                  << " │\n";
+            std::ostringstream cpu;
+            cpu
+                << yellow << bold << "CPU   " << reset
+                << fit(format_rate(cpu_hps), 11)
+                << ' '
+                << yellow
+                << gauge(
+                       cpu_hps,
+                       std::max(1.0, total_hps),
+                       12U)
+                << reset
+                << "  T "
+                << fit(
+                       yerbas::console::detail::
+                           format_temperature(
+                               cpu_telemetry),
+                       6)
+                << " P "
+                << fit(
+                       yerbas::console::detail::
+                           format_power(
+                               cpu_telemetry),
+                       8)
+                << " A "
+                << std::setw(6)
+                << g_source_accepted["CPU"]
+                << ' '
+                << yellow
+                << sparkline(
+                       cpu_history,
+                       mini_graph_width)
+                << reset;
+
+            frame << line(cpu.str());
         }
 
         for (const auto& gpu : gpu_views) {
-            const std::string label = "GPU " + std::to_string(gpu.id);
-            frame << "│ "
-                  << cyan << fit(label, 6) << reset
-                  << fit(format_rate(gpu.hps), 12)
-                  << cyan << sparkline(gpu_history[gpu.id], 45) << reset
-                  << "  " << fit(gpu.temp, 6)
-                  << " " << fit(gpu.power, 8)
-                  << " FAN " << fit(gpu.fan, 5)
-                  << " │\n";
+            const std::string label =
+                "GPU " + std::to_string(gpu.id);
+
+            std::ostringstream gpu;
+            gpu
+                << cyan << bold
+                << fit(label, 6)
+                << reset
+                << fit(
+                       format_rate(gpu.hps),
+                       11)
+                << ' '
+                << cyan
+                << gauge(
+                       gpu.hps,
+                       std::max(1.0, total_hps),
+                       12U)
+                << reset
+                << "  "
+                << fit(gpu.temp, 5)
+                << ' '
+                << fit(gpu.power, 8)
+                << " F "
+                << fit(gpu.fan, 4)
+                << " B "
+                << std::setw(5)
+                << gpu.batch
+                << " A "
+                << std::setw(6)
+                << gpu.accepted
+                << ' '
+                << cyan
+                << sparkline(
+                       gpu_history[gpu.id],
+                       mini_graph_width)
+                << reset;
+
+            frame << line(gpu.str());
         }
 
-        frame << green
-              << "├─ DEVICES ────────────────────────────────────────────────┬─ SHARES ───────────────────────────────────┤"
-              << reset << '\n';
+        frame << section("SHARES / WORK");
 
-        const double device_peak = std::max(1.0, total_hps);
-        frame << "│ "
-              << yellow << "CPU   " << reset
-              << gauge(cpu_hps, device_peak, 14)
-              << " " << fit(format_rate(cpu_hps), 11)
-              << " ACC " << std::setw(7) << g_source_accepted["CPU"]
-              << "              │ "
-              << green << "ACCEPTED " << reset << std::setw(8) << shares_accepted_
-              << "   HEALTH " << std::fixed << std::setprecision(2)
-              << std::setw(6) << acceptance << "%          │\n";
+        {
+            std::ostringstream shares;
+            shares
+                << green << bold
+                << "ACCEPTED " << reset
+                << shares_accepted_
+                << "   "
+                << red << "REJECTED " << reset
+                << shares_rejected_
+                << "   SUBMITTED "
+                << shares_submitted_
+                << "   HEALTH "
+                << std::fixed
+                << std::setprecision(2)
+                << acceptance << "%"
+                << "   BLOCKS "
+                << g_blocks_found
+                << "   GPU WASTE "
+                << std::setprecision(2)
+                << gpu_waste_pct << "%";
+            frame << line(shares.str());
+        }
 
-        std::size_t share_lines = 1U;
-        for (const auto& gpu : gpu_views) {
-            const std::string label = "GPU " + std::to_string(gpu.id);
-            frame << "│ "
-                  << cyan << fit(label, 6) << reset
-                  << gauge(gpu.hps, device_peak, 14)
-                  << " " << fit(format_rate(gpu.hps), 11)
-                  << " B " << std::setw(6) << gpu.batch
-                  << " ACC " << std::setw(6) << gpu.accepted
-                  << " │ ";
+        {
+            std::ostringstream work;
+            work
+                << "WORK/SHARE "
+                << std::fixed
+                << std::setprecision(0)
+                << expected_hashes
+                << "   NEXT SHARE ETA "
+                << format_duration(eta);
 
-            if (share_lines == 1U) {
-                frame << red << "REJECTED " << reset << std::setw(8) << shares_rejected_
-                      << "   BLOCKS " << std::setw(6) << g_blocks_found
-                      << "             │\n";
-            } else if (share_lines == 2U) {
-                frame << "SUBMITTED " << std::setw(7) << shares_submitted_
-                      << "   GPU WASTE " << std::setw(6) << std::setprecision(2)
-                      << gpu_waste_pct << "%        │\n";
-            } else {
-                frame << "WORK/SHARE " << std::setw(8) << std::setprecision(0)
-                      << expected_hashes << "                   │\n";
+            if (pending_target_ready_ &&
+                pending_difficulty_ready_) {
+                work
+                    << "   PENDING DIFF "
+                    << std::defaultfloat
+                    << std::setprecision(8)
+                    << pending_difficulty_;
             }
-            ++share_lines;
+
+            frame << line(work.str());
         }
 
-        while (share_lines <= 3U) {
-            frame << "│ "
-                  << dim << fit("idle device slot", 53) << reset
-                  << " │ ";
-            if (share_lines == 1U) {
-                frame << red << "REJECTED " << reset << std::setw(8) << shares_rejected_
-                      << "   BLOCKS " << std::setw(6) << g_blocks_found
-                      << "             │\n";
-            } else if (share_lines == 2U) {
-                frame << "SUBMITTED " << std::setw(7) << shares_submitted_
-                      << "   GPU WASTE " << std::setw(6) << std::setprecision(2)
-                      << gpu_waste_pct << "%        │\n";
-            } else {
-                frame << "WORK/SHARE " << std::setw(8) << std::setprecision(0)
-                      << expected_hashes << "                   │\n";
-            }
-            ++share_lines;
-        }
-
-        frame << green
-              << "├─ ACTIVITY ────────────────────────────────────────────────────────────────────────────────────────┤"
-              << reset << '\n';
+        frame << section("ACTIVITY");
 
         if (g_recent_activity.empty()) {
-            frame << "│ " << dim
-                  << fit("waiting for mining activity...", 104)
-                  << reset << " │\n";
+            frame << line(
+                dim +
+                std::string(
+                    "waiting for mining activity...") +
+                reset);
             for (int i = 0; i < 4; ++i)
-                frame << "│ " << fit("", 104) << " │\n";
+                frame << line("");
         } else {
             std::size_t shown = 0U;
-            for (const auto& event : g_recent_activity) {
+            for (const auto& event :
+                 g_recent_activity) {
                 std::string color = reset;
-                if (event.find("BLOCK FOUND") != std::string::npos) color = yellow;
-                else if (event.find("rejected") != std::string::npos) color = red;
-                else if (event.find("accepted") != std::string::npos) color = green;
-                else if (event.find("new job") != std::string::npos) color = magenta;
 
-                frame << "│ " << color << fit(event, 104) << reset << " │\n";
-                if (++shown == 5U) break;
+                if (event.find("BLOCK FOUND") !=
+                    std::string::npos)
+                    color = yellow;
+                else if (event.find("rejected") !=
+                         std::string::npos)
+                    color = red;
+                else if (event.find("accepted") !=
+                         std::string::npos)
+                    color = green;
+                else if (event.find("new job") !=
+                         std::string::npos)
+                    color = magenta;
+
+                frame << line(
+                    color + event + reset);
+
+                if (++shown == 5U)
+                    break;
             }
+
             while (shown++ < 5U)
-                frame << "│ " << fit("", 104) << " │\n";
+                frame << line("");
         }
 
         frame << green
-              << "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯"
-              << reset << '\n';
-
-        frame << dim
-              << "  Ctrl+C stop   •   --console plain scrolling view   •   detailed diagnostics remain in session log"
+              << '╰'
+              << repeat("─", inner_width)
+              << '╯'
               << reset
-              << "\x1b[J";
+              << '\n';
 
-        yerbas::console::terminal_write(frame.str());
+        {
+            const std::string footer =
+                "Ctrl+C stop   •   --console plain scrolling view   •   detailed diagnostics: session log";
+            frame
+                << dim
+                << ' '
+                << footer
+                << reset
+                << "\x1b[J";
+        }
+
+        yerbas::console::terminal_write(
+            frame.str());
 
         last_report_ = now;
-        hashes_at_last_report_ = hashes_done_;
-        cpu_hashes_at_last_report_ = cpu_hashes_done_;
+        hashes_at_last_report_ =
+            hashes_done_;
+        cpu_hashes_at_last_report_ =
+            cpu_hashes_done_;
+
 #ifdef YERBAS_HAS_CUDA
         for (auto& worker : gpu_workers_)
-            worker.hashes_at_last_report = worker.hashes_done;
+            worker.hashes_at_last_report =
+                worker.hashes_done;
 #endif
         return;
     }
