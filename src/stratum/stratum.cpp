@@ -2,6 +2,8 @@
 
 #include "crypto/sha256.h"
 #include "ghostrider/ghostrider.h"
+#include "console.h"
+#include "console_file_log.h"
 
 #include <nlohmann/json.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
@@ -1443,7 +1445,8 @@ void Client::report_stats(bool force)
     const auto now = std::chrono::steady_clock::now();
     if (mining_started_.time_since_epoch().count() == 0) return;
     const double since_report = std::chrono::duration<double>(now - last_report_).count();
-    if (!force && since_report < kStatusIntervalSeconds) return;
+    const double status_interval = yerbas::console::dashboard_active() ? 1.0 : kStatusIntervalSeconds;
+    if (!force && since_report < status_interval) return;
 
     const std::uint64_t window_hashes = hashes_done_ >= hashes_at_last_report_
         ? hashes_done_ - hashes_at_last_report_ : 0;
@@ -1457,6 +1460,198 @@ void Client::report_stats(bool force)
     const double eta = total_hps > 0.0 && expected_hashes > 0.0 ? expected_hashes / total_hps : std::numeric_limits<double>::infinity();
     const std::uint64_t resolved_shares = shares_accepted_ + shares_rejected_;
     const double acceptance = resolved_shares > 0 ? 100.0 * static_cast<double>(shares_accepted_) / static_cast<double>(resolved_shares) : 100.0;
+
+    if (yerbas::console::dashboard_active()) {
+        using yerbas::console::detail::CpuTelemetry;
+        using yerbas::console::detail::GpuTelemetrySnapshot;
+
+        static GpuTelemetrySnapshot gpu_telemetry;
+        static CpuTelemetry cpu_telemetry;
+        static std::chrono::steady_clock::time_point telemetry_updated{};
+
+        const double telemetry_age =
+            telemetry_updated.time_since_epoch().count() == 0
+                ? std::numeric_limits<double>::infinity()
+                : std::chrono::duration<double>(now - telemetry_updated).count();
+
+        if (telemetry_age >= 5.0) {
+            gpu_telemetry = yerbas::console::detail::query_gpu_telemetry();
+            cpu_telemetry = yerbas::console::detail::query_cpu_telemetry();
+            telemetry_updated = now;
+        }
+
+        const auto meter = [total_hps](double hps) {
+            constexpr int width = 18;
+            double ratio = total_hps > 0.0 ? hps / total_hps : 0.0;
+            ratio = std::clamp(ratio, 0.0, 1.0);
+            const int filled = std::clamp(
+                static_cast<int>(ratio * static_cast<double>(width) + 0.5),
+                0,
+                width);
+            return std::string("[") +
+                   std::string(static_cast<std::size_t>(filled), '#') +
+                   std::string(static_cast<std::size_t>(width - filled), '.') +
+                   "]";
+        };
+
+        const auto fit = [](std::string text, std::size_t width) {
+            if (text.size() > width) text.resize(width);
+            if (text.size() < width) text.append(width - text.size(), ' ');
+            return text;
+        };
+
+        std::ostringstream diff_text;
+        diff_text << std::defaultfloat << std::setprecision(8) << difficulty_;
+
+        std::ostringstream rotation_text;
+        rotation_text << std::right << std::hex << std::setfill('0') << std::setw(16)
+                      << static_cast<std::uint64_t>(active_rotation_fingerprint_)
+                      << std::dec << std::setfill(' ');
+
+#ifdef YERBAS_HAS_CUDA
+        const std::string cn_text = gpu_active_cn_mask_ != 0U
+            ? cn_mask_names(gpu_active_cn_mask_)
+            : "pending";
+#else
+        const std::string cn_text = "CPU";
+#endif
+
+        std::uint64_t gpu_completed = 0;
+        std::uint64_t gpu_stale = 0;
+#ifdef YERBAS_HAS_CUDA
+        for (const auto& worker : gpu_workers_) {
+            gpu_completed += worker.telemetry_hashes_completed;
+            gpu_stale += worker.telemetry_hashes_stale;
+        }
+#endif
+        const double gpu_waste_pct =
+            gpu_completed == 0
+                ? 0.0
+                : 100.0 * static_cast<double>(gpu_stale) /
+                      static_cast<double>(gpu_completed);
+
+        std::ostringstream frame;
+        frame << "\x1b[H\x1b[2J";
+        frame << "╔════════════════════════════════════════════════════════════════════════════════════════════════╗\n";
+        frame << "║  🌿 YERBAS MINER // PROOF OF GRASS                                      LIVE ●               ║\n";
+        frame << "╠════════════════════════════════════════════════════════════════════════════════════════════════╣\n";
+
+        const std::string connection =
+            authorized_ ? "ONLINE" : (subscribed_ ? "AUTHORIZING" : "CONNECTING");
+
+        frame << "║ POOL  "
+              << fit(endpoint_.host + ":" + std::to_string(endpoint_.port), 28)
+              << " STATUS " << fit(connection, 12)
+              << " DIFF " << fit(diff_text.str(), 14)
+              << " UP " << fit(format_duration(uptime), 12)
+              << "║\n";
+
+        frame << "║ JOB   "
+              << fit(job_.valid ? job_.job_id : "-", 28)
+              << " ACCEPTED " << std::setw(7) << shares_accepted_
+              << "   REJECTED " << std::setw(5) << shares_rejected_
+              << "   BLOCKS " << std::setw(5) << g_blocks_found
+              << "                         ║\n";
+
+        frame << "╠════════════════════════════════════ DEVICES ═══════════════════════════════════════════════════╣\n";
+
+        if (config_.miner.cpu_enabled) {
+            frame << "║ CPU    "
+                  << fit(format_rate(cpu_hps), 12) << ' '
+                  << meter(cpu_hps)
+                  << "   ACC " << std::setw(7) << g_source_accepted["CPU"]
+                  << "   TEMP "
+                  << fit(yerbas::console::detail::format_temperature(cpu_telemetry), 8)
+                  << " PWR "
+                  << fit(yerbas::console::detail::format_power(cpu_telemetry), 9)
+                  << "           ║\n";
+        }
+
+#ifdef YERBAS_HAS_CUDA
+        if (config_.gpu.enabled && !gpu_workers_.empty()) {
+            for (auto& worker : gpu_workers_) {
+                const std::uint64_t gpu_window_hashes =
+                    worker.hashes_done >= worker.hashes_at_last_report
+                        ? worker.hashes_done - worker.hashes_at_last_report
+                        : 0;
+                const double gpu_hps =
+                    since_report > 0.0
+                        ? static_cast<double>(gpu_window_hashes) / since_report
+                        : 0.0;
+
+                std::ostringstream source_stream;
+                source_stream << "GPU " << worker.device_id;
+                const std::string source = source_stream.str();
+
+                std::string temp = "n/a";
+                std::string power = "n/a";
+                std::string fan = "n/a";
+                const auto telemetry_it = gpu_telemetry.devices.find(worker.device_id);
+                if (telemetry_it != gpu_telemetry.devices.end()) {
+                    temp = yerbas::console::detail::format_temperature(telemetry_it->second);
+                    power = yerbas::console::detail::format_power(telemetry_it->second);
+                    fan = yerbas::console::detail::format_fan(telemetry_it->second);
+                }
+
+                frame << "║ "
+                      << fit(source, 7)
+                      << fit(gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle", 12)
+                      << ' ' << meter(gpu_hps)
+                      << "   B " << std::setw(6) << worker.engine->batch_size()
+                      << " ACC " << std::setw(7) << g_source_accepted[source]
+                      << ' ' << fit(temp, 7)
+                      << ' ' << fit(power, 8)
+                      << ' ' << fit(fan, 7)
+                      << " ║\n";
+            }
+        }
+#endif
+
+        frame << "╠══════════════════════════════════ PERFORMANCE ═════════════════════════════════════════════════╣\n";
+        frame << "║ LIVE       " << fit(format_rate(total_hps), 14)
+              << " GROSS AVG   " << fit(format_rate(average_hps), 14)
+              << " HEALTH " << std::fixed << std::setprecision(2) << std::setw(6) << acceptance
+              << "%   GPU WASTE " << std::setw(6) << gpu_waste_pct << "%             ║\n";
+
+        frame << "║ SUBMITTED  " << std::setw(8) << shares_submitted_
+              << "     ACCEPTED " << std::setw(8) << shares_accepted_
+              << "     REJECTED " << std::setw(6) << shares_rejected_
+              << "     ETA " << fit(format_duration(eta), 12)
+              << "                         ║\n";
+
+        frame << "╠════════════════════════════════ CURRENT WORK ═══════════════════════════════════════════════════╣\n";
+        frame << "║ ROTATION   " << fit(rotation_text.str(), 20)
+              << " CN " << fit(cn_text, 48)
+              << " DEV FEE " << (dev_fee_session_active_ ? "ACTIVE" : "off   ")
+              << " ║\n";
+
+        frame << "║ WORK/SHARE " << std::fixed << std::setprecision(0) << std::setw(10) << expected_hashes
+              << "     NEXT SHARE ETA " << fit(format_duration(eta), 12);
+
+        if (pending_target_ready_ && pending_difficulty_ready_) {
+            std::ostringstream pending;
+            pending << std::defaultfloat << std::setprecision(8) << pending_difficulty_;
+            frame << " PENDING DIFF " << fit(pending.str(), 14);
+        } else {
+            frame << "                              ";
+        }
+        frame << " ║\n";
+
+        frame << "╠════════════════════════════════════════════════════════════════════════════════════════════════╣\n";
+        frame << "║ Ctrl+C stop   •   detailed events stay in session log   •   --console plain = scrolling view  ║\n";
+        frame << "╚════════════════════════════════════════════════════════════════════════════════════════════════╝";
+
+        yerbas::console::terminal_write(frame.str());
+
+        last_report_ = now;
+        hashes_at_last_report_ = hashes_done_;
+        cpu_hashes_at_last_report_ = cpu_hashes_done_;
+#ifdef YERBAS_HAS_CUDA
+        for (auto& worker : gpu_workers_)
+            worker.hashes_at_last_report = worker.hashes_done;
+#endif
+        return;
+    }
 
     constexpr const char* kRule = "--------------------------------------------------------------------------------------------------------";
     constexpr const char* kTop =  "================================ 🌿 PROOF OF GRASS | STATUS UPDATE =================================";
