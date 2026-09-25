@@ -188,9 +188,9 @@ int main(int argc, char** argv)
             std::cerr << "Warning: could not open session log: " << session_log_path << '\n';
     }
 
-    // Normal mining output stays on the native terminal path. SessionFileLog,
-    // when requested, mirrors writes directly to a buffered file without line
-    // assembly, status parsing, telemetry queries, pipes, or tee.
+    // Normal mining output stays on the native terminal path. SessionFileLog
+    // mirrors complete lines atomically to the buffered file so concurrent
+    // CPU/GPU diagnostics cannot corrupt each other. No pipes or tee are used.
     write_startup_log("Yerbas Miner starting");
 
     std::cout << "\nYerbas Miner starting...\n"
