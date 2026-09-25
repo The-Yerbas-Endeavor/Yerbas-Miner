@@ -1869,7 +1869,7 @@ void Client::report_stats(bool force)
         frame << "\x1b[H";
 
         frame << green
-              << '╭'
+              << "╭"
               << top_left
               << repeat(
                      "─",
@@ -1877,7 +1877,7 @@ void Client::report_stats(bool force)
                          ? inner_width - top_used
                          : 0U)
               << top_right
-              << '╮'
+              << "╮"
               << reset
               << '\n';
 
@@ -2160,9 +2160,9 @@ void Client::report_stats(bool force)
         }
 
         frame << green
-              << '╰'
+              << "╰"
               << repeat("─", inner_width)
-              << '╯'
+              << "╯"
               << reset
               << '\n';
 
