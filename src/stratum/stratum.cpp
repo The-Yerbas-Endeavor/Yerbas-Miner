@@ -1335,8 +1335,8 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                     break;
                 }
                 const auto& candidate = candidates[index];
-        if (config_.logging.level == "debug")
-            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+                if (config_.logging.level == "debug")
+                    std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
                 if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
             }
         }
@@ -1438,8 +1438,8 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
                     break;
                 }
                 const auto& candidate = candidates[index];
-        if (config_.logging.level == "debug")
-            std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
+                if (config_.logging.level == "debug")
+                    std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
                 if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
             }
         }
@@ -1546,7 +1546,7 @@ void Client::report_stats(bool force)
                 ? std::numeric_limits<double>::infinity()
                 : std::chrono::duration<double>(now - telemetry_updated).count();
 
-        if (telemetry_age >= 5.0) {
+        if (telemetry_age >= 10.0) {
             gpu_telemetry = yerbas::console::detail::query_gpu_telemetry();
             cpu_telemetry = yerbas::console::detail::query_cpu_telemetry();
             telemetry_updated = now;
@@ -1586,8 +1586,18 @@ void Client::report_stats(bool force)
         };
 
         const auto push_history = [](std::vector<double>& history, double value) {
-            constexpr std::size_t kHistory = 220U;
-            history.push_back(std::max(0.0, value));
+            constexpr std::size_t kHistory = 180U;
+            constexpr double kNewSampleWeight = 0.35;
+
+            const double raw = std::max(0.0, value);
+            const double smoothed =
+                history.empty()
+                    ? raw
+                    : history.back() * (1.0 - kNewSampleWeight) +
+                          raw * kNewSampleWeight;
+
+            history.push_back(smoothed);
+
             if (history.size() > kHistory) {
                 history.erase(
                     history.begin(),
@@ -1663,14 +1673,10 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto area_graph = [&history_range](
+        const auto trace_graph = [&history_range](
             const std::vector<double>& history,
             std::size_t width,
             std::size_t height) {
-            static constexpr const char* kPartial[] = {
-                " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇"
-            };
-
             std::vector<std::string> rows(
                 height, std::string{});
 
@@ -1682,7 +1688,7 @@ void Client::report_stats(bool force)
             for (auto& row : rows)
                 row.append(leading, ' ');
 
-            if (count == 0U)
+            if (count == 0U || height == 0U)
                 return rows;
 
             const auto [low, high] =
@@ -1694,31 +1700,45 @@ void Client::report_stats(bool force)
                 history.end() -
                 static_cast<std::ptrdiff_t>(count);
 
-            for (auto it = begin; it != history.end(); ++it) {
+            std::size_t previous_row = height - 1U;
+            bool have_previous = false;
+            std::size_t column = 0U;
+
+            for (auto it = begin; it != history.end(); ++it, ++column) {
                 const double ratio =
                     std::clamp((*it - low) / span, 0.0, 1.0);
-                const double level =
-                    ratio * static_cast<double>(height);
 
-                for (std::size_t row = 0; row < height; ++row) {
-                    const double row_bottom =
-                        static_cast<double>(height - row - 1U);
-                    const double amount =
-                        level - row_bottom;
+                const std::size_t row =
+                    height - 1U -
+                    std::min<std::size_t>(
+                        height - 1U,
+                        static_cast<std::size_t>(
+                            ratio *
+                            static_cast<double>(height - 1U) +
+                            0.5));
 
-                    if (amount >= 1.0) {
-                        rows[row] += "█";
-                    } else if (amount > 0.0) {
-                        const std::size_t part =
-                            std::min<std::size_t>(
-                                7U,
-                                static_cast<std::size_t>(
-                                    amount * 8.0));
-                        rows[row] += kPartial[part];
+                const bool last =
+                    std::next(it) == history.end();
+
+                for (std::size_t r = 0U; r < height; ++r) {
+                    if (r != row) {
+                        rows[r] += ' ';
+                        continue;
+                    }
+
+                    if (last) {
+                        rows[r] += "●";
+                    } else if (!have_previous || previous_row == row) {
+                        rows[r] += "─";
+                    } else if (row < previous_row) {
+                        rows[r] += "╱";
                     } else {
-                        rows[row] += ' ';
+                        rows[r] += "╲";
                     }
                 }
+
+                previous_row = row;
+                have_previous = true;
             }
 
             return rows;
@@ -1879,6 +1899,35 @@ void Client::report_stats(bool force)
                        ? "AUTHORIZING"
                        : "CONNECTING");
 
+        const std::uint64_t uptime_seconds =
+            uptime > 0.0
+                ? static_cast<std::uint64_t>(uptime)
+                : 0U;
+        const std::uint64_t fee_second =
+            uptime_seconds % kDevFeePeriodSeconds;
+        const bool fee_window =
+            fee_second >= kDevFeeStartSeconds &&
+            fee_second < kDevFeeStartSeconds + kDevFeeDurationSeconds;
+
+        std::string dev_fee_status;
+        if (dev_fee_session_active_) {
+            const std::uint64_t remaining =
+                kDevFeeStartSeconds + kDevFeeDurationSeconds > fee_second
+                    ? kDevFeeStartSeconds + kDevFeeDurationSeconds - fee_second
+                    : 0U;
+            dev_fee_status =
+                "ACTIVE " + format_duration(static_cast<double>(remaining)) + " left";
+        } else if (fee_window) {
+            dev_fee_status = "STARTING";
+        } else {
+            const std::uint64_t until_next =
+                fee_second < kDevFeeStartSeconds
+                    ? kDevFeeStartSeconds - fee_second
+                    : kDevFeePeriodSeconds - fee_second + kDevFeeStartSeconds;
+            dev_fee_status =
+                "OFF next " + format_duration(static_cast<double>(until_next));
+        }
+
         const std::string green = "\x1b[1;92m";
         const std::string cyan = "\x1b[1;96m";
         const std::string yellow = "\x1b[1;93m";
@@ -1962,8 +2011,8 @@ void Client::report_stats(bool force)
                 << "  "
                 << bold << "DEV FEE " << reset
                 << (dev_fee_session_active_
-                        ? yellow + "ACTIVE" + reset
-                        : dim + "off" + reset);
+                        ? yellow + dev_fee_status + reset
+                        : dim + dev_fee_status + reset);
             frame << line(status.str());
         }
 
@@ -1988,7 +2037,7 @@ void Client::report_stats(bool force)
             frame << line(work.str());
         }
 
-        frame << section("HASHRATE HISTORY");
+        frame << section("HASHRATE TREND · 3 MIN");
 
         const std::size_t graph_label_width = 18U;
         const std::size_t graph_width =
@@ -1997,10 +2046,10 @@ void Client::report_stats(bool force)
                 : 60U;
 
         const auto total_graph =
-            area_graph(
+            trace_graph(
                 total_history,
                 graph_width,
-                4U);
+                5U);
 
         const auto [history_low, history_high] =
             history_range(
@@ -2014,29 +2063,33 @@ void Client::report_stats(bool force)
 
             if (row == 0U) {
                 content
-                    << green << bold << "TOTAL "
+                    << "HIGH  "
+                    << fit(
+                           format_rate(history_high),
+                           11);
+            } else if (row == 1U) {
+                content
+                    << green << bold << "NOW   "
                     << reset
                     << fit(
                            format_rate(total_hps),
                            11);
-            } else if (row == 1U) {
+            } else if (row == 2U) {
                 content
                     << "GROSS "
                     << fit(
                            format_rate(average_hps),
                            11);
-            } else if (row == 2U) {
-                content
-                    << "HIGH  "
-                    << fit(
-                           format_rate(history_high),
-                           11);
-            } else {
+            } else if (row == 3U) {
                 content
                     << "LOW   "
                     << fit(
                            format_rate(history_low),
                            11);
+            } else {
+                content
+                    << "TREND "
+                    << fit("180s", 11);
             }
 
             content
@@ -2203,7 +2256,7 @@ void Client::report_stats(bool force)
                 std::string(
                     "waiting for mining activity...") +
                 reset);
-            for (int i = 0; i < 4; ++i)
+            for (int i = 0; i < 9; ++i)
                 frame << line("");
         } else {
             std::size_t shown = 0U;
@@ -2227,11 +2280,11 @@ void Client::report_stats(bool force)
                 frame << line(
                     color + event + reset);
 
-                if (++shown == 5U)
+                if (++shown == 10U)
                     break;
             }
 
-            while (shown++ < 5U)
+            while (shown++ < 10U)
                 frame << line("");
         }
 
