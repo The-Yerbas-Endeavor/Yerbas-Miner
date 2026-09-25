@@ -19,6 +19,7 @@
 #include <io.h>
 #include <windows.h>
 #else
+#include <sys/ioctl.h>
 #include <unistd.h>
 #endif
 
@@ -34,6 +35,24 @@ constexpr const char* kBlue = "\x1b[94m";
 constexpr const char* kMagenta = "\x1b[95m";
 constexpr const char* kCyan = "\x1b[96m";
 constexpr const char* kWhite = "\x1b[97m";
+
+inline std::size_t terminal_columns()
+{
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    const HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle != INVALID_HANDLE_VALUE && handle != nullptr &&
+        GetConsoleScreenBufferInfo(handle, &info)) {
+        const int width = info.srWindow.Right - info.srWindow.Left + 1;
+        if (width > 0) return static_cast<std::size_t>(width);
+    }
+#else
+    struct winsize size {};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0)
+        return static_cast<std::size_t>(size.ws_col);
+#endif
+    return 120U;
+}
 
 inline bool terminal_supports_color()
 {
