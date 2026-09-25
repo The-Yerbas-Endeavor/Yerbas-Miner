@@ -2087,8 +2087,8 @@ void Client::report_stats(bool force)
                     ? inner_width - prefix_width - 2U
                     : 8U;
 
-            std::ostringstream gpu;
-            gpu
+            std::ostringstream gpu_line;
+            gpu_line
                 << prefix.str()
                 << cyan
                 << sparkline(
@@ -2096,7 +2096,7 @@ void Client::report_stats(bool force)
                        graph_width)
                 << reset;
 
-            frame << line(gpu.str());
+            frame << line(gpu_line.str());
         }
 
         frame << section("SHARES / WORK");
