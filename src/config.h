@@ -44,6 +44,13 @@ struct GpuConfig {
 
 struct LoggingConfig {
     std::string level{"info"};
+
+    // Console presentation:
+    //   auto  = single-screen dashboard on an interactive terminal, plain otherwise
+    //   tui   = request the single-screen dashboard
+    //   plain = traditional scrolling console
+    std::string console_mode{"auto"};
+
     // Optional rotation/performance CSV. Empty disables file logging.
     std::string perf_csv;
 };
