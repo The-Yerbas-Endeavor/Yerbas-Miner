@@ -1803,12 +1803,24 @@ void Client::report_stats(bool force)
         }
 #endif
 
+        const bool gpu_waste_available =
+            production_latency_telemetry_enabled() &&
+            gpu_completed != 0U;
         const double gpu_waste_pct =
-            gpu_completed == 0U
-                ? 0.0
-                : 100.0 *
+            gpu_waste_available
+                ? 100.0 *
                       static_cast<double>(gpu_stale) /
-                      static_cast<double>(gpu_completed);
+                      static_cast<double>(gpu_completed)
+                : 0.0;
+        std::ostringstream gpu_waste_text;
+        if (gpu_waste_available) {
+            gpu_waste_text
+                << std::fixed
+                << std::setprecision(2)
+                << gpu_waste_pct << '%';
+        } else {
+            gpu_waste_text << "n/a";
+        }
 
         const std::string connection =
             authorized_
@@ -1959,7 +1971,7 @@ void Client::report_stats(bool force)
                            11);
             } else if (row == 1U) {
                 content
-                    << "AVG   "
+                    << "GROSS "
                     << fit(
                            format_rate(average_hps),
                            11);
@@ -1987,16 +1999,9 @@ void Client::report_stats(bool force)
 
         frame << section("WORKERS");
 
-        const std::size_t worker_prefix =
-            48U;
-        const std::size_t mini_graph_width =
-            inner_width > worker_prefix + 4U
-                ? inner_width - worker_prefix - 4U
-                : 24U;
-
         if (config_.miner.cpu_enabled) {
-            std::ostringstream cpu;
-            cpu
+            std::ostringstream prefix;
+            prefix
                 << yellow << bold << "CPU   " << reset
                 << fit(format_rate(cpu_hps), 11)
                 << ' '
@@ -2021,11 +2026,22 @@ void Client::report_stats(bool force)
                 << " A "
                 << std::setw(6)
                 << g_source_accepted["CPU"]
-                << ' '
+                << ' ';
+
+            const std::size_t prefix_width =
+                display_width(prefix.str());
+            const std::size_t graph_width =
+                inner_width > prefix_width + 2U
+                    ? inner_width - prefix_width - 2U
+                    : 8U;
+
+            std::ostringstream cpu;
+            cpu
+                << prefix.str()
                 << yellow
                 << sparkline(
                        cpu_history,
-                       mini_graph_width)
+                       graph_width)
                 << reset;
 
             frame << line(cpu.str());
@@ -2035,8 +2051,8 @@ void Client::report_stats(bool force)
             const std::string label =
                 "GPU " + std::to_string(gpu.id);
 
-            std::ostringstream gpu;
-            gpu
+            std::ostringstream prefix;
+            prefix
                 << cyan << bold
                 << fit(label, 6)
                 << reset
@@ -2062,11 +2078,22 @@ void Client::report_stats(bool force)
                 << " A "
                 << std::setw(6)
                 << gpu.accepted
-                << ' '
+                << ' ';
+
+            const std::size_t prefix_width =
+                display_width(prefix.str());
+            const std::size_t graph_width =
+                inner_width > prefix_width + 2U
+                    ? inner_width - prefix_width - 2U
+                    : 8U;
+
+            std::ostringstream gpu;
+            gpu
+                << prefix.str()
                 << cyan
                 << sparkline(
                        gpu_history[gpu.id],
-                       mini_graph_width)
+                       graph_width)
                 << reset;
 
             frame << line(gpu.str());
@@ -2092,8 +2119,7 @@ void Client::report_stats(bool force)
                 << "   BLOCKS "
                 << g_blocks_found
                 << "   GPU WASTE "
-                << std::setprecision(2)
-                << gpu_waste_pct << "%";
+                << gpu_waste_text.str();
             frame << line(shares.str());
         }
 
