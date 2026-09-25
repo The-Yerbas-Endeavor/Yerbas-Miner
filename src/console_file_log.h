@@ -8,16 +8,86 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <streambuf>
 #include <string>
 
 namespace yerbas::console {
 
+inline std::streambuf*& native_terminal_stdout()
+{
+    static std::streambuf* value = nullptr;
+    return value;
+}
+
+inline bool& terminal_stdout_enabled()
+{
+    static bool value = true;
+    return value;
+}
+
+inline bool& dashboard_active_flag()
+{
+    static bool value = false;
+    return value;
+}
+
+inline std::mutex& terminal_write_mutex()
+{
+    static std::mutex value;
+    return value;
+}
+
+inline bool dashboard_active() noexcept
+{
+    return dashboard_active_flag();
+}
+
+inline void terminal_write(const std::string& value)
+{
+    std::lock_guard<std::mutex> lock(terminal_write_mutex());
+    std::streambuf* out = native_terminal_stdout();
+    if (out == nullptr) return;
+    out->sputn(value.data(), static_cast<std::streamsize>(value.size()));
+    out->pubsync();
+}
+
+class DashboardScreen final {
+public:
+    DashboardScreen()
+    {
+        dashboard_active_flag() = true;
+        terminal_stdout_enabled() = false;
+        terminal_write("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
+        active_ = true;
+    }
+
+    DashboardScreen(const DashboardScreen&) = delete;
+    DashboardScreen& operator=(const DashboardScreen&) = delete;
+
+    ~DashboardScreen() noexcept
+    {
+        if (!active_) return;
+        try {
+            terminal_write("\x1b[0m\x1b[?25h\x1b[?1049l");
+        } catch (...) {}
+        dashboard_active_flag() = false;
+        terminal_stdout_enabled() = true;
+    }
+
+private:
+    bool active_{false};
+};
+
 class DirectMirrorBuf final : public std::streambuf {
 public:
-    DirectMirrorBuf(std::streambuf* terminal, std::streambuf* file) noexcept
-        : terminal_(terminal), file_(file) {}
+    DirectMirrorBuf(std::streambuf* terminal,
+                    std::streambuf* file,
+                    bool muteable_terminal) noexcept
+        : terminal_(terminal),
+          file_(file),
+          muteable_terminal_(muteable_terminal) {}
 
 protected:
     int_type overflow(int_type ch) override
@@ -26,37 +96,52 @@ protected:
             return traits_type::not_eof(ch);
 
         const char c = traits_type::to_char_type(ch);
-        const auto a = terminal_->sputc(c);
+
+        bool terminal_ok = true;
+        if (!muteable_terminal_ || terminal_stdout_enabled()) {
+            const auto a = terminal_->sputc(c);
+            terminal_ok = !traits_type::eq_int_type(a, traits_type::eof());
+        }
+
         const auto b = file_->sputc(c);
-        return (traits_type::eq_int_type(a, traits_type::eof()) ||
-                traits_type::eq_int_type(b, traits_type::eof()))
-                   ? traits_type::eof()
-                   : ch;
+        const bool file_ok = !traits_type::eq_int_type(b, traits_type::eof());
+
+        return (terminal_ok && file_ok) ? ch : traits_type::eof();
     }
 
     std::streamsize xsputn(const char* data, std::streamsize size) override
     {
-        const auto a = terminal_->sputn(data, size);
-        const auto b = file_->sputn(data, size);
-        return a < b ? a : b;
+        std::streamsize terminal_written = size;
+        if (!muteable_terminal_ || terminal_stdout_enabled())
+            terminal_written = terminal_->sputn(data, size);
+
+        const auto file_written = file_->sputn(data, size);
+        return terminal_written < file_written ? terminal_written : file_written;
     }
 
     int sync() override
     {
-        const int a = terminal_->pubsync();
-        const int b = file_->pubsync();
-        return (a == 0 && b == 0) ? 0 : -1;
+        int terminal_result = 0;
+        if (!muteable_terminal_ || terminal_stdout_enabled())
+            terminal_result = terminal_->pubsync();
+
+        const int file_result = file_->pubsync();
+        return (terminal_result == 0 && file_result == 0) ? 0 : -1;
     }
 
 private:
     std::streambuf* terminal_;
     std::streambuf* file_;
+    bool muteable_terminal_{false};
 };
 
 class SessionFileLog final {
 public:
     explicit SessionFileLog(const std::string& path)
     {
+        if (native_terminal_stdout() == nullptr)
+            native_terminal_stdout() = std::cout.rdbuf();
+
         if (path.empty()) return;
 
         std::error_code ec;
@@ -69,8 +154,8 @@ public:
 
         cout_native_ = std::cout.rdbuf();
         cerr_native_ = std::cerr.rdbuf();
-        cout_mirror_ = std::make_unique<DirectMirrorBuf>(cout_native_, file_.rdbuf());
-        cerr_mirror_ = std::make_unique<DirectMirrorBuf>(cerr_native_, file_.rdbuf());
+        cout_mirror_ = std::make_unique<DirectMirrorBuf>(cout_native_, file_.rdbuf(), true);
+        cerr_mirror_ = std::make_unique<DirectMirrorBuf>(cerr_native_, file_.rdbuf(), false);
         std::cout.rdbuf(cout_mirror_.get());
         std::cerr.rdbuf(cerr_mirror_.get());
         active_ = true;
