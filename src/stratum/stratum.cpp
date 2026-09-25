@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <cstdlib>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -81,6 +82,7 @@ std::mutex g_pending_share_sources_mutex;
 std::uint64_t g_blocks_found = 0;
 bool g_dev_fee_switch_requested = false;
 std::string g_active_login_user;
+std::deque<std::string> g_recent_activity;
 
 bool dev_fee_active(std::chrono::steady_clock::time_point mining_started)
 {
@@ -105,6 +107,13 @@ std::string timestamp()
     std::ostringstream ss;
     ss << '[' << std::put_time(&tm, "%H:%M:%S") << "] ";
     return ss.str();
+}
+
+void record_activity(const std::string& message)
+{
+    g_recent_activity.push_front(timestamp() + message);
+    while (g_recent_activity.size() > 5U)
+        g_recent_activity.pop_back();
 }
 
 const char* gpu_color(int device_id)
@@ -645,12 +654,14 @@ void Client::handle_message(const std::string& line)
             if (accepted) {
                 ++shares_accepted_;
                 ++g_source_accepted[source];
+                record_activity("✓ share accepted  " + source + "  total=" + std::to_string(shares_accepted_));
                 std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset
                           << " SRC: " << source_color(source) << source << kColorReset
                           << " | accepted=" << kAcceptColor << shares_accepted_ << kColorReset
                           << " rejected=" << shares_rejected_ << '\n';
             } else {
                 ++shares_rejected_;
+                record_activity("! share rejected  " + source + "  total=" + std::to_string(shares_rejected_));
                 std::cout << timestamp() << kRejectBadge << " SHARE REJECTED " << kColorReset
                           << " SRC: " << source_color(source) << source << kColorReset
                           << " | accepted=" << shares_accepted_
@@ -690,6 +701,12 @@ void Client::handle_message(const std::string& line)
             if (job_.clean_jobs) ++extranonce2_counter_;
             update_rotation_epoch();
             ++received_jobs_;
+            record_activity("↻ new job  " + job_.job_id +
+                            (target_ready_ ? "  diff=" + ([&] {
+                                std::ostringstream value;
+                                value << std::defaultfloat << std::setprecision(8) << difficulty_;
+                                return value.str();
+                            })() : ""));
             if (production_latency_telemetry_enabled()) {
                 std::ostringstream latency;
                 latency << "[latency job] new_job=" << job_.job_id
@@ -1419,6 +1436,7 @@ bool Client::submit_share(std::intptr_t socket_value, const std::string& extrano
             const auto network_target = compact_target_le(job_.nbits);
             if (hash_meets_target(hash, network_target)) {
                 ++g_blocks_found;
+                record_activity("★ BLOCK FOUND  " + source + "  total=" + std::to_string(g_blocks_found));
                 std::cout << '\n' << timestamp() << kBlockColor << " ★★★ BLOCK FOUND ★★★ | source=" << source
                           << " | job=" << job_.job_id << " | nonce=" << nonce_hex(nonce) << " | nbits=" << job_.nbits
                           << " | total=" << g_blocks_found << ' ' << kColorReset << "\n\n";
@@ -1468,6 +1486,9 @@ void Client::report_stats(bool force)
         static GpuTelemetrySnapshot gpu_telemetry;
         static CpuTelemetry cpu_telemetry;
         static std::chrono::steady_clock::time_point telemetry_updated{};
+        static std::vector<double> total_history;
+        static std::vector<double> cpu_history;
+        static std::unordered_map<int, std::vector<double>> gpu_history;
 
         const double telemetry_age =
             telemetry_updated.time_since_epoch().count() == 0
@@ -1480,25 +1501,106 @@ void Client::report_stats(bool force)
             telemetry_updated = now;
         }
 
-        const auto meter = [total_hps](double hps) {
-            constexpr int width = 18;
-            double ratio = total_hps > 0.0 ? hps / total_hps : 0.0;
-            ratio = std::clamp(ratio, 0.0, 1.0);
-            const int filled = std::clamp(
-                static_cast<int>(ratio * static_cast<double>(width) + 0.5),
-                0,
-                width);
-            return std::string("[") +
-                   std::string(static_cast<std::size_t>(filled), '#') +
-                   std::string(static_cast<std::size_t>(width - filled), '.') +
-                   "]";
-        };
-
         const auto fit = [](std::string text, std::size_t width) {
             if (text.size() > width) text.resize(width);
             if (text.size() < width) text.append(width - text.size(), ' ');
             return text;
         };
+
+        const auto push_history = [](std::vector<double>& history, double value) {
+            constexpr std::size_t kHistory = 45U;
+            history.push_back(std::max(0.0, value));
+            if (history.size() > kHistory)
+                history.erase(history.begin(), history.begin() +
+                    static_cast<std::ptrdiff_t>(history.size() - kHistory));
+        };
+
+        const auto sparkline = [](const std::vector<double>& history, std::size_t width) {
+            static constexpr const char* kBlocks[] = {
+                "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
+            };
+
+            std::string graph;
+            const std::size_t count = std::min(width, history.size());
+            if (count < width)
+                graph.append(width - count, ' ');
+
+            if (count == 0U)
+                return graph;
+
+            const auto begin = history.end() - static_cast<std::ptrdiff_t>(count);
+            const double peak = std::max(1.0, *std::max_element(begin, history.end()));
+
+            for (auto it = begin; it != history.end(); ++it) {
+                const double ratio = std::clamp(*it / peak, 0.0, 1.0);
+                const std::size_t level = std::min<std::size_t>(
+                    7U, static_cast<std::size_t>(ratio * 7.0 + 0.5));
+                graph += kBlocks[level];
+            }
+            return graph;
+        };
+
+        const auto gauge = [](double value, double maximum, std::size_t width) {
+            double ratio = maximum > 0.0 ? value / maximum : 0.0;
+            ratio = std::clamp(ratio, 0.0, 1.0);
+            const std::size_t filled = std::min(
+                width, static_cast<std::size_t>(ratio * static_cast<double>(width) + 0.5));
+
+            std::string bar;
+            for (std::size_t i = 0; i < width; ++i)
+                bar += i < filled ? "█" : "░";
+            return bar;
+        };
+
+        struct GpuView {
+            int id{-1};
+            double hps{0.0};
+            std::size_t batch{0};
+            std::uint64_t accepted{0};
+            std::string temp{"n/a"};
+            std::string power{"n/a"};
+            std::string fan{"n/a"};
+        };
+
+        std::vector<GpuView> gpu_views;
+#ifdef YERBAS_HAS_CUDA
+        if (config_.gpu.enabled && !gpu_workers_.empty()) {
+            gpu_views.reserve(gpu_workers_.size());
+            for (auto& worker : gpu_workers_) {
+                const std::uint64_t gpu_window_hashes =
+                    worker.hashes_done >= worker.hashes_at_last_report
+                        ? worker.hashes_done - worker.hashes_at_last_report
+                        : 0;
+
+                const double gpu_hps =
+                    since_report > 0.0
+                        ? static_cast<double>(gpu_window_hashes) / since_report
+                        : 0.0;
+
+                GpuView view;
+                view.id = worker.device_id;
+                view.hps = gpu_pipeline_ready_ ? gpu_hps : 0.0;
+                view.batch = worker.engine->batch_size();
+
+                const std::string source = "GPU " + std::to_string(worker.device_id);
+                view.accepted = g_source_accepted[source];
+
+                const auto telemetry_it = gpu_telemetry.devices.find(worker.device_id);
+                if (telemetry_it != gpu_telemetry.devices.end()) {
+                    view.temp = yerbas::console::detail::format_temperature(telemetry_it->second);
+                    view.power = yerbas::console::detail::format_power(telemetry_it->second);
+                    view.fan = yerbas::console::detail::format_fan(telemetry_it->second);
+                }
+
+                gpu_views.push_back(std::move(view));
+            }
+        }
+#endif
+
+        push_history(total_history, total_hps);
+        push_history(cpu_history, cpu_hps);
+        for (const auto& gpu : gpu_views)
+            push_history(gpu_history[gpu.id], gpu.hps);
 
         std::ostringstream diff_text;
         diff_text << std::defaultfloat << std::setprecision(8) << difficulty_;
@@ -1509,9 +1611,8 @@ void Client::report_stats(bool force)
                       << std::dec << std::setfill(' ');
 
 #ifdef YERBAS_HAS_CUDA
-        const std::string cn_text = gpu_active_cn_mask_ != 0U
-            ? cn_mask_names(gpu_active_cn_mask_)
-            : "pending";
+        const std::string cn_text =
+            gpu_active_cn_mask_ != 0U ? cn_mask_names(gpu_active_cn_mask_) : "pending";
 #else
         const std::string cn_text = "CPU";
 #endif
@@ -1524,122 +1625,180 @@ void Client::report_stats(bool force)
             gpu_stale += worker.telemetry_hashes_stale;
         }
 #endif
-        const double gpu_waste_pct =
-            gpu_completed == 0
-                ? 0.0
-                : 100.0 * static_cast<double>(gpu_stale) /
-                      static_cast<double>(gpu_completed);
 
-        std::ostringstream frame;
-        frame << "\x1b[H\x1b[2J";
-        frame << "╔════════════════════════════════════════════════════════════════════════════════════════════════╗\n";
-        frame << "║  🌿 YERBAS MINER // PROOF OF GRASS                                      LIVE ●               ║\n";
-        frame << "╠════════════════════════════════════════════════════════════════════════════════════════════════╣\n";
+        const double gpu_waste_pct =
+            gpu_completed == 0U ? 0.0 :
+            100.0 * static_cast<double>(gpu_stale) /
+            static_cast<double>(gpu_completed);
 
         const std::string connection =
             authorized_ ? "ONLINE" : (subscribed_ ? "AUTHORIZING" : "CONNECTING");
 
-        frame << "║ POOL  "
+        const std::string green = "\x1b[1;92m";
+        const std::string cyan = "\x1b[1;96m";
+        const std::string yellow = "\x1b[1;93m";
+        const std::string magenta = "\x1b[1;95m";
+        const std::string red = "\x1b[1;91m";
+        const std::string dim = "\x1b[2m";
+        const std::string bold = "\x1b[1m";
+        const std::string reset = "\x1b[0m";
+
+        std::ostringstream frame;
+        frame << "\x1b[H";
+
+        frame << green
+              << "╭─[ YERBAS MINER ]────────────────────────────────────────────────────────────────────[ PROOF OF GRASS ]─╮"
+              << reset << '\n';
+
+        frame << "│ "
+              << bold << "POOL " << reset
               << fit(endpoint_.host + ":" + std::to_string(endpoint_.port), 28)
-              << " STATUS " << fit(connection, 12)
-              << " DIFF " << fit(diff_text.str(), 14)
-              << " UP " << fit(format_duration(uptime), 12)
-              << "║\n";
+              << " " << (authorized_ ? green : yellow) << fit(connection, 12) << reset
+              << "  "
+              << bold << "UP " << reset << fit(format_duration(uptime), 12)
+              << " "
+              << bold << "DEV FEE " << reset
+              << (dev_fee_session_active_ ? yellow + "ACTIVE" + reset : dim + "off" + reset)
+              << "                         │\n";
 
-        frame << "║ JOB   "
-              << fit(job_.valid ? job_.job_id : "-", 28)
-              << " ACCEPTED " << std::setw(7) << shares_accepted_
-              << "   REJECTED " << std::setw(5) << shares_rejected_
-              << "   BLOCKS " << std::setw(5) << g_blocks_found
-              << "                         ║\n";
+        frame << "│ "
+              << bold << "JOB  " << reset << fit(job_.valid ? job_.job_id : "-", 28)
+              << " "
+              << bold << "DIFF " << reset << fit(diff_text.str(), 14)
+              << " "
+              << bold << "ROT " << reset << fit(rotation_text.str(), 18)
+              << " "
+              << bold << "CN " << reset << fit(cn_text, 30)
+              << " │\n";
 
-        frame << "╠════════════════════════════════════ DEVICES ═══════════════════════════════════════════════════╣\n";
+        frame << green
+              << "├─ PERFORMANCE ─────────────────────────────────────────────────────────────────────────────────────┤"
+              << reset << '\n';
+
+        frame << "│ "
+              << green << bold << "TOTAL " << reset
+              << fit(format_rate(total_hps), 12)
+              << green << sparkline(total_history, 45) << reset
+              << "  AVG " << fit(format_rate(average_hps), 12)
+              << " ETA " << fit(format_duration(eta), 9)
+              << " │\n";
 
         if (config_.miner.cpu_enabled) {
-            frame << "║ CPU    "
-                  << fit(format_rate(cpu_hps), 12) << ' '
-                  << meter(cpu_hps)
-                  << "   ACC " << std::setw(7) << g_source_accepted["CPU"]
-                  << "   TEMP "
-                  << fit(yerbas::console::detail::format_temperature(cpu_telemetry), 8)
-                  << " PWR "
-                  << fit(yerbas::console::detail::format_power(cpu_telemetry), 9)
-                  << "           ║\n";
+            frame << "│ "
+                  << yellow << "CPU   " << reset
+                  << fit(format_rate(cpu_hps), 12)
+                  << yellow << sparkline(cpu_history, 45) << reset
+                  << "  TEMP " << fit(yerbas::console::detail::format_temperature(cpu_telemetry), 7)
+                  << " PWR " << fit(yerbas::console::detail::format_power(cpu_telemetry), 9)
+                  << " │\n";
         }
 
-#ifdef YERBAS_HAS_CUDA
-        if (config_.gpu.enabled && !gpu_workers_.empty()) {
-            for (auto& worker : gpu_workers_) {
-                const std::uint64_t gpu_window_hashes =
-                    worker.hashes_done >= worker.hashes_at_last_report
-                        ? worker.hashes_done - worker.hashes_at_last_report
-                        : 0;
-                const double gpu_hps =
-                    since_report > 0.0
-                        ? static_cast<double>(gpu_window_hashes) / since_report
-                        : 0.0;
+        for (const auto& gpu : gpu_views) {
+            const std::string label = "GPU " + std::to_string(gpu.id);
+            frame << "│ "
+                  << cyan << fit(label, 6) << reset
+                  << fit(format_rate(gpu.hps), 12)
+                  << cyan << sparkline(gpu_history[gpu.id], 45) << reset
+                  << "  " << fit(gpu.temp, 6)
+                  << " " << fit(gpu.power, 8)
+                  << " FAN " << fit(gpu.fan, 5)
+                  << " │\n";
+        }
 
-                std::ostringstream source_stream;
-                source_stream << "GPU " << worker.device_id;
-                const std::string source = source_stream.str();
+        frame << green
+              << "├─ DEVICES ────────────────────────────────────────────────┬─ SHARES ───────────────────────────────────┤"
+              << reset << '\n';
 
-                std::string temp = "n/a";
-                std::string power = "n/a";
-                std::string fan = "n/a";
-                const auto telemetry_it = gpu_telemetry.devices.find(worker.device_id);
-                if (telemetry_it != gpu_telemetry.devices.end()) {
-                    temp = yerbas::console::detail::format_temperature(telemetry_it->second);
-                    power = yerbas::console::detail::format_power(telemetry_it->second);
-                    fan = yerbas::console::detail::format_fan(telemetry_it->second);
-                }
+        const double device_peak = std::max(1.0, total_hps);
+        frame << "│ "
+              << yellow << "CPU   " << reset
+              << gauge(cpu_hps, device_peak, 14)
+              << " " << fit(format_rate(cpu_hps), 11)
+              << " ACC " << std::setw(7) << g_source_accepted["CPU"]
+              << "              │ "
+              << green << "ACCEPTED " << reset << std::setw(8) << shares_accepted_
+              << "   HEALTH " << std::fixed << std::setprecision(2)
+              << std::setw(6) << acceptance << "%          │\n";
 
-                frame << "║ "
-                      << fit(source, 7)
-                      << fit(gpu_pipeline_ready_ ? format_rate(gpu_hps) : "idle", 12)
-                      << ' ' << meter(gpu_hps)
-                      << "   B " << std::setw(6) << worker.engine->batch_size()
-                      << " ACC " << std::setw(7) << g_source_accepted[source]
-                      << ' ' << fit(temp, 7)
-                      << ' ' << fit(power, 8)
-                      << ' ' << fit(fan, 7)
-                      << " ║\n";
+        std::size_t share_lines = 1U;
+        for (const auto& gpu : gpu_views) {
+            const std::string label = "GPU " + std::to_string(gpu.id);
+            frame << "│ "
+                  << cyan << fit(label, 6) << reset
+                  << gauge(gpu.hps, device_peak, 14)
+                  << " " << fit(format_rate(gpu.hps), 11)
+                  << " B " << std::setw(6) << gpu.batch
+                  << " ACC " << std::setw(6) << gpu.accepted
+                  << " │ ";
+
+            if (share_lines == 1U) {
+                frame << red << "REJECTED " << reset << std::setw(8) << shares_rejected_
+                      << "   BLOCKS " << std::setw(6) << g_blocks_found
+                      << "             │\n";
+            } else if (share_lines == 2U) {
+                frame << "SUBMITTED " << std::setw(7) << shares_submitted_
+                      << "   GPU WASTE " << std::setw(6) << std::setprecision(2)
+                      << gpu_waste_pct << "%        │\n";
+            } else {
+                frame << "WORK/SHARE " << std::setw(8) << std::setprecision(0)
+                      << expected_hashes << "                   │\n";
             }
+            ++share_lines;
         }
-#endif
 
-        frame << "╠══════════════════════════════════ PERFORMANCE ═════════════════════════════════════════════════╣\n";
-        frame << "║ LIVE       " << fit(format_rate(total_hps), 14)
-              << " GROSS AVG   " << fit(format_rate(average_hps), 14)
-              << " HEALTH " << std::fixed << std::setprecision(2) << std::setw(6) << acceptance
-              << "%   GPU WASTE " << std::setw(6) << gpu_waste_pct << "%             ║\n";
+        while (share_lines <= 3U) {
+            frame << "│ "
+                  << dim << fit("idle device slot", 53) << reset
+                  << " │ ";
+            if (share_lines == 1U) {
+                frame << red << "REJECTED " << reset << std::setw(8) << shares_rejected_
+                      << "   BLOCKS " << std::setw(6) << g_blocks_found
+                      << "             │\n";
+            } else if (share_lines == 2U) {
+                frame << "SUBMITTED " << std::setw(7) << shares_submitted_
+                      << "   GPU WASTE " << std::setw(6) << std::setprecision(2)
+                      << gpu_waste_pct << "%        │\n";
+            } else {
+                frame << "WORK/SHARE " << std::setw(8) << std::setprecision(0)
+                      << expected_hashes << "                   │\n";
+            }
+            ++share_lines;
+        }
 
-        frame << "║ SUBMITTED  " << std::setw(8) << shares_submitted_
-              << "     ACCEPTED " << std::setw(8) << shares_accepted_
-              << "     REJECTED " << std::setw(6) << shares_rejected_
-              << "     ETA " << fit(format_duration(eta), 12)
-              << "                         ║\n";
+        frame << green
+              << "├─ ACTIVITY ────────────────────────────────────────────────────────────────────────────────────────┤"
+              << reset << '\n';
 
-        frame << "╠════════════════════════════════ CURRENT WORK ═══════════════════════════════════════════════════╣\n";
-        frame << "║ ROTATION   " << fit(rotation_text.str(), 20)
-              << " CN " << fit(cn_text, 48)
-              << " DEV FEE " << (dev_fee_session_active_ ? "ACTIVE" : "off   ")
-              << " ║\n";
-
-        frame << "║ WORK/SHARE " << std::fixed << std::setprecision(0) << std::setw(10) << expected_hashes
-              << "     NEXT SHARE ETA " << fit(format_duration(eta), 12);
-
-        if (pending_target_ready_ && pending_difficulty_ready_) {
-            std::ostringstream pending;
-            pending << std::defaultfloat << std::setprecision(8) << pending_difficulty_;
-            frame << " PENDING DIFF " << fit(pending.str(), 14);
+        if (g_recent_activity.empty()) {
+            frame << "│ " << dim
+                  << fit("waiting for mining activity...", 104)
+                  << reset << " │\n";
+            for (int i = 0; i < 4; ++i)
+                frame << "│ " << fit("", 104) << " │\n";
         } else {
-            frame << "                              ";
-        }
-        frame << " ║\n";
+            std::size_t shown = 0U;
+            for (const auto& event : g_recent_activity) {
+                std::string color = reset;
+                if (event.find("BLOCK FOUND") != std::string::npos) color = yellow;
+                else if (event.find("rejected") != std::string::npos) color = red;
+                else if (event.find("accepted") != std::string::npos) color = green;
+                else if (event.find("new job") != std::string::npos) color = magenta;
 
-        frame << "╠════════════════════════════════════════════════════════════════════════════════════════════════╣\n";
-        frame << "║ Ctrl+C stop   •   detailed events stay in session log   •   --console plain = scrolling view  ║\n";
-        frame << "╚════════════════════════════════════════════════════════════════════════════════════════════════╝";
+                frame << "│ " << color << fit(event, 104) << reset << " │\n";
+                if (++shown == 5U) break;
+            }
+            while (shown++ < 5U)
+                frame << "│ " << fit("", 104) << " │\n";
+        }
+
+        frame << green
+              << "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯"
+              << reset << '\n';
+
+        frame << dim
+              << "  Ctrl+C stop   •   --console plain scrolling view   •   detailed diagnostics remain in session log"
+              << reset
+              << "\x1b[J";
 
         yerbas::console::terminal_write(frame.str());
 
