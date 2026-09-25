@@ -12,6 +12,8 @@
 #include <sstream>
 #include <streambuf>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -42,6 +44,12 @@ inline bool& dashboard_active_flag()
 }
 
 inline std::mutex& terminal_write_mutex()
+{
+    static std::mutex value;
+    return value;
+}
+
+inline std::mutex& session_stream_mutex()
 {
     static std::mutex value;
     return value;
@@ -170,31 +178,27 @@ protected:
             return traits_type::not_eof(ch);
 
         const char c = traits_type::to_char_type(ch);
-
-        bool terminal_ok = true;
-        if (!muteable_terminal_ || terminal_stdout_enabled()) {
-            const auto a = terminal_->sputc(c);
-            terminal_ok = !traits_type::eq_int_type(a, traits_type::eof());
-        }
-
-        const auto b = file_->sputc(c);
-        const bool file_ok = !traits_type::eq_int_type(b, traits_type::eof());
-
-        return (terminal_ok && file_ok) ? ch : traits_type::eof();
+        write_buffered(&c, 1);
+        return ch;
     }
 
     std::streamsize xsputn(const char* data, std::streamsize size) override
     {
-        std::streamsize terminal_written = size;
-        if (!muteable_terminal_ || terminal_stdout_enabled())
-            terminal_written = terminal_->sputn(data, size);
-
-        const auto file_written = file_->sputn(data, size);
-        return terminal_written < file_written ? terminal_written : file_written;
+        if (size <= 0) return 0;
+        write_buffered(data, static_cast<std::size_t>(size));
+        return size;
     }
 
     int sync() override
     {
+        auto& pending = thread_buffer();
+        if (!pending.empty()) {
+            emit_chunk(pending);
+            pending.clear();
+        }
+
+        std::lock_guard<std::mutex> lock(session_stream_mutex());
+
         int terminal_result = 0;
         if (!muteable_terminal_ || terminal_stdout_enabled())
             terminal_result = terminal_->pubsync();
@@ -204,10 +208,47 @@ protected:
     }
 
 private:
+    static thread_local std::unordered_map<const DirectMirrorBuf*, std::string> thread_buffers_;
+
+    std::string& thread_buffer()
+    {
+        return thread_buffers_[this];
+    }
+
+    void write_buffered(const char* data, std::size_t size)
+    {
+        auto& pending = thread_buffer();
+        pending.append(data, size);
+
+        std::size_t newline = std::string::npos;
+        while ((newline = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, newline + 1U);
+            pending.erase(0, newline + 1U);
+            emit_chunk(line);
+        }
+    }
+
+    void emit_chunk(const std::string& chunk)
+    {
+        std::lock_guard<std::mutex> lock(session_stream_mutex());
+
+        if (!muteable_terminal_ || terminal_stdout_enabled())
+            terminal_->sputn(
+                chunk.data(),
+                static_cast<std::streamsize>(chunk.size()));
+
+        file_->sputn(
+            chunk.data(),
+            static_cast<std::streamsize>(chunk.size()));
+    }
+
     std::streambuf* terminal_;
     std::streambuf* file_;
     bool muteable_terminal_{false};
 };
+
+thread_local std::unordered_map<const DirectMirrorBuf*, std::string>
+    DirectMirrorBuf::thread_buffers_;
 
 class SessionFileLog final {
 public:
