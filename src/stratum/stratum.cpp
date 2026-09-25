@@ -1718,7 +1718,7 @@ void Client::report_stats(bool force)
                             0.5));
 
                 const bool last =
-                    std::next(it) == history.end();
+                    column + 1U == count;
 
                 for (std::size_t r = 0U; r < height; ++r) {
                     if (r != row) {
@@ -2037,7 +2037,7 @@ void Client::report_stats(bool force)
             frame << line(work.str());
         }
 
-        frame << section("HASHRATE TREND · 3 MIN");
+        frame << section("HASHRATE TREND / 3 MIN");
 
         const std::size_t graph_label_width = 18U;
         const std::size_t graph_width =
