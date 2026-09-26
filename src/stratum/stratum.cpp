@@ -2378,7 +2378,7 @@ void Client::report_stats(bool force)
                 std::ostringstream graph_top;
                 graph_top
                     << std::string(7U, ' ')
-                    << dim << "│ 180s " << reset
+                    << dim << "│ 10m  " << reset
                     << color
                     << graph[0]
                     << reset;
@@ -2401,15 +2401,22 @@ void Client::report_stats(bool force)
                 green,
                 total_history,
                 total_hps,
-                180U,
+                600U,
                 average_hps);
+
+            hashrate_rows.push_back(
+                dim + std::string(
+                    total_graph_width > 8U
+                        ? total_graph_width - 8U
+                        : 24U,
+                    '-') + reset);
 
             append_source_trend(
                 "CPU",
                 yellow,
                 cpu_history,
                 cpu_hps,
-                180U);
+                600U);
 
             for (std::size_t i = 0U;
                  i < gpu_views.size();
@@ -2420,7 +2427,7 @@ void Client::report_stats(bool force)
                     i == 0U ? cyan : magenta,
                     gpu_history[gpu.id],
                     gpu.hps,
-                    180U);
+                    600U);
             }
 
             const auto make_panel = [&](const std::string& title,
@@ -2462,7 +2469,7 @@ void Client::report_stats(bool force)
             };
 
             auto hashrate_box =
-                make_panel("HASHRATE / 3 MIN",
+                make_panel("HASHRATE / 10 MIN",
                            hashrate_rows,
                            hashrate_panel_width);
 
