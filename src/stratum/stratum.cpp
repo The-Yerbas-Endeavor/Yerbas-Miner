@@ -384,6 +384,34 @@ bool production_latency_telemetry_enabled()
     return enabled;
 }
 
+double gpu_latency_target_ms()
+{
+    static const double target = []() {
+        const char* value = std::getenv("YERBAS_GPU_LATENCY_TARGET_MS");
+        if (value == nullptr || *value == '\0') return 0.0;
+        char* end = nullptr;
+        const double parsed = std::strtod(value, &end);
+        if (end == value || *end != '\0' || !(parsed >= 1000.0 && parsed <= 10000.0))
+            return 0.0;
+        return parsed;
+    }();
+    return target;
+}
+
+std::size_t gpu_latency_min_batch()
+{
+    static const std::size_t minimum = []() {
+        const char* value = std::getenv("YERBAS_GPU_LATENCY_MIN_BATCH");
+        if (value == nullptr || *value == '\0') return static_cast<std::size_t>(3584U);
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0' || parsed < 1024ULL)
+            return static_cast<std::size_t>(3584U);
+        return static_cast<std::size_t>(parsed);
+    }();
+    return minimum;
+}
+
 std::string cn_mask_names(std::uint32_t mask)
 {
     std::ostringstream ss;
@@ -506,6 +534,11 @@ int Client::run(std::atomic_bool& stop_requested)
     std::cout << "Developer fee: minute 3-4 of every hour | pool.yerbas.org:3333 | worker=" << kDevFeeWorker << '\n';
     if (production_latency_telemetry_enabled())
         std::cout << "[latency] production telemetry enabled | scheduling unchanged | per-batch accounting active\n";
+    if (gpu_latency_target_ms() > 0.0)
+        std::cout << "[latency-target] GPU adaptive batching enabled | target_ms="
+                  << std::fixed << std::setprecision(0) << gpu_latency_target_ms()
+                  << " | min_batch=" << gpu_latency_min_batch()
+                  << " | mode=reduce-only-per-rotation\n";
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
         try { if (run_session(stop_requested)) break; }
@@ -1097,6 +1130,72 @@ void Client::record_gpu_scan_telemetry(GpuWorker& worker,
     std::cout << line.str() << '\n';
 }
 
+void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
+                                         const GpuScanResult& result,
+                                         bool stale)
+{
+    const double target_ms = gpu_latency_target_ms();
+    if (target_ms <= 0.0 || stale || result.scan_ms <= 0.0)
+        return;
+
+    constexpr double kEwmaNewWeight = 0.35;
+    worker.latency_scan_ms_ewma =
+        worker.latency_samples == 0U
+            ? result.scan_ms
+            : worker.latency_scan_ms_ewma * (1.0 - kEwmaNewWeight) +
+                  result.scan_ms * kEwmaNewWeight;
+    ++worker.latency_samples;
+
+    if (worker.latency_samples < 2U)
+        return;
+
+    const std::size_t current = worker.engine->batch_size();
+    const std::size_t base =
+        worker.latency_base_batch != 0U
+            ? worker.latency_base_batch
+            : current;
+    const std::size_t configured_floor =
+        gpu_latency_min_batch();
+    const std::size_t floor =
+        std::min(base, configured_floor);
+
+    // Keep a deadband around the target so ordinary timing noise does not
+    // thrash the active batch. This first experiment is reduce-only: the
+    // rotation-selected tuned batch remains the ceiling.
+    if (worker.latency_scan_ms_ewma <= target_ms * 1.12)
+        return;
+
+    const double raw_ratio =
+        target_ms / worker.latency_scan_ms_ewma;
+    const double ratio =
+        std::clamp(raw_ratio, 0.65, 0.90);
+
+    std::size_t desired =
+        static_cast<std::size_t>(
+            static_cast<double>(current) * ratio);
+
+    constexpr std::size_t kBatchQuantum = 256U;
+    desired =
+        (desired / kBatchQuantum) * kBatchQuantum;
+    desired =
+        std::clamp(desired, floor, base);
+
+    if (desired >= current || current - desired < kBatchQuantum)
+        return;
+
+    worker.engine->set_active_batch_size(desired);
+
+    std::cout << "[latency-target] GPU " << worker.device_id
+              << " CN=" << cn_mask_names(result.cn_mask)
+              << " scan_ewma_ms=" << std::fixed << std::setprecision(1)
+              << worker.latency_scan_ms_ewma
+              << " target_ms=" << target_ms
+              << " batch=" << current << " -> " << desired
+              << " base=" << base
+              << " floor=" << floor
+              << "\n";
+}
+
 void Client::drain_gpu_scans() noexcept
 {
     for (auto& worker : gpu_workers_) {
@@ -1249,6 +1348,9 @@ void Client::upload_gpu_job()
                 i == crossover_slot ? crossover_cap : 0U,
                 i == crossover_slot ? crossover_min_tuned : 0U);
         worker.engine->upload_job(descriptor);
+        worker.latency_base_batch = worker.engine->batch_size();
+        worker.latency_scan_ms_ewma = 0.0;
+        worker.latency_samples = 0U;
         const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
         worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start;
     }
@@ -1320,6 +1422,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                 MiningJob::generation() != work_generation ||
                 job_.job_id != work_job_id;
             record_gpu_scan_telemetry(*task.worker, scan_result, result_stale);
+            adapt_gpu_batch_after_scan(*task.worker, scan_result, result_stale);
 
             if (result_stale) {
                 stale = true;
@@ -1423,6 +1526,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
                 MiningJob::generation() != work_generation ||
                 job_.job_id != work_job_id;
             record_gpu_scan_telemetry(*task.worker, scan_result, result_stale);
+            adapt_gpu_batch_after_scan(*task.worker, scan_result, result_stale);
 
             if (result_stale) {
                 stale = true;
