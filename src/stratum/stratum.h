@@ -306,6 +306,13 @@ private:
         double telemetry_scan_ms{0.0};
         double telemetry_useful_scan_ms{0.0};
         double telemetry_stale_scan_ms{0.0};
+
+        // Optional live latency-targeted production experiment. The base batch
+        // is the rotation-selected tuned batch; adaptive changes may only
+        // reduce toward the configured latency target and never exceed it.
+        std::size_t latency_base_batch{0};
+        double latency_scan_ms_ewma{0.0};
+        std::uint64_t latency_samples{0};
     };
 
     void start_gpu_worker(GpuWorker& worker);
@@ -316,6 +323,9 @@ private:
     void record_gpu_scan_telemetry(GpuWorker& worker,
                                    const GpuScanResult& result,
                                    bool stale);
+    void adapt_gpu_batch_after_scan(GpuWorker& worker,
+                                    const GpuScanResult& result,
+                                    bool stale);
     void drain_gpu_scans() noexcept;
 
     std::vector<GpuWorker> gpu_workers_;
