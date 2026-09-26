@@ -21,6 +21,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1929,13 +1930,25 @@ void Client::report_stats(bool force)
         const auto [history_low, history_high] =
             history_range(total_history, total_graph_width);
 
+        double history_average = 0.0;
+        if (!total_history.empty()) {
+            const std::size_t average_count =
+                std::min<std::size_t>(180U, total_history.size());
+            const auto average_begin =
+                total_history.end() -
+                static_cast<std::ptrdiff_t>(average_count);
+            history_average =
+                std::accumulate(average_begin, total_history.end(), 0.0) /
+                static_cast<double>(average_count);
+        }
+
         {
             std::ostringstream stats;
             stats
                 << green << bold << "NOW " << reset
                 << fit(format_rate(total_hps), 11)
                 << "  AVG "
-                << fit(format_rate(average_hps), 11)
+                << fit(format_rate(history_average), 11)
                 << "  LOW "
                 << fit(format_rate(history_low), 11)
                 << "  HIGH "
