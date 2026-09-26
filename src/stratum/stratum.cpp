@@ -2040,26 +2040,32 @@ void Client::report_stats(bool force)
                     static_cast<std::size_t>(
                         animation_step % 2ULL);
 
+                const std::string lime = "\x1b[38;2;153;255;51m";
+                const std::string gold = "\x1b[38;2;255;224;64m";
+                const std::string aqua = "\x1b[38;2;32;224;255m";
+                const std::string grass = "\x1b[38;2;80;255;80m";
+                const std::string faint = "\x1b[38;2;95;120;105m";
+
                 std::vector<std::string> mascot_rows;
                 if (frame_index == 0U) {
                     mascot_rows = {
-                        yellow + "          ╭────╮        ╱╲     " + reset,
-                        yellow + "       ╭──│ ●  │──╮    ╱  ╲    " + reset,
-                        green  + "      ╱   ╰─┬──╯  ╲───╯    ╲   " + reset,
-                        green  + "     ╱╲    ╱│╲              ╲  " + reset,
-                        cyan   + "    ╱  ╲  ╱ │ ╲        ◇────◇  " + reset,
-                        cyan   + "       ╲╱  ╱ ╲       ╱│    ╱│  " + reset,
-                        dim    + "        · ·          ◇────◇ │  " + reset
+                        gold  + "       ▄▄▄▄▄             " + reset,
+                        gold  + "      █▀" + lime + "●" + gold + "▀██      " + lime + "▄      " + reset,
+                        lime  + "     ▄██▄██▄    ▄" + gold + "╱" + lime + "▀      " + reset,
+                        grass + "      ▀███▀  ▄██▀        " + reset,
+                        aqua  + "      ▄▀ ▀▄       " + lime + "◆◆      " + reset,
+                        aqua  + "     ▀   ▀      " + lime + "◆" + aqua + "╲╱" + lime + "◆     " + reset,
+                        faint + "              ·  " + aqua + "◆◆" + faint + "  ·   " + reset
                     };
                 } else {
                     mascot_rows = {
-                        yellow + "          ╭────╮               " + reset,
-                        yellow + "       ╭──│ ●  │──╮            " + reset,
-                        green  + "      ╱   ╰─┬──╯  ╲      ╱╲    " + reset,
-                        green  + "     ╱╲    ╱│╲─────╲────╯  ╲   " + reset,
-                        cyan   + "    ╱  ╲  ╱ │ ╲      ✦ ◇────◇  " + reset,
-                        cyan   + "       ╲╱  ╱ ╲      · ╱│    ╱│  " + reset,
-                        dim    + "        ·  ✦ ·       ◇────◇ │  " + reset
+                        gold  + "       ▄▄▄▄▄             " + reset,
+                        gold  + "      █▀" + lime + "●" + gold + "▀██             " + reset,
+                        lime  + "     ▄██▄██▄        " + gold + "╲▄" + reset,
+                        grass + "      ▀███▀  ▄▄▄▄▄" + gold + "╲" + reset,
+                        aqua  + "      ▄▀ ▀▄      " + gold + "✦" + lime + "◆◆    " + reset,
+                        aqua  + "     ▀   ▀     " + gold + "✦ " + lime + "◆" + aqua + "╲╱" + lime + "◆   " + reset,
+                        faint + "            ·  · " + aqua + "◆◆" + faint + "  ·  " + reset
                     };
                 }
 
