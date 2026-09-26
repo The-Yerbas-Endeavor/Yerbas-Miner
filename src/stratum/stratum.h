@@ -313,6 +313,9 @@ private:
         std::size_t latency_base_batch{0};
         double latency_scan_ms_ewma{0.0};
         std::uint64_t latency_samples{0};
+
+        // Latest completed device scan duration for live dashboard telemetry.
+        double last_scan_ms{0.0};
     };
 
     void start_gpu_worker(GpuWorker& worker);
