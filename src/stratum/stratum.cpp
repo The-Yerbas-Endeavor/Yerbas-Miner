@@ -1719,7 +1719,7 @@ void Client::report_stats(bool force)
         };
 
         const auto push_history = [](std::vector<double>& history, double value) {
-            constexpr std::size_t kHistory = 180U;
+            constexpr std::size_t kHistory = 3600U;
             constexpr double kNewSampleWeight = 0.35;
 
             const double raw = std::max(0.0, value);
@@ -2418,7 +2418,7 @@ void Client::report_stats(bool force)
                 std::ostringstream header;
                 header
                     << color << bold
-                    << fit(label, 7)
+                    << fit(label, 6)
                     << reset
                     << " NOW "
                     << fit(format_rate(now_value), 10)
@@ -2738,22 +2738,22 @@ void Client::report_stats(bool force)
             std::ostringstream header;
             header
                 << dim
-                << fit("WORKER", 7)
-                << fit("NOW", 11)
-                << fit("AVG", 11)
-                << fit("TEMP", 7)
-                << fit("POWER", 9)
-                << fit("FAN", 6)
-                << fit("BATCH", 8)
-                << fit("ACCEPT", 7)
-                << "60s TREND"
+                << fit("WORKER", 6)
+                << fit("NOW", 10)
+                << fit("AVG 1H", 10)
+                << fit("TEMP", 6)
+                << fit("POWER", 8)
+                << fit("FAN", 5)
+                << fit("BATCH", 7)
+                << fit("ACPT", 6)
+                << "1h TREND"
                 << reset;
             frame << line(header.str());
         }
 
         {
             const auto total_stats =
-                history_stats(total_history, 60U);
+                history_stats(total_history, 3600U);
 
             double total_power_w = 0.0;
             bool total_power_available = false;
@@ -2815,17 +2815,17 @@ void Client::report_stats(bool force)
             std::ostringstream row;
             row
                 << green << bold
-                << fit("TOTAL", 7)
+                << fit("TOTAL", 6)
                 << reset
-                << fit(format_rate(total_hps), 11)
-                << fit(format_rate(total_stats.avg), 11)
-                << fit(temp_text.str(), 7)
-                << fit(power_text.str(), 9)
-                << fit("-", 6)
-                << fit("-", 8)
+                << fit(format_rate(total_hps), 10)
+                << fit(format_rate(total_stats.avg), 10)
+                << fit(temp_text.str(), 6)
+                << fit(power_text.str(), 8)
+                << fit("-", 5)
+                << fit("-", 7)
                 << fit(
                        std::to_string(shares_accepted_),
-                       7);
+                       6);
 
             const std::size_t used =
                 display_width(row.str());
@@ -2837,7 +2837,7 @@ void Client::report_stats(bool force)
                 sparkline_graph(
                     total_history,
                     graph_width,
-                    60U);
+                    3600U);
 
             row
                 << dim << "│ " << reset
@@ -2851,15 +2851,15 @@ void Client::report_stats(bool force)
 
         if (config_.miner.cpu_enabled) {
             const auto stats =
-                history_stats(cpu_history, 60U);
+                history_stats(cpu_history, 3600U);
 
             std::ostringstream row;
             row
                 << yellow << bold
-                << fit("CPU", 7)
+                << fit("CPU", 6)
                 << reset
-                << fit(format_rate(cpu_hps), 11)
-                << fit(format_rate(stats.avg), 11)
+                << fit(format_rate(cpu_hps), 10)
+                << fit(format_rate(stats.avg), 10)
                 << fit(
                        yerbas::console::detail::
                            format_temperature(cpu_telemetry),
@@ -2868,8 +2868,8 @@ void Client::report_stats(bool force)
                        yerbas::console::detail::
                            format_power(cpu_telemetry),
                        9)
-                << fit("-", 6)
-                << fit("-", 8)
+                << fit("-", 5)
+                << fit("-", 7)
                 << fit(
                        std::to_string(
                            g_source_accepted["CPU"]),
@@ -2885,7 +2885,7 @@ void Client::report_stats(bool force)
                 sparkline_graph(
                     cpu_history,
                     graph_width,
-                    60U);
+                    3600U);
 
             row
                 << dim << "│ " << reset
@@ -2902,7 +2902,7 @@ void Client::report_stats(bool force)
              ++gpu_index) {
             const auto& gpu = gpu_views[gpu_index];
             const auto stats =
-                history_stats(gpu_history[gpu.id], 60U);
+                history_stats(gpu_history[gpu.id], 3600U);
             const std::string worker_color =
                 gpu_index == 0U ? cyan : magenta;
             const std::string label =
@@ -2911,15 +2911,15 @@ void Client::report_stats(bool force)
             std::ostringstream row;
             row
                 << worker_color << bold
-                << fit(label, 7)
+                << fit(label, 6)
                 << reset
-                << fit(format_rate(gpu.hps), 11)
-                << fit(format_rate(stats.avg), 11)
-                << fit(gpu.temp, 7)
-                << fit(gpu.power, 9)
-                << fit(gpu.fan, 6)
-                << fit(std::to_string(gpu.batch), 8)
-                << fit(std::to_string(gpu.accepted), 7);
+                << fit(format_rate(gpu.hps), 10)
+                << fit(format_rate(stats.avg), 10)
+                << fit(gpu.temp, 6)
+                << fit(gpu.power, 8)
+                << fit(gpu.fan, 5)
+                << fit(std::to_string(gpu.batch), 7)
+                << fit(std::to_string(gpu.accepted), 6);
 
             const std::size_t used =
                 display_width(row.str());
@@ -2931,7 +2931,7 @@ void Client::report_stats(bool force)
                 sparkline_graph(
                     gpu_history[gpu.id],
                     graph_width,
-                    60U);
+                    3600U);
 
             row
                 << dim << "│ " << reset
