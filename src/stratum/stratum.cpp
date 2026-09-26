@@ -2174,7 +2174,7 @@ void Client::report_stats(bool force)
             }
         }
 
-        frame << section("WORKERS");
+        frame << section("WORKERS / INDIVIDUAL 60s TRENDS");
 
         if (config_.miner.cpu_enabled) {
             std::ostringstream prefix;
@@ -2202,10 +2202,10 @@ void Client::report_stats(bool force)
                 display_width(prefix.str());
             const std::size_t graph_width =
                 std::min<std::size_t>(
-                    60U,
+                    88U,
                     inner_width > prefix_width + 8U
                         ? inner_width - prefix_width - 8U
-                        : 8U);
+                        : 16U);
 
             std::ostringstream cpu;
             cpu
@@ -2251,10 +2251,10 @@ void Client::report_stats(bool force)
                 display_width(prefix.str());
             const std::size_t graph_width =
                 std::min<std::size_t>(
-                    60U,
+                    88U,
                     inner_width > prefix_width + 8U
                         ? inner_width - prefix_width - 8U
-                        : 8U);
+                        : 16U);
 
             std::ostringstream gpu_line;
             gpu_line
