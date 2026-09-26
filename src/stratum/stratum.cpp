@@ -1911,82 +1911,7 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto sparkline_graph = [&history_stats](
-            const std::vector<double>& history,
-            std::size_t width,
-            std::size_t sample_limit) {
-            static constexpr const char* levels[] = {
-                "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
-            };
-
-            if (width == 0U)
-                return std::string{};
-
-            const std::size_t count =
-                std::min(sample_limit, history.size());
-            if (count == 0U)
-                return std::string(width, ' ');
-
-            const auto begin =
-                history.end() -
-                static_cast<std::ptrdiff_t>(count);
-            const auto stats =
-                history_stats(history, sample_limit);
-
-            const double spread =
-                std::max(1.0, stats.high - stats.low);
-            const double pad =
-                std::max(1.0, spread * 0.10);
-            const double low =
-                std::max(0.0, stats.low - pad);
-            const double high =
-                stats.high + pad;
-            const double span =
-                std::max(1.0, high - low);
-
-            std::string graph;
-            graph.reserve(width * 3U);
-
-            for (std::size_t x = 0U; x < width; ++x) {
-                const double pos =
-                    width <= 1U
-                        ? 0.0
-                        : static_cast<double>(x) *
-                              static_cast<double>(count - 1U) /
-                              static_cast<double>(width - 1U);
-
-                const std::size_t i0 =
-                    static_cast<std::size_t>(pos);
-                const std::size_t i1 =
-                    std::min(i0 + 1U, count - 1U);
-                const double frac =
-                    pos - static_cast<double>(i0);
-
-                const double value =
-                    (*(begin + static_cast<std::ptrdiff_t>(i0))) *
-                        (1.0 - frac) +
-                    (*(begin + static_cast<std::ptrdiff_t>(i1))) *
-                        frac;
-
-                const double ratio =
-                    std::clamp(
-                        (value - low) / span,
-                        0.0,
-                        1.0);
-
-                const std::size_t level =
-                    std::min<std::size_t>(
-                        7U,
-                        static_cast<std::size_t>(
-                            ratio * 7.0 + 0.5));
-
-                graph += levels[level];
-            }
-
-            return graph;
-        };
-
-        const auto area_graph = [&history_stats](
+        const auto compact_graph = [&history_stats](
             const std::vector<double>& history,
             std::size_t width,
             std::size_t sample_limit) {
@@ -2011,10 +1936,11 @@ void Client::report_stats(bool force)
                 static_cast<std::ptrdiff_t>(count);
             const auto stats =
                 history_stats(history, sample_limit);
+
             const double spread =
                 std::max(1.0, stats.high - stats.low);
             const double pad =
-                std::max(1.0, spread * 0.12);
+                std::max(1.0, spread * 0.08);
             const double low =
                 std::max(0.0, stats.low - pad);
             const double high =
@@ -2048,16 +1974,16 @@ void Client::report_stats(bool force)
                         0.0,
                         1.0);
 
-                const int total_level =
+                const int level =
                     std::clamp(
                         static_cast<int>(ratio * 16.0 + 0.5),
                         0,
                         16);
 
                 const int lower =
-                    std::min(total_level, 8);
+                    std::min(level, 8);
                 const int upper =
-                    std::max(0, total_level - 8);
+                    std::max(0, level - 8);
 
                 rows[0] += levels[upper];
                 rows[1] += levels[lower];
@@ -2420,8 +2346,8 @@ void Client::report_stats(bool force)
                     total_graph_width > 36U
                         ? total_graph_width - 36U
                         : 28U;
-                const std::string graph =
-                    sparkline_graph(
+                const auto graph =
+                    compact_graph(
                         history,
                         graph_width,
                         sample_limit);
@@ -2449,16 +2375,25 @@ void Client::report_stats(bool force)
                     << fit(format_rate(stats.high), 10);
                 hashrate_rows.push_back(header.str());
 
-                std::ostringstream graph_row;
-                graph_row
+                std::ostringstream graph_top;
+                graph_top
                     << std::string(7U, ' ')
-                    << dim << "└ 180s " << reset
+                    << dim << "│ 180s " << reset
                     << color
-                    << graph
+                    << graph[0]
+                    << reset;
+                hashrate_rows.push_back(graph_top.str());
+
+                std::ostringstream graph_bottom;
+                graph_bottom
+                    << std::string(7U, ' ')
+                    << dim << "└───── " << reset
+                    << color
+                    << graph[1]
                     << reset
                     << ' '
                     << color << "●" << reset;
-                hashrate_rows.push_back(graph_row.str());
+                hashrate_rows.push_back(graph_bottom.str());
             };
 
             append_source_trend(
@@ -2804,8 +2739,8 @@ void Client::report_stats(bool force)
                 inner_width > used + 8U
                     ? inner_width - used - 8U
                     : 24U;
-            const std::string graph =
-                sparkline_graph(
+            const auto graph =
+                compact_graph(
                     total_history,
                     graph_width,
                     3600U);
@@ -2813,7 +2748,7 @@ void Client::report_stats(bool force)
             row
                 << dim << "│ " << reset
                 << green
-                << graph
+                << graph[1]
                 << reset
                 << " "
                 << green << "●" << reset;
@@ -2852,8 +2787,8 @@ void Client::report_stats(bool force)
                 inner_width > used + 8U
                     ? inner_width - used - 8U
                     : 24U;
-            const std::string graph =
-                sparkline_graph(
+            const auto graph =
+                compact_graph(
                     cpu_history,
                     graph_width,
                     3600U);
@@ -2861,7 +2796,7 @@ void Client::report_stats(bool force)
             row
                 << dim << "│ " << reset
                 << yellow
-                << graph
+                << graph[1]
                 << reset
                 << " "
                 << yellow << "●" << reset;
@@ -2898,8 +2833,8 @@ void Client::report_stats(bool force)
                 inner_width > used + 8U
                     ? inner_width - used - 8U
                     : 24U;
-            const std::string graph =
-                sparkline_graph(
+            const auto graph =
+                compact_graph(
                     gpu_history[gpu.id],
                     graph_width,
                     3600U);
@@ -2907,7 +2842,7 @@ void Client::report_stats(bool force)
             row
                 << dim << "│ " << reset
                 << worker_color
-                << graph
+                << graph[1]
                 << reset
                 << " "
                 << worker_color << "●" << reset;
