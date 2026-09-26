@@ -1796,6 +1796,86 @@ void Client::report_stats(bool force)
             return graph;
         };
 
+        const auto area_graph = [&history_stats](
+            const std::vector<double>& history,
+            std::size_t width,
+            std::size_t sample_limit) {
+            static constexpr const char* levels[] = {
+                " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
+            };
+
+            std::array<std::string, 2> rows{{"", ""}};
+            if (width == 0U)
+                return rows;
+
+            const std::size_t count =
+                std::min(sample_limit, history.size());
+            if (count == 0U) {
+                rows[0].assign(width, ' ');
+                rows[1].assign(width, ' ');
+                return rows;
+            }
+
+            const auto begin =
+                history.end() -
+                static_cast<std::ptrdiff_t>(count);
+            const auto stats =
+                history_stats(history, sample_limit);
+            const double spread =
+                std::max(1.0, stats.high - stats.low);
+            const double pad =
+                std::max(1.0, spread * 0.12);
+            const double low =
+                std::max(0.0, stats.low - pad);
+            const double high =
+                stats.high + pad;
+            const double span =
+                std::max(1.0, high - low);
+
+            for (std::size_t x = 0U; x < width; ++x) {
+                const double pos =
+                    width <= 1U
+                        ? 0.0
+                        : static_cast<double>(x) *
+                              static_cast<double>(count - 1U) /
+                              static_cast<double>(width - 1U);
+
+                const std::size_t i0 =
+                    static_cast<std::size_t>(pos);
+                const std::size_t i1 =
+                    std::min(i0 + 1U, count - 1U);
+                const double frac =
+                    pos - static_cast<double>(i0);
+                const double value =
+                    (*(begin + static_cast<std::ptrdiff_t>(i0))) *
+                        (1.0 - frac) +
+                    (*(begin + static_cast<std::ptrdiff_t>(i1))) *
+                        frac;
+
+                const double ratio =
+                    std::clamp(
+                        (value - low) / span,
+                        0.0,
+                        1.0);
+
+                const int total_level =
+                    std::clamp(
+                        static_cast<int>(ratio * 16.0 + 0.5),
+                        0,
+                        16);
+
+                const int lower =
+                    std::min(total_level, 8);
+                const int upper =
+                    std::max(0, total_level - 8);
+
+                rows[0] += levels[upper];
+                rows[1] += levels[lower];
+            }
+
+            return rows;
+        };
+
         struct GpuView {
             int id{-1};
             double hps{0.0};
@@ -2145,9 +2225,15 @@ void Client::report_stats(bool force)
                 std::size_t sample_limit) {
                 const auto stats =
                     history_stats(history, sample_limit);
+                const std::size_t graph_width =
+                    total_graph_width > 48U
+                        ? total_graph_width - 48U
+                        : 24U;
+                const auto graph =
+                    area_graph(history, graph_width, sample_limit);
 
-                std::ostringstream row;
-                row
+                std::ostringstream header;
+                header
                     << color << bold
                     << fit(label, 7)
                     << reset
@@ -2155,16 +2241,29 @@ void Client::report_stats(bool force)
                     << fit(format_rate(now_value), 10)
                     << " AVG "
                     << fit(format_rate(stats.avg), 10)
-                    << " "
+                    << " LOW "
+                    << fit(format_rate(stats.low), 10)
+                    << " HIGH "
+                    << fit(format_rate(stats.high), 10);
+                hashrate_rows.push_back(header.str());
+
+                std::ostringstream graph_top;
+                graph_top
+                    << std::string(7U, ' ')
                     << color
-                    << braille_line(
-                           history,
-                           total_graph_width > 44U
-                               ? total_graph_width - 44U
-                               : 24U,
-                           sample_limit)
+                    << graph[0]
                     << reset;
-                hashrate_rows.push_back(row.str());
+                hashrate_rows.push_back(graph_top.str());
+
+                std::ostringstream graph_bottom;
+                graph_bottom
+                    << std::string(7U, ' ')
+                    << color
+                    << graph[1]
+                    << reset
+                    << ' '
+                    << color << "●" << reset;
+                hashrate_rows.push_back(graph_bottom.str());
             };
 
             append_source_trend(
@@ -2191,21 +2290,6 @@ void Client::report_stats(bool force)
                     gpu_history[gpu.id],
                     gpu.hps,
                     180U);
-            }
-
-            {
-                const auto total_stats =
-                    history_stats(total_history, 180U);
-                std::ostringstream summary;
-                summary
-                    << dim
-                    << "TOTAL  LOW "
-                    << fit(format_rate(total_stats.low), 10)
-                    << " HIGH "
-                    << fit(format_rate(total_stats.high), 10)
-                    << " WINDOW 180s"
-                    << reset;
-                hashrate_rows.push_back(summary.str());
             }
 
             const auto make_panel = [&](const std::string& title,
@@ -2462,18 +2546,28 @@ void Client::report_stats(bool force)
                     ? inner_width - prefix_width - 8U
                     : 20U;
 
-            std::ostringstream cpu;
-            cpu
+            const auto cpu_graph =
+                area_graph(cpu_history, graph_width, 60U);
+
+            std::ostringstream cpu_top;
+            cpu_top
                 << prefix.str()
                 << dim << "60s " << reset
                 << yellow
-                << braille_line(
-                       cpu_history,
-                       graph_width,
-                       60U)
+                << cpu_graph[0]
                 << reset;
+            frame << line(cpu_top.str());
 
-            frame << line(cpu.str());
+            std::ostringstream cpu_bottom;
+            cpu_bottom
+                << std::string(prefix_width, ' ')
+                << std::string(4U, ' ')
+                << yellow
+                << cpu_graph[1]
+                << reset
+                << " "
+                << yellow << "●" << reset;
+            frame << line(cpu_bottom.str());
         }
 
         for (std::size_t gpu_index = 0U;
@@ -2517,18 +2611,31 @@ void Client::report_stats(bool force)
                     ? inner_width - prefix_width - 8U
                     : 20U;
 
-            std::ostringstream gpu_line;
-            gpu_line
+            const auto gpu_graph =
+                area_graph(
+                    gpu_history[gpu.id],
+                    graph_width,
+                    60U);
+
+            std::ostringstream gpu_top;
+            gpu_top
                 << prefix.str()
                 << dim << "60s " << reset
                 << worker_color
-                << braille_line(
-                       gpu_history[gpu.id],
-                       graph_width,
-                       60U)
+                << gpu_graph[0]
                 << reset;
+            frame << line(gpu_top.str());
 
-            frame << line(gpu_line.str());
+            std::ostringstream gpu_bottom;
+            gpu_bottom
+                << std::string(prefix_width, ' ')
+                << std::string(4U, ' ')
+                << worker_color
+                << gpu_graph[1]
+                << reset
+                << " "
+                << worker_color << "●" << reset;
+            frame << line(gpu_bottom.str());
         }
 
         frame << section("SHARES / WORK");
