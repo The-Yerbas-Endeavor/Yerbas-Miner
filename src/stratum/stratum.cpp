@@ -2379,14 +2379,6 @@ void Client::report_stats(bool force)
                         break;
                 }
 
-                std::ostringstream rate_line;
-                rate_line
-                    << "RATE " << format_rate(total_hps);
-
-                std::ostringstream waste_line;
-                waste_line
-                    << "GPU WASTE " << gpu_waste_text.str();
-
                 std::vector<std::string> mascot_rows;
 
                 const auto block_fill = [&](
