@@ -1819,6 +1819,7 @@ void Client::report_stats(bool force)
         const std::string green = "\x1b[1;92m";
         const std::string cyan = "\x1b[1;96m";
         const std::string yellow = "\x1b[1;93m";
+        const std::string magenta = "\x1b[1;95m";
         const std::string red = "\x1b[1;91m";
         const std::string dim = "\x1b[2m";
         const std::string bold = "\x1b[1m";
