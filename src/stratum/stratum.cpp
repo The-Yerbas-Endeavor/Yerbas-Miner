@@ -2547,63 +2547,74 @@ void Client::report_stats(bool force)
             }
         }
 
-        frame << section("WORKERS / INDIVIDUAL 60s TRENDS");
+        frame << section("WORKERS");
+
+        {
+            std::ostringstream header;
+            header
+                << dim
+                << fit("WORKER", 8)
+                << fit("NOW", 12)
+                << fit("AVG", 12)
+                << fit("LOW", 12)
+                << fit("HIGH", 12)
+                << fit("TEMP", 8)
+                << fit("POWER", 10)
+                << fit("FAN", 7)
+                << fit("BATCH", 9)
+                << fit("ACCEPT", 8)
+                << reset;
+            frame << line(header.str());
+        }
 
         if (config_.miner.cpu_enabled) {
             const auto stats =
                 history_stats(cpu_history, 60U);
 
-            std::ostringstream prefix;
-            prefix
-                << yellow << bold << "CPU   " << reset
-                << "NOW " << fit(format_rate(cpu_hps), 9)
-                << " AVG " << fit(format_rate(stats.avg), 9)
-                << " LOW " << fit(format_rate(stats.low), 9)
-                << " HIGH " << fit(format_rate(stats.high), 9)
-                << " T "
+            std::ostringstream row;
+            row
+                << yellow << bold
+                << fit("CPU", 8)
+                << reset
+                << fit(format_rate(cpu_hps), 12)
+                << fit(format_rate(stats.avg), 12)
+                << fit(format_rate(stats.low), 12)
+                << fit(format_rate(stats.high), 12)
                 << fit(
                        yerbas::console::detail::
                            format_temperature(cpu_telemetry),
-                       5)
-                << " P "
+                       8)
                 << fit(
                        yerbas::console::detail::
                            format_power(cpu_telemetry),
-                       7)
-                << " A "
-                << std::setw(5)
-                << g_source_accepted["CPU"]
-                << ' ';
+                       10)
+                << fit("-", 7)
+                << fit("-", 9)
+                << fit(
+                       std::to_string(
+                           g_source_accepted["CPU"]),
+                       8);
+            frame << line(row.str());
 
-            const std::size_t prefix_width =
-                display_width(prefix.str());
+            const std::size_t graph_indent = 8U;
             const std::size_t graph_width =
-                inner_width > prefix_width + 8U
-                    ? inner_width - prefix_width - 8U
-                    : 20U;
-
-            const auto cpu_graph =
+                inner_width > graph_indent + 10U
+                    ? inner_width - graph_indent - 6U
+                    : 24U;
+            const auto graph =
                 area_graph(cpu_history, graph_width, 60U);
 
-            std::ostringstream cpu_top;
-            cpu_top
-                << prefix.str()
+            std::ostringstream top;
+            top << std::string(graph_indent, ' ')
                 << dim << "60s " << reset
-                << yellow
-                << cpu_graph[0]
-                << reset;
-            frame << line(cpu_top.str());
+                << yellow << graph[0] << reset;
+            frame << line(top.str());
 
-            std::ostringstream cpu_bottom;
-            cpu_bottom
-                << std::string(prefix_width, ' ')
-                << std::string(4U, ' ')
-                << yellow
-                << cpu_graph[1]
-                << reset
-                << " "
-                << yellow << "●" << reset;
-            frame << line(cpu_bottom.str());
+            std::ostringstream bottom;
+            bottom << std::string(graph_indent + 4U, ' ')
+                   << yellow << graph[1] << reset
+                   << " " << yellow << "●" << reset;
+            frame << line(bottom.str());
         }
 
         for (std::size_t gpu_index = 0U;
@@ -2617,61 +2628,44 @@ void Client::report_stats(bool force)
             const std::string label =
                 "GPU " + std::to_string(gpu.id);
 
-            std::ostringstream prefix;
-            prefix
+            std::ostringstream row;
+            row
                 << worker_color << bold
-                << fit(label, 6)
+                << fit(label, 8)
                 << reset
-                << "NOW " << fit(format_rate(gpu.hps), 9)
-                << " AVG " << fit(format_rate(stats.avg), 9)
-                << " LOW " << fit(format_rate(stats.low), 9)
-                << " HIGH " << fit(format_rate(stats.high), 9)
-                << " "
-                << fit(gpu.temp, 5)
-                << " "
-                << fit(gpu.power, 7)
-                << " F "
-                << fit(gpu.fan, 4)
-                << " B "
-                << std::setw(5)
-                << gpu.batch
-                << " A "
-                << std::setw(5)
-                << gpu.accepted
-                << ' ';
+                << fit(format_rate(gpu.hps), 12)
+                << fit(format_rate(stats.avg), 12)
+                << fit(format_rate(stats.low), 12)
+                << fit(format_rate(stats.high), 12)
+                << fit(gpu.temp, 8)
+                << fit(gpu.power, 10)
+                << fit(gpu.fan, 7)
+                << fit(std::to_string(gpu.batch), 9)
+                << fit(std::to_string(gpu.accepted), 8);
+            frame << line(row.str());
 
-            const std::size_t prefix_width =
-                display_width(prefix.str());
+            const std::size_t graph_indent = 8U;
             const std::size_t graph_width =
-                inner_width > prefix_width + 8U
-                    ? inner_width - prefix_width - 8U
-                    : 20U;
-
-            const auto gpu_graph =
+                inner_width > graph_indent + 10U
+                    ? inner_width - graph_indent - 6U
+                    : 24U;
+            const auto graph =
                 area_graph(
                     gpu_history[gpu.id],
                     graph_width,
                     60U);
 
-            std::ostringstream gpu_top;
-            gpu_top
-                << prefix.str()
+            std::ostringstream top;
+            top << std::string(graph_indent, ' ')
                 << dim << "60s " << reset
-                << worker_color
-                << gpu_graph[0]
-                << reset;
-            frame << line(gpu_top.str());
+                << worker_color << graph[0] << reset;
+            frame << line(top.str());
 
-            std::ostringstream gpu_bottom;
-            gpu_bottom
-                << std::string(prefix_width, ' ')
-                << std::string(4U, ' ')
-                << worker_color
-                << gpu_graph[1]
-                << reset
-                << " "
-                << worker_color << "●" << reset;
-            frame << line(gpu_bottom.str());
+            std::ostringstream bottom;
+            bottom << std::string(graph_indent + 4U, ' ')
+                   << worker_color << graph[1] << reset
+                   << " " << worker_color << "●" << reset;
+            frame << line(bottom.str());
         }
 
         frame << section("SHARES / WORK");
@@ -2680,32 +2674,38 @@ void Client::report_stats(bool force)
             std::ostringstream shares;
             shares
                 << green << bold
-                << "ACCEPTED " << reset
-                << shares_accepted_
-                << "   "
-                << red << "REJECTED " << reset
-                << shares_rejected_
-                << "   SUBMITTED "
-                << shares_submitted_
-                << "   HEALTH "
+                << fit("ACCEPTED", 12) << reset
+                << fit(std::to_string(shares_accepted_), 10)
+                << red
+                << fit("REJECTED", 12) << reset
+                << fit(std::to_string(shares_rejected_), 10)
+                << fit("SUBMITTED", 12)
+                << fit(std::to_string(shares_submitted_), 10)
+                << fit("HEALTH", 10)
                 << std::fixed
                 << std::setprecision(2)
-                << acceptance << "%"
-                << "   BLOCKS "
-                << g_blocks_found
-                << "   GPU WASTE "
-                << gpu_waste_text.str();
+                << acceptance << "%";
             frame << line(shares.str());
         }
 
         {
             std::ostringstream work;
             work
-                << "WORK/SHARE "
-                << std::fixed
-                << std::setprecision(0)
-                << expected_hashes
-                << "   NEXT SHARE ETA "
+                << fit("BLOCKS", 12)
+                << fit(std::to_string(g_blocks_found), 10)
+                << fit("GPU WASTE", 12)
+                << fit(gpu_waste_text.str(), 10)
+                << fit("WORK/SHARE", 12)
+                << fit(
+                       [&]() {
+                           std::ostringstream value;
+                           value << std::fixed
+                                 << std::setprecision(0)
+                                 << expected_hashes;
+                           return value.str();
+                       }(),
+                       14)
+                << fit("SHARE ETA", 12)
                 << format_duration(eta);
 
             if (pending_target_ready_ &&
