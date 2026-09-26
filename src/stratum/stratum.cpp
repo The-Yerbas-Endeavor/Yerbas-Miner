@@ -2543,6 +2543,7 @@ void Client::report_stats(bool force)
                     << operating_color << bold
                     << "STATUS " << operating_status
                     << reset;
+                mascot_rows.push_back(status_line.str());
 
                 std::ostringstream job_line;
                 job_line << "JOB AGE ";
@@ -2554,16 +2555,27 @@ void Client::report_stats(bool force)
                 } else {
                     job_line << "n/a";
                 }
-
-                mascot_rows.push_back(status_line.str());
                 mascot_rows.push_back(job_line.str());
+
+                if (config_.miner.cpu_enabled) {
+                    std::ostringstream cpu_line;
+                    cpu_line
+                        << "CPU  "
+                        << yerbas::console::detail::
+                               format_temperature(cpu_telemetry)
+                        << "  "
+                        << yerbas::console::detail::
+                               format_power(cpu_telemetry);
+                    mascot_rows.push_back(cpu_line.str());
+                }
 
                 for (const auto& worker : gpu_workers_) {
                     std::ostringstream gpu_line;
                     gpu_line
                         << "GPU" << worker.device_id
                         << " B" << worker.engine->batch_size()
-                        << "  ";
+                        << " ";
+
                     if (worker.last_scan_ms > 0.0) {
                         gpu_line
                             << std::fixed
@@ -2571,8 +2583,25 @@ void Client::report_stats(bool force)
                             << (worker.last_scan_ms / 1000.0)
                             << "s";
                     } else {
-                        gpu_line << "scan n/a";
+                        gpu_line << "n/a";
                     }
+
+                    const auto telemetry_it =
+                        gpu_telemetry.devices.find(worker.device_id);
+                    if (telemetry_it != gpu_telemetry.devices.end()) {
+                        const auto& telemetry = telemetry_it->second;
+                        gpu_line
+                            << " "
+                            << yerbas::console::detail::
+                                   format_temperature(telemetry)
+                            << " "
+                            << yerbas::console::detail::
+                                   format_power(telemetry)
+                            << " "
+                            << yerbas::console::detail::
+                                   format_fan(telemetry);
+                    }
+
                     mascot_rows.push_back(gpu_line.str());
                 }
 
