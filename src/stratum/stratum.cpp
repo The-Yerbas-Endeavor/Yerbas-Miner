@@ -1673,94 +1673,6 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto trace_graph = [&history_range](
-            const std::vector<double>& history,
-            std::size_t width,
-            std::size_t height) {
-            std::vector<std::string> rows(
-                height, std::string{});
-
-            const std::size_t count =
-                std::min(width, history.size());
-            const std::size_t leading =
-                width - count;
-
-            for (auto& row : rows)
-                row.append(leading, ' ');
-
-            if (count == 0U || height == 0U)
-                return rows;
-
-            const auto [low, high] =
-                history_range(history, width);
-            const double span =
-                std::max(1.0, high - low);
-
-            const auto begin =
-                history.end() -
-                static_cast<std::ptrdiff_t>(count);
-
-            std::size_t previous_row = height - 1U;
-            bool have_previous = false;
-            std::size_t column = 0U;
-
-            for (auto it = begin; it != history.end(); ++it, ++column) {
-                const double ratio =
-                    std::clamp((*it - low) / span, 0.0, 1.0);
-
-                const std::size_t row =
-                    height - 1U -
-                    std::min<std::size_t>(
-                        height - 1U,
-                        static_cast<std::size_t>(
-                            ratio *
-                            static_cast<double>(height - 1U) +
-                            0.5));
-
-                const bool last =
-                    column + 1U == count;
-
-                for (std::size_t r = 0U; r < height; ++r) {
-                    if (r != row) {
-                        rows[r] += ' ';
-                        continue;
-                    }
-
-                    if (last) {
-                        rows[r] += "●";
-                    } else if (!have_previous || previous_row == row) {
-                        rows[r] += "─";
-                    } else if (row < previous_row) {
-                        rows[r] += "╱";
-                    } else {
-                        rows[r] += "╲";
-                    }
-                }
-
-                previous_row = row;
-                have_previous = true;
-            }
-
-            return rows;
-        };
-
-        const auto gauge = [](double value, double maximum, std::size_t width) {
-            const double ratio =
-                maximum > 0.0
-                    ? std::clamp(value / maximum, 0.0, 1.0)
-                    : 0.0;
-            const std::size_t filled =
-                std::min(
-                    width,
-                    static_cast<std::size_t>(
-                        ratio * static_cast<double>(width) + 0.5));
-
-            std::string bar;
-            for (std::size_t i = 0; i < width; ++i)
-                bar += i < filled ? "█" : "░";
-            return bar;
-        };
-
         struct GpuView {
             int id{-1};
             double hps{0.0};
@@ -1903,35 +1815,9 @@ void Client::report_stats(bool force)
             uptime > 0.0
                 ? static_cast<std::uint64_t>(uptime)
                 : 0U;
-        const std::uint64_t fee_second =
-            uptime_seconds % kDevFeePeriodSeconds;
-        const bool fee_window =
-            fee_second >= kDevFeeStartSeconds &&
-            fee_second < kDevFeeStartSeconds + kDevFeeDurationSeconds;
-
-        std::string dev_fee_status;
-        if (dev_fee_session_active_) {
-            const std::uint64_t remaining =
-                kDevFeeStartSeconds + kDevFeeDurationSeconds > fee_second
-                    ? kDevFeeStartSeconds + kDevFeeDurationSeconds - fee_second
-                    : 0U;
-            dev_fee_status =
-                "ACTIVE " + format_duration(static_cast<double>(remaining)) + " left";
-        } else if (fee_window) {
-            dev_fee_status = "STARTING";
-        } else {
-            const std::uint64_t until_next =
-                fee_second < kDevFeeStartSeconds
-                    ? kDevFeeStartSeconds - fee_second
-                    : kDevFeePeriodSeconds - fee_second + kDevFeeStartSeconds;
-            dev_fee_status =
-                "OFF next " + format_duration(static_cast<double>(until_next));
-        }
-
         const std::string green = "\x1b[1;92m";
         const std::string cyan = "\x1b[1;96m";
         const std::string yellow = "\x1b[1;93m";
-        const std::string magenta = "\x1b[1;95m";
         const std::string red = "\x1b[1;91m";
         const std::string dim = "\x1b[2m";
         const std::string bold = "\x1b[1m";
@@ -2007,12 +1893,7 @@ void Client::report_stats(bool force)
                 << reset
                 << "  "
                 << bold << "UP " << reset
-                << fit(format_duration(uptime), 12)
-                << "  "
-                << bold << "DEV FEE " << reset
-                << (dev_fee_session_active_
-                        ? yellow + dev_fee_status + reset
-                        : dim + dev_fee_status + reset);
+                << fit(format_duration(uptime), 12);
             frame << line(status.str());
         }
 
@@ -2037,67 +1918,42 @@ void Client::report_stats(bool force)
             frame << line(work.str());
         }
 
-        frame << section("HASHRATE TREND / 3 MIN");
+        frame << section("HASHRATE / 3 MIN");
 
-        const std::size_t graph_label_width = 18U;
-        const std::size_t graph_width =
-            inner_width > graph_label_width + 4U
-                ? inner_width - graph_label_width - 4U
+        const std::size_t total_graph_label_width = 7U;
+        const std::size_t total_graph_width =
+            inner_width > total_graph_label_width + 4U
+                ? inner_width - total_graph_label_width - 4U
                 : 60U;
 
-        const auto total_graph =
-            trace_graph(
-                total_history,
-                graph_width,
-                5U);
-
         const auto [history_low, history_high] =
-            history_range(
-                total_history,
-                graph_width);
+            history_range(total_history, total_graph_width);
 
-        for (std::size_t row = 0U;
-             row < total_graph.size();
-             ++row) {
-            std::ostringstream content;
+        {
+            std::ostringstream stats;
+            stats
+                << green << bold << "NOW " << reset
+                << fit(format_rate(total_hps), 11)
+                << "  AVG "
+                << fit(format_rate(average_hps), 11)
+                << "  LOW "
+                << fit(format_rate(history_low), 11)
+                << "  HIGH "
+                << fit(format_rate(history_high), 11)
+                << "  WINDOW 180s";
+            frame << line(stats.str());
+        }
 
-            if (row == 0U) {
-                content
-                    << "HIGH  "
-                    << fit(
-                           format_rate(history_high),
-                           11);
-            } else if (row == 1U) {
-                content
-                    << green << bold << "NOW   "
-                    << reset
-                    << fit(
-                           format_rate(total_hps),
-                           11);
-            } else if (row == 2U) {
-                content
-                    << "GROSS "
-                    << fit(
-                           format_rate(average_hps),
-                           11);
-            } else if (row == 3U) {
-                content
-                    << "LOW   "
-                    << fit(
-                           format_rate(history_low),
-                           11);
-            } else {
-                content
-                    << "TREND "
-                    << fit("180s", 11);
-            }
-
-            content
+        {
+            std::ostringstream trend;
+            trend
+                << dim << "180s " << reset
                 << green
-                << total_graph[row]
-                << reset;
-
-            frame << line(content.str());
+                << sparkline(total_history, total_graph_width)
+                << reset
+                << " "
+                << bold << "now" << reset;
+            frame << line(trend.str());
         }
 
         frame << section("WORKERS");
@@ -2107,13 +1963,6 @@ void Client::report_stats(bool force)
             prefix
                 << yellow << bold << "CPU   " << reset
                 << fit(format_rate(cpu_hps), 11)
-                << ' '
-                << yellow
-                << gauge(
-                       cpu_hps,
-                       std::max(1.0, total_hps),
-                       12U)
-                << reset
                 << "  T "
                 << fit(
                        yerbas::console::detail::
@@ -2134,13 +1983,16 @@ void Client::report_stats(bool force)
             const std::size_t prefix_width =
                 display_width(prefix.str());
             const std::size_t graph_width =
-                inner_width > prefix_width + 2U
-                    ? inner_width - prefix_width - 2U
-                    : 8U;
+                std::min<std::size_t>(
+                    60U,
+                    inner_width > prefix_width + 8U
+                        ? inner_width - prefix_width - 8U
+                        : 8U);
 
             std::ostringstream cpu;
             cpu
                 << prefix.str()
+                << dim << "60s " << reset
                 << yellow
                 << sparkline(
                        cpu_history,
@@ -2162,13 +2014,6 @@ void Client::report_stats(bool force)
                 << fit(
                        format_rate(gpu.hps),
                        11)
-                << ' '
-                << cyan
-                << gauge(
-                       gpu.hps,
-                       std::max(1.0, total_hps),
-                       12U)
-                << reset
                 << "  "
                 << fit(gpu.temp, 5)
                 << ' '
@@ -2186,13 +2031,16 @@ void Client::report_stats(bool force)
             const std::size_t prefix_width =
                 display_width(prefix.str());
             const std::size_t graph_width =
-                inner_width > prefix_width + 2U
-                    ? inner_width - prefix_width - 2U
-                    : 8U;
+                std::min<std::size_t>(
+                    60U,
+                    inner_width > prefix_width + 8U
+                        ? inner_width - prefix_width - 8U
+                        : 8U);
 
             std::ostringstream gpu_line;
             gpu_line
                 << prefix.str()
+                << dim << "60s " << reset
                 << cyan
                 << sparkline(
                        gpu_history[gpu.id],
