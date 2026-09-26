@@ -1654,11 +1654,8 @@ void Client::report_stats(bool force)
             const std::size_t count =
                 std::min(width, history.size());
 
-            if (count < width)
-                graph.append(width - count, ' ');
-
             if (count == 0U)
-                return graph;
+                return std::string(width, ' ');
 
             const auto [low, high] =
                 history_range(history, width);
@@ -1679,6 +1676,9 @@ void Client::report_stats(bool force)
                             ratio * 7.0 + 0.5));
                 graph += kBlocks[level];
             }
+
+            if (count < width)
+                graph.append(width - count, ' ');
             return graph;
         };
 
@@ -1866,11 +1866,8 @@ void Client::report_stats(bool force)
 
         const std::string top_left =
             "─[ YERBAS MINER ]";
-        const std::string top_right =
-            "[ PROOF OF GRASS ]─";
         const std::size_t top_used =
-            display_width(top_left) +
-            display_width(top_right);
+            display_width(top_left);
 
         std::ostringstream frame;
         frame << "\x1b[H";
@@ -1883,7 +1880,6 @@ void Client::report_stats(bool force)
                      inner_width > top_used
                          ? inner_width - top_used
                          : 0U)
-              << top_right
               << "╮"
               << reset
               << '\n';
@@ -1970,19 +1966,26 @@ void Client::report_stats(bool force)
                     << fit(format_rate(history_low), 11)
                     << " HIGH "
                     << fit(format_rate(history_high), 11)
-                    << " 180s";
+                    << " WINDOW 180s";
                 hashrate_rows.push_back(stats.str());
             }
+            hashrate_rows.push_back("");
             {
                 std::ostringstream trend;
                 trend
                     << dim << "180s " << reset
                     << green
                     << sparkline(total_history, total_graph_width)
-                    << reset
-                    << ' '
-                    << bold << "now" << reset;
+                    << reset;
                 hashrate_rows.push_back(trend.str());
+            }
+            hashrate_rows.push_back("");
+            {
+                std::ostringstream legend;
+                legend
+                    << dim << "rolling 3-minute hashrate history"
+                    << reset;
+                hashrate_rows.push_back(legend.str());
             }
 
             const auto make_panel = [&](const std::string& title,
@@ -2038,19 +2041,19 @@ void Client::report_stats(bool force)
                 std::vector<std::string> mascot_rows;
                 if (frame_index == 0U) {
                     mascot_rows = {
-                        green + "      _O_        " + reset,
-                        green + "    _/| \\_   ⛏   " + reset,
-                        cyan  + "      |      □    " + reset,
-                        cyan  + "     / \\   □■    " + reset,
-                        dim   + "          ·  ·     " + reset
+                        green + "        ___      /\\ " + reset,
+                        green + "       /_O_\\    /  \\ " + reset,
+                        green + "      _/| |\\___/    " + reset,
+                        cyan  + "        / \\    [##] " + reset,
+                        dim   + "              . [##] " + reset
                     };
                 } else {
                     mascot_rows = {
-                        green + "      _O_        " + reset,
-                        green + "    _/|\\_      " + reset,
-                        cyan  + "      | \\⛏  *□   " + reset,
-                        cyan  + "     / \\   ■□    " + reset,
-                        dim   + "         * · ·     " + reset
+                        green + "        ___         " + reset,
+                        green + "       /_O_\\      " + reset,
+                        green + "      _/| |\\__ /\\ " + reset,
+                        cyan  + "        / \\   *[##]" + reset,
+                        dim   + "             .* [##]" + reset
                     };
                 }
 
