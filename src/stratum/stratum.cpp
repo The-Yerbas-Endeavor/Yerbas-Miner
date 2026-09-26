@@ -1927,7 +1927,7 @@ void Client::report_stats(bool force)
         {
             const std::size_t panel_gap = 2U;
             const std::size_t mascot_panel_width =
-                inner_width >= 140U ? 30U : 0U;
+                inner_width >= 145U ? 36U : 0U;
             const std::size_t hashrate_panel_width =
                 mascot_panel_width > 0U
                     ? inner_width - mascot_panel_width - panel_gap
@@ -1987,6 +1987,8 @@ void Client::report_stats(bool force)
                     << reset;
                 hashrate_rows.push_back(legend.str());
             }
+            hashrate_rows.push_back("");
+            hashrate_rows.push_back("");
 
             const auto make_panel = [&](const std::string& title,
                                         const std::vector<std::string>& body,
@@ -2041,19 +2043,23 @@ void Client::report_stats(bool force)
                 std::vector<std::string> mascot_rows;
                 if (frame_index == 0U) {
                     mascot_rows = {
-                        green + "        ___      /\\ " + reset,
-                        green + "       /_O_\\    /  \\ " + reset,
-                        green + "      _/| |\\___/    " + reset,
-                        cyan  + "        / \\    [##] " + reset,
-                        dim   + "              . [##] " + reset
+                        yellow + "          ╭────╮        ╱╲     " + reset,
+                        yellow + "       ╭──│ ●  │──╮    ╱  ╲    " + reset,
+                        green  + "      ╱   ╰─┬──╯  ╲───╯    ╲   " + reset,
+                        green  + "     ╱╲    ╱│╲              ╲  " + reset,
+                        cyan   + "    ╱  ╲  ╱ │ ╲        ◇────◇  " + reset,
+                        cyan   + "       ╲╱  ╱ ╲       ╱│    ╱│  " + reset,
+                        dim    + "        · ·          ◇────◇ │  " + reset
                     };
                 } else {
                     mascot_rows = {
-                        green + "        ___         " + reset,
-                        green + "       /_O_\\      " + reset,
-                        green + "      _/| |\\__ /\\ " + reset,
-                        cyan  + "        / \\   *[##]" + reset,
-                        dim   + "             .* [##]" + reset
+                        yellow + "          ╭────╮               " + reset,
+                        yellow + "       ╭──│ ●  │──╮            " + reset,
+                        green  + "      ╱   ╰─┬──╯  ╲      ╱╲    " + reset,
+                        green  + "     ╱╲    ╱│╲─────╲────╯  ╲   " + reset,
+                        cyan   + "    ╱  ╲  ╱ │ ╲      ✦ ◇────◇  " + reset,
+                        cyan   + "       ╲╱  ╱ ╲      · ╱│    ╱│  " + reset,
+                        dim    + "        ·  ✦ ·       ◇────◇ │  " + reset
                     };
                 }
 
