@@ -1643,6 +1643,34 @@ void Client::report_stats(bool force)
             };
         };
 
+        const auto history_stats = [](
+            const std::vector<double>& history,
+            std::size_t sample_limit) {
+            struct Stats {
+                double avg{0.0};
+                double low{0.0};
+                double high{0.0};
+            };
+
+            Stats stats;
+            const std::size_t count =
+                std::min(sample_limit, history.size());
+            if (count == 0U)
+                return stats;
+
+            const auto begin =
+                history.end() -
+                static_cast<std::ptrdiff_t>(count);
+            const auto range =
+                std::minmax_element(begin, history.end());
+            stats.low = *range.first;
+            stats.high = *range.second;
+            stats.avg =
+                std::accumulate(begin, history.end(), 0.0) /
+                static_cast<double>(count);
+            return stats;
+        };
+
         const auto utf8_codepoint = [](std::uint32_t cp) {
             std::string out;
             if (cp <= 0x7fU) {
@@ -2021,40 +2049,77 @@ void Client::report_stats(bool force)
             }
 
             std::vector<std::string> hashrate_rows;
-            {
-                std::ostringstream stats;
-                stats
-                    << green << bold << "NOW " << reset
-                    << fit(format_rate(total_hps), 11)
+
+            const auto append_source_trend = [&](
+                const std::string& label,
+                const std::string& color,
+                const std::vector<double>& history,
+                double now_value,
+                std::size_t sample_limit) {
+                const auto stats =
+                    history_stats(history, sample_limit);
+
+                std::ostringstream row;
+                row
+                    << color << bold
+                    << fit(label, 7)
+                    << reset
+                    << " NOW "
+                    << fit(format_rate(now_value), 10)
                     << " AVG "
-                    << fit(format_rate(history_average), 11)
-                    << " LOW "
-                    << fit(format_rate(history_low), 11)
+                    << fit(format_rate(stats.avg), 10)
+                    << " "
+                    << color
+                    << braille_line(
+                           history,
+                           total_graph_width > 44U
+                               ? total_graph_width - 44U
+                               : 24U,
+                           sample_limit)
+                    << reset;
+                hashrate_rows.push_back(row.str());
+            };
+
+            append_source_trend(
+                "TOTAL",
+                green,
+                total_history,
+                total_hps,
+                180U);
+
+            append_source_trend(
+                "CPU",
+                yellow,
+                cpu_history,
+                cpu_hps,
+                180U);
+
+            for (std::size_t i = 0U;
+                 i < gpu_views.size();
+                 ++i) {
+                const auto& gpu = gpu_views[i];
+                append_source_trend(
+                    "GPU " + std::to_string(gpu.id),
+                    i == 0U ? cyan : magenta,
+                    gpu_history[gpu.id],
+                    gpu.hps,
+                    180U);
+            }
+
+            {
+                const auto total_stats =
+                    history_stats(total_history, 180U);
+                std::ostringstream summary;
+                summary
+                    << dim
+                    << "TOTAL  LOW "
+                    << fit(format_rate(total_stats.low), 10)
                     << " HIGH "
-                    << fit(format_rate(history_high), 11)
-                    << " WINDOW 180s";
-                hashrate_rows.push_back(stats.str());
-            }
-            hashrate_rows.push_back("");
-            {
-                std::ostringstream trend;
-                trend
-                    << dim << "180s " << reset
-                    << green
-                    << braille_line(total_history, total_graph_width, 180U)
+                    << fit(format_rate(total_stats.high), 10)
+                    << " WINDOW 180s"
                     << reset;
-                hashrate_rows.push_back(trend.str());
+                hashrate_rows.push_back(summary.str());
             }
-            hashrate_rows.push_back("");
-            {
-                std::ostringstream legend;
-                legend
-                    << dim << "rolling 3-minute hashrate history"
-                    << reset;
-                hashrate_rows.push_back(legend.str());
-            }
-            hashrate_rows.push_back("");
-            hashrate_rows.push_back("");
 
             const auto make_panel = [&](const std::string& title,
                                         const std::vector<std::string>& body,
@@ -2114,23 +2179,23 @@ void Client::report_stats(bool force)
                 std::vector<std::string> mascot_rows;
                 if (frame_index == 0U) {
                     mascot_rows = {
-                        faint + "          WORKING          " + reset,
-                        gold  + "              ╱⛏          " + reset,
-                        gold  + "             ╱             " + reset,
-                        aqua  + "        ┌──────────┐        " + reset,
-                        aqua  + "        │  BLOCK   │        " + reset,
-                        aqua  + "        └──────────┘        " + reset,
-                        lime  + "           MINING           " + reset
+                        faint + "       MINER ACTIVE        " + reset,
+                        gold  + "          /\\             " + reset,
+                        gold  + "         /  \\            " + reset,
+                        gold  + "        /    \\           " + reset,
+                        aqua  + "                  [#####]   " + reset,
+                        aqua  + "                  [#####]   " + reset,
+                        lime  + "          WORKING...        " + reset
                     };
                 } else {
                     mascot_rows = {
-                        faint + "          WORKING          " + reset,
-                        gold  + "         ⛏╲  " + lime + "✦" + gold + "            " + reset,
-                        gold  + "           ╲ " + lime + "✦ ·" + gold + "          " + reset,
-                        aqua  + "        ┌────" + gold + "╱" + aqua + "─────┐       " + reset,
-                        aqua  + "        │ BLO" + gold + "╱" + aqua + "K    │       " + reset,
-                        aqua  + "        └──────────┘        " + reset,
-                        lime  + "           MINING           " + reset
+                        faint + "       MINER ACTIVE        " + reset,
+                        gold  + "                 \\        " + reset,
+                        gold  + "                  \\  *    " + reset,
+                        gold  + "                   \\*     " + reset,
+                        aqua  + "                  [##/##]   " + reset,
+                        aqua  + "                  [#####]   " + reset,
+                        lime  + "          WORKING...        " + reset
                     };
                 }
 
@@ -2177,35 +2242,37 @@ void Client::report_stats(bool force)
         frame << section("WORKERS / INDIVIDUAL 60s TRENDS");
 
         if (config_.miner.cpu_enabled) {
+            const auto stats =
+                history_stats(cpu_history, 60U);
+
             std::ostringstream prefix;
             prefix
                 << yellow << bold << "CPU   " << reset
-                << fit(format_rate(cpu_hps), 11)
-                << "  T "
+                << "NOW " << fit(format_rate(cpu_hps), 9)
+                << " AVG " << fit(format_rate(stats.avg), 9)
+                << " LOW " << fit(format_rate(stats.low), 9)
+                << " HIGH " << fit(format_rate(stats.high), 9)
+                << " T "
                 << fit(
                        yerbas::console::detail::
-                           format_temperature(
-                               cpu_telemetry),
-                       6)
+                           format_temperature(cpu_telemetry),
+                       5)
                 << " P "
                 << fit(
                        yerbas::console::detail::
-                           format_power(
-                               cpu_telemetry),
-                       8)
+                           format_power(cpu_telemetry),
+                       7)
                 << " A "
-                << std::setw(6)
+                << std::setw(5)
                 << g_source_accepted["CPU"]
                 << ' ';
 
             const std::size_t prefix_width =
                 display_width(prefix.str());
             const std::size_t graph_width =
-                std::min<std::size_t>(
-                    88U,
-                    inner_width > prefix_width + 8U
-                        ? inner_width - prefix_width - 8U
-                        : 16U);
+                inner_width > prefix_width + 8U
+                    ? inner_width - prefix_width - 8U
+                    : 20U;
 
             std::ostringstream cpu;
             cpu
@@ -2221,46 +2288,52 @@ void Client::report_stats(bool force)
             frame << line(cpu.str());
         }
 
-        for (const auto& gpu : gpu_views) {
+        for (std::size_t gpu_index = 0U;
+             gpu_index < gpu_views.size();
+             ++gpu_index) {
+            const auto& gpu = gpu_views[gpu_index];
+            const auto stats =
+                history_stats(gpu_history[gpu.id], 60U);
+            const std::string worker_color =
+                gpu_index == 0U ? cyan : magenta;
             const std::string label =
                 "GPU " + std::to_string(gpu.id);
 
             std::ostringstream prefix;
             prefix
-                << cyan << bold
+                << worker_color << bold
                 << fit(label, 6)
                 << reset
-                << fit(
-                       format_rate(gpu.hps),
-                       11)
-                << "  "
+                << "NOW " << fit(format_rate(gpu.hps), 9)
+                << " AVG " << fit(format_rate(stats.avg), 9)
+                << " LOW " << fit(format_rate(stats.low), 9)
+                << " HIGH " << fit(format_rate(stats.high), 9)
+                << " "
                 << fit(gpu.temp, 5)
-                << ' '
-                << fit(gpu.power, 8)
+                << " "
+                << fit(gpu.power, 7)
                 << " F "
                 << fit(gpu.fan, 4)
                 << " B "
                 << std::setw(5)
                 << gpu.batch
                 << " A "
-                << std::setw(6)
+                << std::setw(5)
                 << gpu.accepted
                 << ' ';
 
             const std::size_t prefix_width =
                 display_width(prefix.str());
             const std::size_t graph_width =
-                std::min<std::size_t>(
-                    88U,
-                    inner_width > prefix_width + 8U
-                        ? inner_width - prefix_width - 8U
-                        : 16U);
+                inner_width > prefix_width + 8U
+                    ? inner_width - prefix_width - 8U
+                    : 20U;
 
             std::ostringstream gpu_line;
             gpu_line
                 << prefix.str()
                 << dim << "60s " << reset
-                << cyan
+                << worker_color
                 << braille_line(
                        gpu_history[gpu.id],
                        graph_width,
