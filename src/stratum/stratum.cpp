@@ -1643,42 +1643,108 @@ void Client::report_stats(bool force)
             };
         };
 
-        const auto sparkline = [&history_range](
+        const auto utf8_codepoint = [](std::uint32_t cp) {
+            std::string out;
+            if (cp <= 0x7fU) {
+                out.push_back(static_cast<char>(cp));
+            } else if (cp <= 0x7ffU) {
+                out.push_back(static_cast<char>(0xc0U | (cp >> 6U)));
+                out.push_back(static_cast<char>(0x80U | (cp & 0x3fU)));
+            } else if (cp <= 0xffffU) {
+                out.push_back(static_cast<char>(0xe0U | (cp >> 12U)));
+                out.push_back(static_cast<char>(0x80U | ((cp >> 6U) & 0x3fU)));
+                out.push_back(static_cast<char>(0x80U | (cp & 0x3fU)));
+            } else {
+                out.push_back(static_cast<char>(0xf0U | (cp >> 18U)));
+                out.push_back(static_cast<char>(0x80U | ((cp >> 12U) & 0x3fU)));
+                out.push_back(static_cast<char>(0x80U | ((cp >> 6U) & 0x3fU)));
+                out.push_back(static_cast<char>(0x80U | (cp & 0x3fU)));
+            }
+            return out;
+        };
+
+        const auto braille_line = [&utf8_codepoint](
             const std::vector<double>& history,
-            std::size_t width) {
-            static constexpr const char* kBlocks[] = {
-                "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
-            };
+            std::size_t width,
+            std::size_t sample_limit) {
+            if (width == 0U)
+                return std::string{};
 
-            std::string graph;
-            const std::size_t count =
-                std::min(width, history.size());
-
-            if (count == 0U)
+            const std::size_t available =
+                std::min(sample_limit, history.size());
+            if (available == 0U)
                 return std::string(width, ' ');
-
-            const auto [low, high] =
-                history_range(history, width);
-            const double span =
-                std::max(1.0, high - low);
 
             const auto begin =
                 history.end() -
-                static_cast<std::ptrdiff_t>(count);
+                static_cast<std::ptrdiff_t>(available);
+            const auto range =
+                std::minmax_element(begin, history.end());
+            const double low_raw = *range.first;
+            const double high_raw = *range.second;
+            const double spread = high_raw - low_raw;
+            const double pad =
+                std::max({1.0, high_raw * 0.02, spread * 0.10});
+            const double low = std::max(0.0, low_raw - pad);
+            const double high = high_raw + pad;
+            const double span = std::max(1.0, high - low);
 
-            for (auto it = begin; it != history.end(); ++it) {
+            const std::size_t pixel_width = width * 2U;
+            std::vector<unsigned char> cells(width, 0U);
+
+            const auto set_dot = [&](std::size_t px, std::size_t py) {
+                if (px >= pixel_width || py >= 4U)
+                    return;
+                const std::size_t cell = px / 2U;
+                const bool right = (px & 1U) != 0U;
+                static constexpr unsigned char left_bits[4] = {
+                    0x01U, 0x02U, 0x04U, 0x40U
+                };
+                static constexpr unsigned char right_bits[4] = {
+                    0x08U, 0x10U, 0x20U, 0x80U
+                };
+                cells[cell] |= right ? right_bits[py] : left_bits[py];
+            };
+
+            int prev_y = -1;
+            for (std::size_t px = 0U; px < pixel_width; ++px) {
+                const double pos =
+                    pixel_width <= 1U
+                        ? 0.0
+                        : static_cast<double>(px) *
+                              static_cast<double>(available - 1U) /
+                              static_cast<double>(pixel_width - 1U);
+                const std::size_t i0 =
+                    static_cast<std::size_t>(pos);
+                const std::size_t i1 =
+                    std::min(i0 + 1U, available - 1U);
+                const double frac = pos - static_cast<double>(i0);
+                const double value =
+                    (*(begin + static_cast<std::ptrdiff_t>(i0))) *
+                        (1.0 - frac) +
+                    (*(begin + static_cast<std::ptrdiff_t>(i1))) * frac;
                 const double ratio =
-                    std::clamp((*it - low) / span, 0.0, 1.0);
-                const std::size_t level =
-                    std::min<std::size_t>(
-                        7U,
-                        static_cast<std::size_t>(
-                            ratio * 7.0 + 0.5));
-                graph += kBlocks[level];
+                    std::clamp((value - low) / span, 0.0, 1.0);
+                const int y =
+                    3 - static_cast<int>(ratio * 3.0 + 0.5);
+
+                set_dot(px, static_cast<std::size_t>(y));
+                if (prev_y >= 0 && std::abs(y - prev_y) > 1) {
+                    const int lo = std::min(prev_y, y);
+                    const int hi = std::max(prev_y, y);
+                    for (int bridge = lo + 1; bridge < hi; ++bridge)
+                        set_dot(px, static_cast<std::size_t>(bridge));
+                }
+                prev_y = y;
             }
 
-            if (count < width)
-                graph.append(width - count, ' ');
+            std::string graph;
+            for (unsigned char mask : cells) {
+                if (mask == 0U)
+                    graph.push_back(' ');
+                else
+                    graph += utf8_codepoint(0x2800U + mask);
+            }
             return graph;
         };
 
@@ -1975,7 +2041,7 @@ void Client::report_stats(bool force)
                 trend
                     << dim << "180s " << reset
                     << green
-                    << sparkline(total_history, total_graph_width)
+                    << braille_line(total_history, total_graph_width, 180U)
                     << reset;
                 hashrate_rows.push_back(trend.str());
             }
@@ -2045,29 +2111,26 @@ void Client::report_stats(bool force)
                 const std::string aqua = "\x1b[38;2;32;224;255m";
                 const std::string faint = "\x1b[38;2;95;120;105m";
 
-                // This panel is an activity indicator, not a detailed mascot.
-                // Alternate every three seconds between a raised pickaxe and
-                // a strike frame with a visibly chipped block and debris.
                 std::vector<std::string> mascot_rows;
                 if (frame_index == 0U) {
                     mascot_rows = {
-                        gold + "        ◢██◣        ⛏      " + reset,
-                        lime + "         ◉        ╱         " + reset,
-                        lime + "        ╱█╲      ╱          " + reset,
-                        aqua + "        ╱ ╲          ███    " + reset,
-                        aqua + "                     ███    " + reset,
-                        faint + "                  waiting   " + reset,
-                        green + "                 MINING...  " + reset
+                        faint + "          WORKING          " + reset,
+                        gold  + "              ╱⛏          " + reset,
+                        gold  + "             ╱             " + reset,
+                        aqua  + "        ┌──────────┐        " + reset,
+                        aqua  + "        │  BLOCK   │        " + reset,
+                        aqua  + "        └──────────┘        " + reset,
+                        lime  + "           MINING           " + reset
                     };
                 } else {
                     mascot_rows = {
-                        gold + "        ◢██◣               " + reset,
-                        lime + "         ◉       ⛏          " + reset,
-                        lime + "        ╱█╲──────╱           " + reset,
-                        aqua + "        ╱ ╲       " + gold + "✦" + aqua + " ██     " + reset,
-                        aqua + "                  ███       " + reset,
-                        gold + "               ✦  ·  ✦      " + reset,
-                        green + "                 MINING...  " + reset
+                        faint + "          WORKING          " + reset,
+                        gold  + "         ⛏╲  " + lime + "✦" + gold + "            " + reset,
+                        gold  + "           ╲ " + lime + "✦ ·" + gold + "          " + reset,
+                        aqua  + "        ┌────" + gold + "╱" + aqua + "─────┐       " + reset,
+                        aqua  + "        │ BLO" + gold + "╱" + aqua + "K    │       " + reset,
+                        aqua  + "        └──────────┘        " + reset,
+                        lime  + "           MINING           " + reset
                     };
                 }
 
@@ -2149,9 +2212,10 @@ void Client::report_stats(bool force)
                 << prefix.str()
                 << dim << "60s " << reset
                 << yellow
-                << sparkline(
+                << braille_line(
                        cpu_history,
-                       graph_width)
+                       graph_width,
+                       60U)
                 << reset;
 
             frame << line(cpu.str());
@@ -2197,9 +2261,10 @@ void Client::report_stats(bool force)
                 << prefix.str()
                 << dim << "60s " << reset
                 << cyan
-                << sparkline(
+                << braille_line(
                        gpu_history[gpu.id],
-                       graph_width)
+                       graph_width,
+                       60U)
                 << reset;
 
             frame << line(gpu_line.str());
