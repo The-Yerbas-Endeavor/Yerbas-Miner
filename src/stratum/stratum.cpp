@@ -2338,8 +2338,8 @@ void Client::report_stats(bool force)
                 << fit(connection, 12)
                 << reset
                 << "  "
-                << bold << "UP " << reset
-                << fit(format_duration(uptime), 12);
+                << bold << "UPTIME " << reset
+                << fit(format_duration(uptime), 14);
             frame << line(status.str());
         }
 
