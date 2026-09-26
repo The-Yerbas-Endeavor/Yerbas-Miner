@@ -2131,7 +2131,7 @@ void Client::report_stats(bool force)
             display_width(top_left);
 
         std::ostringstream frame;
-        frame << "\x1b[H";
+        frame << "\x1b[H\x1b[J";
 
         frame << green
               << "╭"
@@ -2556,13 +2556,12 @@ void Client::report_stats(bool force)
                 << fit("WORKER", 8)
                 << fit("NOW", 12)
                 << fit("AVG", 12)
-                << fit("LOW", 12)
-                << fit("HIGH", 12)
                 << fit("TEMP", 8)
                 << fit("POWER", 10)
                 << fit("FAN", 7)
                 << fit("BATCH", 9)
                 << fit("ACCEPT", 8)
+                << "60s TREND"
                 << reset;
             frame << line(header.str());
         }
@@ -2578,8 +2577,6 @@ void Client::report_stats(bool force)
                 << reset
                 << fit(format_rate(cpu_hps), 12)
                 << fit(format_rate(stats.avg), 12)
-                << fit(format_rate(stats.low), 12)
-                << fit(format_rate(stats.high), 12)
                 << fit(
                        yerbas::console::detail::
                            format_temperature(cpu_telemetry),
@@ -2594,27 +2591,23 @@ void Client::report_stats(bool force)
                        std::to_string(
                            g_source_accepted["CPU"]),
                        8);
-            frame << line(row.str());
 
-            const std::size_t graph_indent = 8U;
+            const std::size_t used =
+                display_width(row.str());
             const std::size_t graph_width =
-                inner_width > graph_indent + 10U
-                    ? inner_width - graph_indent - 6U
+                inner_width > used + 8U
+                    ? inner_width - used - 8U
                     : 24U;
             const auto graph =
                 area_graph(cpu_history, graph_width, 60U);
 
-            std::ostringstream top;
-            top << std::string(graph_indent, ' ')
-                << dim << "60s " << reset
-                << yellow << graph[0] << reset;
-            frame << line(top.str());
-
-            std::ostringstream bottom;
-            bottom << std::string(graph_indent + 4U, ' ')
-                   << yellow << graph[1] << reset
-                   << " " << yellow << "●" << reset;
-            frame << line(bottom.str());
+            row
+                << yellow
+                << graph[1]
+                << reset
+                << " "
+                << yellow << "●" << reset;
+            frame << line(row.str());
         }
 
         for (std::size_t gpu_index = 0U;
@@ -2635,19 +2628,17 @@ void Client::report_stats(bool force)
                 << reset
                 << fit(format_rate(gpu.hps), 12)
                 << fit(format_rate(stats.avg), 12)
-                << fit(format_rate(stats.low), 12)
-                << fit(format_rate(stats.high), 12)
                 << fit(gpu.temp, 8)
                 << fit(gpu.power, 10)
                 << fit(gpu.fan, 7)
                 << fit(std::to_string(gpu.batch), 9)
                 << fit(std::to_string(gpu.accepted), 8);
-            frame << line(row.str());
 
-            const std::size_t graph_indent = 8U;
+            const std::size_t used =
+                display_width(row.str());
             const std::size_t graph_width =
-                inner_width > graph_indent + 10U
-                    ? inner_width - graph_indent - 6U
+                inner_width > used + 8U
+                    ? inner_width - used - 8U
                     : 24U;
             const auto graph =
                 area_graph(
@@ -2655,17 +2646,13 @@ void Client::report_stats(bool force)
                     graph_width,
                     60U);
 
-            std::ostringstream top;
-            top << std::string(graph_indent, ' ')
-                << dim << "60s " << reset
-                << worker_color << graph[0] << reset;
-            frame << line(top.str());
-
-            std::ostringstream bottom;
-            bottom << std::string(graph_indent + 4U, ' ')
-                   << worker_color << graph[1] << reset
-                   << " " << worker_color << "●" << reset;
-            frame << line(bottom.str());
+            row
+                << worker_color
+                << graph[1]
+                << reset
+                << " "
+                << worker_color << "●" << reset;
+            frame << line(row.str());
         }
 
         frame << section("SHARES / WORK");
