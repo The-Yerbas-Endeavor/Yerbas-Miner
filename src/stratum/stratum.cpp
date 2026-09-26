@@ -1919,54 +1919,170 @@ void Client::report_stats(bool force)
             frame << line(work.str());
         }
 
-        frame << section("HASHRATE / 3 MIN");
-
-        const std::size_t total_graph_label_width = 7U;
-        const std::size_t total_graph_width =
-            inner_width > total_graph_label_width + 4U
-                ? inner_width - total_graph_label_width - 4U
-                : 60U;
-
-        const auto [history_low, history_high] =
-            history_range(total_history, total_graph_width);
-
-        double history_average = 0.0;
-        if (!total_history.empty()) {
-            const std::size_t average_count =
-                std::min<std::size_t>(180U, total_history.size());
-            const auto average_begin =
-                total_history.end() -
-                static_cast<std::ptrdiff_t>(average_count);
-            history_average =
-                std::accumulate(average_begin, total_history.end(), 0.0) /
-                static_cast<double>(average_count);
-        }
-
         {
-            std::ostringstream stats;
-            stats
-                << green << bold << "NOW " << reset
-                << fit(format_rate(total_hps), 11)
-                << "  AVG "
-                << fit(format_rate(history_average), 11)
-                << "  LOW "
-                << fit(format_rate(history_low), 11)
-                << "  HIGH "
-                << fit(format_rate(history_high), 11)
-                << "  WINDOW 180s";
-            frame << line(stats.str());
-        }
+            const std::size_t panel_gap = 2U;
+            const std::size_t mascot_panel_width =
+                inner_width >= 140U ? 30U : 0U;
+            const std::size_t hashrate_panel_width =
+                mascot_panel_width > 0U
+                    ? inner_width - mascot_panel_width - panel_gap
+                    : inner_width;
 
-        {
-            std::ostringstream trend;
-            trend
-                << dim << "180s " << reset
-                << green
-                << sparkline(total_history, total_graph_width)
-                << reset
-                << " "
-                << bold << "now" << reset;
-            frame << line(trend.str());
+            const std::size_t total_graph_label_width = 7U;
+            const std::size_t total_graph_width =
+                hashrate_panel_width > total_graph_label_width + 6U
+                    ? hashrate_panel_width - total_graph_label_width - 6U
+                    : 40U;
+
+            const auto [history_low, history_high] =
+                history_range(total_history, total_graph_width);
+
+            double history_average = 0.0;
+            if (!total_history.empty()) {
+                const std::size_t average_count =
+                    std::min<std::size_t>(180U, total_history.size());
+                const auto average_begin =
+                    total_history.end() -
+                    static_cast<std::ptrdiff_t>(average_count);
+                history_average =
+                    std::accumulate(average_begin, total_history.end(), 0.0) /
+                    static_cast<double>(average_count);
+            }
+
+            std::vector<std::string> hashrate_rows;
+            {
+                std::ostringstream stats;
+                stats
+                    << green << bold << "NOW " << reset
+                    << fit(format_rate(total_hps), 11)
+                    << " AVG "
+                    << fit(format_rate(history_average), 11)
+                    << " LOW "
+                    << fit(format_rate(history_low), 11)
+                    << " HIGH "
+                    << fit(format_rate(history_high), 11)
+                    << " 180s";
+                hashrate_rows.push_back(stats.str());
+            }
+            {
+                std::ostringstream trend;
+                trend
+                    << dim << "180s " << reset
+                    << green
+                    << sparkline(total_history, total_graph_width)
+                    << reset
+                    << ' '
+                    << bold << "now" << reset;
+                hashrate_rows.push_back(trend.str());
+            }
+
+            const auto make_panel = [&](const std::string& title,
+                                        const std::vector<std::string>& body,
+                                        std::size_t width) {
+                std::vector<std::string> out;
+                const std::size_t inner =
+                    width > 2U ? width - 2U : 0U;
+
+                std::ostringstream top;
+                top << green << "╭─[ " << title << " ]";
+                const std::size_t title_used =
+                    5U + title.size();
+                top << repeat("─",
+                              inner > title_used
+                                  ? inner - title_used
+                                  : 0U)
+                    << "╮" << reset;
+                out.push_back(top.str());
+
+                for (const auto& row : body) {
+                    std::string fitted = row;
+                    const std::size_t used =
+                        display_width(fitted);
+                    if (used < inner)
+                        fitted.append(inner - used, ' ');
+                    out.push_back(
+                        green + "│" + reset +
+                        fitted +
+                        green + "│" + reset);
+                }
+
+                std::ostringstream bottom;
+                bottom << green << "╰"
+                       << repeat("─", inner)
+                       << "╯" << reset;
+                out.push_back(bottom.str());
+                return out;
+            };
+
+            auto hashrate_box =
+                make_panel("HASHRATE / 3 MIN",
+                           hashrate_rows,
+                           hashrate_panel_width);
+
+            if (mascot_panel_width > 0U) {
+                const std::uint64_t animation_step =
+                    uptime_seconds / 3ULL;
+                const std::size_t frame_index =
+                    static_cast<std::size_t>(
+                        animation_step % 2ULL);
+
+                std::vector<std::string> mascot_rows;
+                if (frame_index == 0U) {
+                    mascot_rows = {
+                        green + "      _O_        " + reset,
+                        green + "    _/| \\_   ⛏   " + reset,
+                        cyan  + "      |      □    " + reset,
+                        cyan  + "     / \\   □■    " + reset,
+                        dim   + "          ·  ·     " + reset
+                    };
+                } else {
+                    mascot_rows = {
+                        green + "      _O_        " + reset,
+                        green + "    _/|\\_      " + reset,
+                        cyan  + "      | \\⛏  *□   " + reset,
+                        cyan  + "     / \\   ■□    " + reset,
+                        dim   + "         * · ·     " + reset
+                    };
+                }
+
+                auto mascot_box =
+                    make_panel("PROOF OF GRASS",
+                               mascot_rows,
+                               mascot_panel_width);
+
+                const std::size_t rows =
+                    std::max(hashrate_box.size(),
+                             mascot_box.size());
+
+                for (std::size_t i = 0U; i < rows; ++i) {
+                    std::string left =
+                        i < hashrate_box.size()
+                            ? hashrate_box[i]
+                            : std::string(
+                                  hashrate_panel_width, ' ');
+                    std::string right =
+                        i < mascot_box.size()
+                            ? mascot_box[i]
+                            : std::string(
+                                  mascot_panel_width, ' ');
+
+                    const std::size_t left_width =
+                        display_width(left);
+                    if (left_width < hashrate_panel_width)
+                        left.append(
+                            hashrate_panel_width - left_width,
+                            ' ');
+
+                    frame
+                        << left
+                        << std::string(panel_gap, ' ')
+                        << right
+                        << '\n';
+                }
+            } else {
+                for (const auto& row : hashrate_box)
+                    frame << row << '\n';
+            }
         }
 
         frame << section("WORKERS");
