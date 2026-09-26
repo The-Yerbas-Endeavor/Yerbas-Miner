@@ -2356,7 +2356,7 @@ void Client::report_stats(bool force)
                 << bold << "DIFF " << reset
                 << fit(diff_text.str(), 13)
                 << "  "
-                << bold << "ROT " << reset
+                << bold << "ROTATION " << reset
                 << fit(rotation_text.str(), 16)
                 << "  "
                 << bold << "CN " << reset
