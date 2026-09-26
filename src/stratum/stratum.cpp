@@ -2762,6 +2762,17 @@ void Client::report_stats(bool force)
             frame << line(row.str());
         }
 
+        {
+            const std::size_t divider_width =
+                inner_width > 2U ? inner_width - 2U : inner_width;
+            frame << line(
+                dim + std::string(
+                    divider_width > 12U
+                        ? divider_width
+                        : 12U,
+                    '-') + reset);
+        }
+
         if (config_.miner.cpu_enabled) {
             const auto stats =
                 history_stats(cpu_history, 3600U);
