@@ -2222,7 +2222,8 @@ void Client::report_stats(bool force)
                 const std::string& color,
                 const std::vector<double>& history,
                 double now_value,
-                std::size_t sample_limit) {
+                std::size_t sample_limit,
+                double session_average = -1.0) {
                 const auto stats =
                     history_stats(history, sample_limit);
                 const std::size_t graph_width =
@@ -2240,7 +2241,15 @@ void Client::report_stats(bool force)
                     << " NOW "
                     << fit(format_rate(now_value), 10)
                     << " AVG "
-                    << fit(format_rate(stats.avg), 10)
+                    << fit(format_rate(stats.avg), 10);
+
+                if (session_average >= 0.0) {
+                    header
+                        << " SESSION AVG "
+                        << fit(format_rate(session_average), 10);
+                }
+
+                header
                     << " LOW "
                     << fit(format_rate(stats.low), 10)
                     << " HIGH "
@@ -2271,7 +2280,8 @@ void Client::report_stats(bool force)
                 green,
                 total_history,
                 total_hps,
-                180U);
+                180U,
+                average_hps);
 
             append_source_trend(
                 "CPU",
