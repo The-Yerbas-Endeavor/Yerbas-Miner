@@ -2043,29 +2043,31 @@ void Client::report_stats(bool force)
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
                 const std::string aqua = "\x1b[38;2;32;224;255m";
-                const std::string grass = "\x1b[38;2;80;255;80m";
                 const std::string faint = "\x1b[38;2;95;120;105m";
 
+                // This panel is an activity indicator, not a detailed mascot.
+                // Alternate every three seconds between a raised pickaxe and
+                // a strike frame with a visibly chipped block and debris.
                 std::vector<std::string> mascot_rows;
                 if (frame_index == 0U) {
                     mascot_rows = {
-                        gold  + "       ▄▄▄▄▄             " + reset,
-                        gold  + "      █▀" + lime + "●" + gold + "▀██      " + lime + "▄      " + reset,
-                        lime  + "     ▄██▄██▄    ▄" + gold + "╱" + lime + "▀      " + reset,
-                        grass + "      ▀███▀  ▄██▀        " + reset,
-                        aqua  + "      ▄▀ ▀▄       " + lime + "◆◆      " + reset,
-                        aqua  + "     ▀   ▀      " + lime + "◆" + aqua + "╲╱" + lime + "◆     " + reset,
-                        faint + "              ·  " + aqua + "◆◆" + faint + "  ·   " + reset
+                        gold + "        ◢██◣        ⛏      " + reset,
+                        lime + "         ◉        ╱         " + reset,
+                        lime + "        ╱█╲      ╱          " + reset,
+                        aqua + "        ╱ ╲          ███    " + reset,
+                        aqua + "                     ███    " + reset,
+                        faint + "                  waiting   " + reset,
+                        green + "                 MINING...  " + reset
                     };
                 } else {
                     mascot_rows = {
-                        gold  + "       ▄▄▄▄▄             " + reset,
-                        gold  + "      █▀" + lime + "●" + gold + "▀██             " + reset,
-                        lime  + "     ▄██▄██▄        " + gold + "╲▄" + reset,
-                        grass + "      ▀███▀  ▄▄▄▄▄" + gold + "╲" + reset,
-                        aqua  + "      ▄▀ ▀▄      " + gold + "✦" + lime + "◆◆    " + reset,
-                        aqua  + "     ▀   ▀     " + gold + "✦ " + lime + "◆" + aqua + "╲╱" + lime + "◆   " + reset,
-                        faint + "            ·  · " + aqua + "◆◆" + faint + "  ·  " + reset
+                        gold + "        ◢██◣               " + reset,
+                        lime + "         ◉       ⛏          " + reset,
+                        lime + "        ╱█╲──────╱           " + reset,
+                        aqua + "        ╱ ╲       " + gold + "✦" + aqua + " ██     " + reset,
+                        aqua + "                  ███       " + reset,
+                        gold + "               ✦  ·  ✦      " + reset,
+                        green + "                 MINING...  " + reset
                     };
                 }
 
