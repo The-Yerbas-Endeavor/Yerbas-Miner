@@ -2389,90 +2389,134 @@ void Client::report_stats(bool force)
 
                 std::vector<std::string> mascot_rows;
 
-                if (visual_state == MiningVisualState::Idle) {
-                    mascot_rows = {
-                        state_color + "          " + state_label + reset,
-                        faint + "              /\\          " + reset,
-                        faint + "             /  \\         " + reset,
-                        aqua  + "        [###########]        " + reset,
-                        faint + "          no active work     " + reset,
-                        dim   + "        " + rate_line.str() + reset,
-                        dim   + "        " + waste_line.str() + reset
-                    };
-                } else if (visual_state == MiningVisualState::Accepted) {
-                    mascot_rows = {
-                        state_color + "        ✓ ACCEPTED         " + reset,
-                        gold + "            \\ | /          " + reset,
-                        gold + "             \\|/           " + reset,
-                        aqua + "        [####*######]        " + reset,
-                        green + "          share credited     " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
-                } else if (visual_state == MiningVisualState::Rejected) {
-                    mascot_rows = {
-                        state_color + "        ! REJECTED         " + reset,
-                        red + "             \\ | /          " + reset,
-                        red + "              \\|/           " + reset,
-                        aqua + "        [####!######]        " + reset,
-                        red + "          pool rejected       " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
-                } else if (visual_state == MiningVisualState::ShareFound) {
-                    mascot_rows = {
-                        state_color + "       SHARE FOUND        " + reset,
-                        gold + "              \\*           " + reset,
-                        gold + "               \\           " + reset,
-                        aqua + "        [###/#######]        " + reset,
-                        gold + "          submitting...       " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
-                } else if (visual_state == MiningVisualState::NewJob) {
-                    mascot_rows = {
-                        state_color + "          NEW JOB          " + reset,
-                        cyan + "              ->            " + reset,
-                        cyan + "        [###########]        " + reset,
-                        faint + "          target changed     " + reset,
-                        lime + "          resuming work       " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
-                } else if (visual_state == MiningVisualState::Stalled) {
-                    mascot_rows = {
-                        state_color + "          STALLED          " + reset,
-                        red + "              ||            " + reset,
-                        aqua + "        [###########]        " + reset,
-                        red + "        no hash progress      " + reset,
-                        faint + "          check worker       " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
-                } else if (frame_index == 0U) {
-                    mascot_rows = {
-                        state_color + "          HASHING          " + reset,
-                        gold + "              /\\           " + reset,
-                        gold + "             /  \\          " + reset,
-                        aqua + "        [###########]        " + reset,
-                        faint + "          work advancing     " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
-                } else {
-                    mascot_rows = {
-                        state_color + "          HASHING          " + reset,
-                        gold + "                 \\ *        " + reset,
-                        gold + "                  \\         " + reset,
-                        aqua + "        [####/######]        " + reset,
-                        faint + "          work advancing     " + reset,
-                        dim + "        " + rate_line.str() + reset,
-                        dim + "        " + waste_line.str() + reset
-                    };
+                const auto block_fill = [&](
+                    int filled,
+                    char crack) {
+                    filled = std::clamp(filled, 0, 10);
+                    std::string block = "[";
+                    for (int i = 0; i < 10; ++i) {
+                        if (i == 5 && crack != '\0')
+                            block.push_back(crack);
+                        else
+                            block += i < filled ? "█" : "░";
+                    }
+                    block += "]";
+                    return block;
+                };
+
+                int work_fill = 0;
+                if (total_hps > 0.0 && history_average > 0.0) {
+                    work_fill = static_cast<int>(
+                        std::clamp(
+                            total_hps / history_average,
+                            0.0,
+                            1.0) * 10.0 + 0.5);
+                } else if (total_hps > 0.0) {
+                    work_fill = 5;
                 }
 
+                std::string block_color = aqua;
+                std::string status_text = "IDLE";
+                std::string detail_text = "waiting for work";
+                char crack = '\0';
+
+                switch (visual_state) {
+                    case MiningVisualState::Idle:
+                        work_fill = 0;
+                        block_color = faint;
+                        status_text = "IDLE";
+                        detail_text = "waiting for job";
+                        break;
+                    case MiningVisualState::Hashing:
+                        block_color = aqua;
+                        status_text = "HASHING";
+                        detail_text =
+                            frame_index == 0U
+                                ? "work advancing"
+                                : "scanning block";
+                        crack =
+                            frame_index == 0U ? '\0' : '/';
+                        break;
+                    case MiningVisualState::Stalled:
+                        block_color = red;
+                        status_text = "STALLED";
+                        detail_text = "no hash progress";
+                        crack = '!';
+                        break;
+                    case MiningVisualState::NewJob:
+                        work_fill = 1;
+                        block_color = cyan;
+                        status_text = "NEW JOB";
+                        detail_text = "block work reset";
+                        break;
+                    case MiningVisualState::ShareFound:
+                        work_fill = 10;
+                        block_color = gold;
+                        status_text = "SHARE FOUND";
+                        detail_text = "submitting";
+                        crack = '/';
+                        break;
+                    case MiningVisualState::Accepted:
+                        work_fill = 10;
+                        block_color = green;
+                        status_text = "ACCEPTED";
+                        detail_text = "share credited";
+                        crack = '*';
+                        break;
+                    case MiningVisualState::Rejected:
+                        work_fill = 10;
+                        block_color = red;
+                        status_text = "REJECTED";
+                        detail_text = "pool rejected";
+                        crack = '!';
+                        break;
+                }
+
+                const std::string block =
+                    block_fill(work_fill, crack);
+
+                std::ostringstream status_line;
+                status_line
+                    << state_color << bold
+                    << "STATUS " << status_text
+                    << reset;
+
+                std::ostringstream block_line;
+                block_line
+                    << block_color << block << reset;
+
+                std::ostringstream detail_line;
+                detail_line
+                    << dim << detail_text << reset;
+
+                std::ostringstream rate_line;
+                rate_line
+                    << "RATE   " << format_rate(total_hps);
+
+                std::ostringstream waste_line;
+                waste_line
+                    << "WASTE  " << gpu_waste_text.str();
+
+                std::ostringstream shares_line;
+                shares_line
+                    << "SHARES "
+                    << shares_accepted_
+                    << "/"
+                    << shares_rejected_;
+
+                mascot_rows = {
+                    status_line.str(),
+                    "",
+                    block_line.str(),
+                    detail_line.str(),
+                    "",
+                    rate_line.str(),
+                    waste_line.str(),
+                    shares_line.str()
+                };
+
                 auto mascot_box =
-                    make_panel("PROOF OF GRASS",
+                    make_panel("BLOCK WORK",
                                mascot_rows,
                                mascot_panel_width);
 
