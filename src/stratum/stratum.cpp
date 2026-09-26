@@ -1550,6 +1550,26 @@ void Client::report_stats(bool force)
         static std::vector<double> cpu_history;
         static std::unordered_map<int, std::vector<double>> gpu_history;
 
+        enum class MiningVisualState {
+            Idle,
+            Hashing,
+            Stalled,
+            NewJob,
+            ShareFound,
+            Accepted,
+            Rejected
+        };
+
+        static bool visual_initialized = false;
+        static MiningVisualState visual_state = MiningVisualState::Idle;
+        static std::uint64_t visual_last_hashes = 0U;
+        static std::uint64_t visual_last_submitted = 0U;
+        static std::uint64_t visual_last_accepted = 0U;
+        static std::uint64_t visual_last_rejected = 0U;
+        static std::string visual_last_job;
+        static std::chrono::steady_clock::time_point visual_event_until{};
+        static std::chrono::steady_clock::time_point visual_last_progress{};
+
         const double telemetry_age =
             telemetry_updated.time_since_epoch().count() == 0
                 ? std::numeric_limits<double>::infinity()
@@ -1850,6 +1870,73 @@ void Client::report_stats(bool force)
         for (const auto& gpu : gpu_views)
             push_history(
                 gpu_history[gpu.id], gpu.hps);
+
+        if (!visual_initialized) {
+            visual_initialized = true;
+            visual_last_hashes = hashes_done_;
+            visual_last_submitted = shares_submitted_;
+            visual_last_accepted = shares_accepted_;
+            visual_last_rejected = shares_rejected_;
+            visual_last_job = job_.valid ? job_.job_id : std::string{};
+            visual_last_progress = now;
+            visual_state =
+                authorized_ && job_.valid
+                    ? MiningVisualState::Hashing
+                    : MiningVisualState::Idle;
+        } else {
+            const bool hashes_advanced =
+                hashes_done_ > visual_last_hashes;
+            if (hashes_advanced)
+                visual_last_progress = now;
+
+            const bool job_changed =
+                job_.valid &&
+                !job_.job_id.empty() &&
+                job_.job_id != visual_last_job;
+            const bool submitted_changed =
+                shares_submitted_ > visual_last_submitted;
+            const bool accepted_changed =
+                shares_accepted_ > visual_last_accepted;
+            const bool rejected_changed =
+                shares_rejected_ > visual_last_rejected;
+
+            if (rejected_changed) {
+                visual_state = MiningVisualState::Rejected;
+                visual_event_until =
+                    now + std::chrono::seconds(2);
+            } else if (accepted_changed) {
+                visual_state = MiningVisualState::Accepted;
+                visual_event_until =
+                    now + std::chrono::seconds(2);
+            } else if (submitted_changed) {
+                visual_state = MiningVisualState::ShareFound;
+                visual_event_until =
+                    now + std::chrono::seconds(2);
+            } else if (job_changed) {
+                visual_state = MiningVisualState::NewJob;
+                visual_event_until =
+                    now + std::chrono::seconds(1);
+            } else if (now >= visual_event_until) {
+                if (!authorized_ || !job_.valid) {
+                    visual_state = MiningVisualState::Idle;
+                } else {
+                    const double no_progress_seconds =
+                        std::chrono::duration<double>(
+                            now - visual_last_progress).count();
+                    visual_state =
+                        no_progress_seconds >= 3.0
+                            ? MiningVisualState::Stalled
+                            : MiningVisualState::Hashing;
+                }
+            }
+
+            visual_last_hashes = hashes_done_;
+            visual_last_submitted = shares_submitted_;
+            visual_last_accepted = shares_accepted_;
+            visual_last_rejected = shares_rejected_;
+            visual_last_job =
+                job_.valid ? job_.job_id : std::string{};
+        }
 
         std::ostringstream diff_text;
         diff_text
@@ -2165,37 +2252,138 @@ void Client::report_stats(bool force)
                            hashrate_panel_width);
 
             if (mascot_panel_width > 0U) {
-                const std::uint64_t animation_step =
-                    uptime_seconds / 3ULL;
                 const std::size_t frame_index =
                     static_cast<std::size_t>(
-                        animation_step % 2ULL);
+                        (hashes_done_ / 2048ULL) % 2ULL);
 
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
                 const std::string aqua = "\x1b[38;2;32;224;255m";
                 const std::string faint = "\x1b[38;2;95;120;105m";
 
+                std::string state_label;
+                std::string state_color = faint;
+
+                switch (visual_state) {
+                    case MiningVisualState::Idle:
+                        state_label = "IDLE";
+                        state_color = faint;
+                        break;
+                    case MiningVisualState::Hashing:
+                        state_label = "HASHING";
+                        state_color = lime;
+                        break;
+                    case MiningVisualState::Stalled:
+                        state_label = "STALLED";
+                        state_color = red;
+                        break;
+                    case MiningVisualState::NewJob:
+                        state_label = "NEW JOB";
+                        state_color = cyan;
+                        break;
+                    case MiningVisualState::ShareFound:
+                        state_label = "SHARE FOUND";
+                        state_color = gold;
+                        break;
+                    case MiningVisualState::Accepted:
+                        state_label = "ACCEPTED";
+                        state_color = green;
+                        break;
+                    case MiningVisualState::Rejected:
+                        state_label = "REJECTED";
+                        state_color = red;
+                        break;
+                }
+
+                std::ostringstream rate_line;
+                rate_line
+                    << "RATE " << format_rate(total_hps);
+
+                std::ostringstream waste_line;
+                waste_line
+                    << "GPU WASTE " << gpu_waste_text.str();
+
                 std::vector<std::string> mascot_rows;
-                if (frame_index == 0U) {
+
+                if (visual_state == MiningVisualState::Idle) {
                     mascot_rows = {
-                        faint + "       MINER ACTIVE        " + reset,
-                        gold  + "          /\\             " + reset,
-                        gold  + "         /  \\            " + reset,
-                        gold  + "        /    \\           " + reset,
-                        aqua  + "                  [#####]   " + reset,
-                        aqua  + "                  [#####]   " + reset,
-                        lime  + "          WORKING...        " + reset
+                        state_color + "          " + state_label + reset,
+                        faint + "              /\\          " + reset,
+                        faint + "             /  \\         " + reset,
+                        aqua  + "        [###########]        " + reset,
+                        faint + "          no active work     " + reset,
+                        dim   + "        " + rate_line.str() + reset,
+                        dim   + "        " + waste_line.str() + reset
+                    };
+                } else if (visual_state == MiningVisualState::Accepted) {
+                    mascot_rows = {
+                        state_color + "        ✓ ACCEPTED         " + reset,
+                        gold + "            \\ | /          " + reset,
+                        gold + "             \\|/           " + reset,
+                        aqua + "        [####*######]        " + reset,
+                        green + "          share credited     " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
+                    };
+                } else if (visual_state == MiningVisualState::Rejected) {
+                    mascot_rows = {
+                        state_color + "        ! REJECTED         " + reset,
+                        red + "             \\ | /          " + reset,
+                        red + "              \\|/           " + reset,
+                        aqua + "        [####!######]        " + reset,
+                        red + "          pool rejected       " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
+                    };
+                } else if (visual_state == MiningVisualState::ShareFound) {
+                    mascot_rows = {
+                        state_color + "       SHARE FOUND        " + reset,
+                        gold + "              \\*           " + reset,
+                        gold + "               \\           " + reset,
+                        aqua + "        [###/#######]        " + reset,
+                        gold + "          submitting...       " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
+                    };
+                } else if (visual_state == MiningVisualState::NewJob) {
+                    mascot_rows = {
+                        state_color + "          NEW JOB          " + reset,
+                        cyan + "              ->            " + reset,
+                        cyan + "        [###########]        " + reset,
+                        faint + "          target changed     " + reset,
+                        lime + "          resuming work       " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
+                    };
+                } else if (visual_state == MiningVisualState::Stalled) {
+                    mascot_rows = {
+                        state_color + "          STALLED          " + reset,
+                        red + "              ||            " + reset,
+                        aqua + "        [###########]        " + reset,
+                        red + "        no hash progress      " + reset,
+                        faint + "          check worker       " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
+                    };
+                } else if (frame_index == 0U) {
+                    mascot_rows = {
+                        state_color + "          HASHING          " + reset,
+                        gold + "              /\\           " + reset,
+                        gold + "             /  \\          " + reset,
+                        aqua + "        [###########]        " + reset,
+                        faint + "          work advancing     " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
                     };
                 } else {
                     mascot_rows = {
-                        faint + "       MINER ACTIVE        " + reset,
-                        gold  + "                 \\        " + reset,
-                        gold  + "                  \\  *    " + reset,
-                        gold  + "                   \\*     " + reset,
-                        aqua  + "                  [##/##]   " + reset,
-                        aqua  + "                  [#####]   " + reset,
-                        lime  + "          WORKING...        " + reset
+                        state_color + "          HASHING          " + reset,
+                        gold + "                 \\ *        " + reset,
+                        gold + "                  \\         " + reset,
+                        aqua + "        [####/######]        " + reset,
+                        faint + "          work advancing     " + reset,
+                        dim + "        " + rate_line.str() + reset,
+                        dim + "        " + waste_line.str() + reset
                     };
                 }
 
