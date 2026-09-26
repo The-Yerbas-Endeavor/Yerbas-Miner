@@ -2738,17 +2738,115 @@ void Client::report_stats(bool force)
             std::ostringstream header;
             header
                 << dim
-                << fit("WORKER", 8)
-                << fit("NOW", 12)
-                << fit("AVG", 12)
-                << fit("TEMP", 8)
-                << fit("POWER", 10)
-                << fit("FAN", 7)
-                << fit("BATCH", 9)
-                << fit("ACCEPT", 8)
+                << fit("WORKER", 7)
+                << fit("NOW", 11)
+                << fit("AVG", 11)
+                << fit("TEMP", 7)
+                << fit("POWER", 9)
+                << fit("FAN", 6)
+                << fit("BATCH", 8)
+                << fit("ACCEPT", 7)
                 << "60s TREND"
                 << reset;
             frame << line(header.str());
+        }
+
+        {
+            const auto total_stats =
+                history_stats(total_history, 60U);
+
+            double total_power_w = 0.0;
+            bool total_power_available = false;
+            double hottest_c = 0.0;
+            bool hottest_available = false;
+
+            if (config_.miner.cpu_enabled) {
+                if (cpu_telemetry.power_available) {
+                    total_power_w += cpu_telemetry.watts;
+                    total_power_available = true;
+                }
+                if (cpu_telemetry.temperature_available) {
+                    hottest_c = cpu_telemetry.temperature_c;
+                    hottest_available = true;
+                }
+            }
+
+            for (const auto& gpu : gpu_views) {
+                const auto telemetry_it =
+                    gpu_telemetry.devices.find(gpu.id);
+                if (telemetry_it == gpu_telemetry.devices.end())
+                    continue;
+
+                const auto& telemetry =
+                    telemetry_it->second;
+                if (telemetry.power_available) {
+                    total_power_w += telemetry.watts;
+                    total_power_available = true;
+                }
+                if (telemetry.temperature_available) {
+                    hottest_c =
+                        hottest_available
+                            ? std::max(
+                                  hottest_c,
+                                  telemetry.temperature_c)
+                            : telemetry.temperature_c;
+                    hottest_available = true;
+                }
+            }
+
+            std::ostringstream temp_text;
+            if (hottest_available)
+                temp_text
+                    << std::fixed
+                    << std::setprecision(0)
+                    << hottest_c << " C";
+            else
+                temp_text << "-";
+
+            std::ostringstream power_text;
+            if (total_power_available)
+                power_text
+                    << std::fixed
+                    << std::setprecision(1)
+                    << total_power_w << " W";
+            else
+                power_text << "-";
+
+            std::ostringstream row;
+            row
+                << green << bold
+                << fit("TOTAL", 7)
+                << reset
+                << fit(format_rate(total_hps), 11)
+                << fit(format_rate(total_stats.avg), 11)
+                << fit(temp_text.str(), 7)
+                << fit(power_text.str(), 9)
+                << fit("-", 6)
+                << fit("-", 8)
+                << fit(
+                       std::to_string(shares_accepted_),
+                       7);
+
+            const std::size_t used =
+                display_width(row.str());
+            const std::size_t graph_width =
+                inner_width > used + 8U
+                    ? inner_width - used - 8U
+                    : 24U;
+            const std::string graph =
+                sparkline_graph(
+                    total_history,
+                    graph_width,
+                    60U);
+
+            row
+                << dim << "│ " << reset
+                << green
+                << graph
+                << reset
+                << " "
+                << green << "●" << reset;
+            frame << line(row.str());
         }
 
         if (config_.miner.cpu_enabled) {
@@ -2758,24 +2856,24 @@ void Client::report_stats(bool force)
             std::ostringstream row;
             row
                 << yellow << bold
-                << fit("CPU", 8)
+                << fit("CPU", 7)
                 << reset
-                << fit(format_rate(cpu_hps), 12)
-                << fit(format_rate(stats.avg), 12)
+                << fit(format_rate(cpu_hps), 11)
+                << fit(format_rate(stats.avg), 11)
                 << fit(
                        yerbas::console::detail::
                            format_temperature(cpu_telemetry),
-                       8)
+                       7)
                 << fit(
                        yerbas::console::detail::
                            format_power(cpu_telemetry),
-                       10)
-                << fit("-", 7)
-                << fit("-", 9)
+                       9)
+                << fit("-", 6)
+                << fit("-", 8)
                 << fit(
                        std::to_string(
                            g_source_accepted["CPU"]),
-                       8);
+                       7);
 
             const std::size_t used =
                 display_width(row.str());
@@ -2813,15 +2911,15 @@ void Client::report_stats(bool force)
             std::ostringstream row;
             row
                 << worker_color << bold
-                << fit(label, 8)
+                << fit(label, 7)
                 << reset
-                << fit(format_rate(gpu.hps), 12)
-                << fit(format_rate(stats.avg), 12)
-                << fit(gpu.temp, 8)
-                << fit(gpu.power, 10)
-                << fit(gpu.fan, 7)
-                << fit(std::to_string(gpu.batch), 9)
-                << fit(std::to_string(gpu.accepted), 8);
+                << fit(format_rate(gpu.hps), 11)
+                << fit(format_rate(stats.avg), 11)
+                << fit(gpu.temp, 7)
+                << fit(gpu.power, 9)
+                << fit(gpu.fan, 6)
+                << fit(std::to_string(gpu.batch), 8)
+                << fit(std::to_string(gpu.accepted), 7);
 
             const std::size_t used =
                 display_width(row.str());
