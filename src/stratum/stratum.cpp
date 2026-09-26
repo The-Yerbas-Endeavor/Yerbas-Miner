@@ -101,6 +101,9 @@ std::uint64_t g_blocks_found = 0;
 bool g_dev_fee_switch_requested = false;
 std::string g_active_login_user;
 std::deque<std::string> g_recent_activity;
+std::chrono::steady_clock::time_point g_last_share_event_at{};
+bool g_last_share_event_accepted = false;
+std::string g_last_share_event_source;
 
 bool dev_fee_active(std::chrono::steady_clock::time_point mining_started)
 {
@@ -713,6 +716,9 @@ void Client::handle_message(const std::string& line)
             if (accepted) {
                 ++shares_accepted_;
                 ++g_source_accepted[source];
+                g_last_share_event_at = std::chrono::steady_clock::now();
+                g_last_share_event_accepted = true;
+                g_last_share_event_source = source;
                 record_activity("✓ share accepted  " + source + "  total=" + std::to_string(shares_accepted_));
 
                 std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset;
@@ -727,6 +733,9 @@ void Client::handle_message(const std::string& line)
                           << '\n';
             } else {
                 ++shares_rejected_;
+                g_last_share_event_at = std::chrono::steady_clock::now();
+                g_last_share_event_accepted = false;
+                g_last_share_event_source = source;
                 record_activity("! share rejected  " + source + "  total=" + std::to_string(shares_rejected_));
 
                 std::cout << timestamp() << kRejectBadge << " SHARE REJECTED " << kColorReset;
@@ -1408,6 +1417,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
             if (task.completed || !gpu_scan_ready(*task.worker)) continue;
 
             auto scan_result = take_gpu_scan_result(*task.worker);
+            task.worker->last_scan_ms = scan_result.scan_ms;
             auto candidates = std::move(scan_result.candidates);
             task.worker->hashes_done += task.count;
             hashes_done_ += task.count;
@@ -1512,6 +1522,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
             if (task.completed || !gpu_scan_ready(*task.worker)) continue;
 
             auto scan_result = take_gpu_scan_result(*task.worker);
+            task.worker->last_scan_ms = scan_result.scan_ms;
             auto candidates = std::move(scan_result.candidates);
             task.worker->hashes_done += task.count;
             hashes_done_ += task.count;
@@ -2566,131 +2577,91 @@ void Client::report_stats(bool force)
 
                 std::vector<std::string> mascot_rows;
 
-                const auto block_fill = [&](
-                    int filled,
-                    char crack) {
-                    filled = std::clamp(filled, 0, 10);
-                    std::string block = "[";
-                    for (int i = 0; i < 10; ++i) {
-                        if (i == 5 && crack != '\0')
-                            block.push_back(crack);
-                        else
-                            block += i < filled ? "█" : "░";
+                std::string operating_status = "IDLE";
+                std::string operating_color = faint;
+
+                if (authorized_ && job_.valid && target_ready_) {
+                    const double no_progress_seconds =
+                        visual_last_progress.time_since_epoch().count() == 0
+                            ? std::numeric_limits<double>::infinity()
+                            : std::chrono::duration<double>(
+                                  now - visual_last_progress).count();
+
+                    if (no_progress_seconds >= 3.0) {
+                        operating_status = "STALLED";
+                        operating_color = red;
+                    } else {
+                        operating_status = "HASHING";
+                        operating_color = lime;
                     }
-                    block += "]";
-                    return block;
-                };
-
-                int work_fill = 0;
-                if (total_hps > 0.0 && history_average > 0.0) {
-                    work_fill = static_cast<int>(
-                        std::clamp(
-                            total_hps / history_average,
-                            0.0,
-                            1.0) * 10.0 + 0.5);
-                } else if (total_hps > 0.0) {
-                    work_fill = 5;
                 }
-
-                std::string block_color = aqua;
-                std::string status_text = "IDLE";
-                std::string detail_text = "waiting for work";
-                char crack = '\0';
-
-                switch (visual_state) {
-                    case MiningVisualState::Idle:
-                        work_fill = 0;
-                        block_color = faint;
-                        status_text = "IDLE";
-                        detail_text = "waiting for job";
-                        break;
-                    case MiningVisualState::Hashing:
-                        block_color = aqua;
-                        status_text = "HASHING";
-                        detail_text =
-                            frame_index == 0U
-                                ? "work advancing"
-                                : "scanning block";
-                        crack =
-                            frame_index == 0U ? '\0' : '/';
-                        break;
-                    case MiningVisualState::Stalled:
-                        block_color = red;
-                        status_text = "STALLED";
-                        detail_text = "no hash progress";
-                        crack = '!';
-                        break;
-                    case MiningVisualState::NewJob:
-                        work_fill = 1;
-                        block_color = cyan;
-                        status_text = "NEW JOB";
-                        detail_text = "block work reset";
-                        break;
-                    case MiningVisualState::ShareFound:
-                        work_fill = 10;
-                        block_color = gold;
-                        status_text = "SHARE FOUND";
-                        detail_text = "submitting";
-                        crack = '/';
-                        break;
-                    case MiningVisualState::Accepted:
-                        work_fill = 10;
-                        block_color = green;
-                        status_text = "ACCEPTED";
-                        detail_text = "share credited";
-                        crack = '*';
-                        break;
-                    case MiningVisualState::Rejected:
-                        work_fill = 10;
-                        block_color = red;
-                        status_text = "REJECTED";
-                        detail_text = "pool rejected";
-                        crack = '!';
-                        break;
-                }
-
-                const std::string block =
-                    block_fill(work_fill, crack);
 
                 std::ostringstream status_line;
                 status_line
-                    << state_color << bold
-                    << "STATUS " << status_text
+                    << operating_color << bold
+                    << "STATUS " << operating_status
                     << reset;
 
-                std::ostringstream block_line;
-                block_line
-                    << block_color << block << reset;
+                std::ostringstream job_line;
+                job_line << "JOB AGE ";
+                if (active_job_received_at_.time_since_epoch().count() != 0) {
+                    const double job_age_seconds =
+                        std::chrono::duration<double>(
+                            now - active_job_received_at_).count();
+                    job_line << format_duration(job_age_seconds);
+                } else {
+                    job_line << "n/a";
+                }
 
-                std::ostringstream detail_line;
-                detail_line
-                    << dim << detail_text << reset;
+                mascot_rows.push_back(status_line.str());
+                mascot_rows.push_back(job_line.str());
+
+                for (const auto& worker : gpu_workers_) {
+                    std::ostringstream gpu_line;
+                    gpu_line
+                        << "GPU" << worker.device_id
+                        << " B" << worker.engine->batch_size()
+                        << "  ";
+                    if (worker.last_scan_ms > 0.0) {
+                        gpu_line
+                            << std::fixed
+                            << std::setprecision(1)
+                            << (worker.last_scan_ms / 1000.0)
+                            << "s";
+                    } else {
+                        gpu_line << "scan n/a";
+                    }
+                    mascot_rows.push_back(gpu_line.str());
+                }
 
                 std::ostringstream rate_line;
                 rate_line
-                    << "RATE   " << format_rate(total_hps);
+                    << "RATE  " << format_rate(total_hps);
+                mascot_rows.push_back(rate_line.str());
 
                 std::ostringstream waste_line;
                 waste_line
-                    << "WASTE  " << gpu_waste_text.str();
+                    << "WASTE " << gpu_waste_text.str();
+                mascot_rows.push_back(waste_line.str());
 
-                std::ostringstream shares_line;
-                shares_line
-                    << "SHARES "
-                    << shares_accepted_
-                    << "/"
-                    << shares_rejected_;
-
-                mascot_rows = {
-                    status_line.str(),
-                    "",
-                    block_line.str(),
-                    detail_line.str(),
-                    "",
-                    rate_line.str(),
-                    waste_line.str(),
-                    shares_line.str()
-                };
+                std::ostringstream last_share_line;
+                last_share_line << "LAST  ";
+                if (g_last_share_event_at.time_since_epoch().count() != 0) {
+                    const double age =
+                        std::chrono::duration<double>(
+                            now - g_last_share_event_at).count();
+                    last_share_line
+                        << (g_last_share_event_accepted ? "✓ " : "! ")
+                        << (g_last_share_event_accepted
+                                ? "ACCEPTED "
+                                : "REJECTED ")
+                        << format_duration(age);
+                    if (!g_last_share_event_source.empty())
+                        last_share_line << " " << g_last_share_event_source;
+                } else {
+                    last_share_line << "none yet";
+                }
+                mascot_rows.push_back(last_share_line.str());
 
                 auto mascot_box =
                     make_panel("BLOCK WORK",
