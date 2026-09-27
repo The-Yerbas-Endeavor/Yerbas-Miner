@@ -9,7 +9,9 @@ Outputs:
   batch_summary.csv       Per-source/per-fingerprint/per-GPU/per-batch scan stats.
   fingerprint_summary.csv Historical performance summary keyed by fingerprint.
   batch_comparison.csv    Same-hardware/same-fingerprint batch alternatives.
-  preferred_batch.csv      Evidence-based preferred batch per hardware/fingerprint.
+  preferred_batch.csv     Ranked preference with OBSERVED/CANDIDATE/VALIDATED state.
+  validated_batch.csv     Only preferences that satisfy validation thresholds.
+  coverage_report.csv     Dataset maturity and fingerprint coverage summary.
 """
 
 from __future__ import annotations
@@ -365,7 +367,48 @@ def main() -> int:
         default=Path("fingerprint-history"),
         help="Output directory (default: fingerprint-history).",
     )
+    parser.add_argument(
+        "--candidate-scans",
+        type=int,
+        default=8,
+        help="Minimum scans for CANDIDATE state (default: 8).",
+    )
+    parser.add_argument(
+        "--validated-scans",
+        type=int,
+        default=20,
+        help="Minimum scans for VALIDATED state (default: 20).",
+    )
+    parser.add_argument(
+        "--validated-sources",
+        type=int,
+        default=2,
+        help="Minimum independent source logs for VALIDATED state (default: 2).",
+    )
+    parser.add_argument(
+        "--min-win-pct",
+        type=float,
+        default=3.0,
+        help="Minimum effective-H/s win over runner-up for VALIDATED (default: 3.0).",
+    )
+    parser.add_argument(
+        "--max-stale-regression-pct",
+        type=float,
+        default=1.0,
+        help="Maximum stale-rate regression in percentage points for VALIDATED (default: 1.0).",
+    )
     args = parser.parse_args()
+
+    if args.candidate_scans < 1:
+        parser.error("--candidate-scans must be >= 1")
+    if args.validated_scans < args.candidate_scans:
+        parser.error("--validated-scans must be >= --candidate-scans")
+    if args.validated_sources < 1:
+        parser.error("--validated-sources must be >= 1")
+    if args.min_win_pct < 0.0:
+        parser.error("--min-win-pct must be >= 0")
+    if args.max_stale_regression_pct < 0.0:
+        parser.error("--max-stale-regression-pct must be >= 0")
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -570,29 +613,35 @@ def main() -> int:
         comparison_rows,
     )
 
-    # Recommend only from sufficiently sampled observations.  The threshold is
-    # deliberately generic: no model, architecture, vendor, or batch size is
-    # privileged.  Consumers may raise the threshold for stricter confidence.
-    min_preferred_scans = 8
+    # Build a conservative evidence ladder.  Nothing here is hardware-specific:
+    # every decision is scoped to hardware signature + fingerprint + CN mix.
     by_preference: dict[tuple, list[dict[str, float | int | str]]] = defaultdict(list)
     for stats in comparison_stats.values():
-        if int(stats["scans"]) >= min_preferred_scans:
-            by_preference[
-                (
-                    str(stats["hardware_signature"]),
-                    str(stats["fingerprint"]),
-                    str(stats["cn"]),
-                )
-            ].append(stats)
+        by_preference[
+            (
+                str(stats["hardware_signature"]),
+                str(stats["fingerprint"]),
+                str(stats["cn"]),
+            )
+        ].append(stats)
 
     preferred_rows = []
-    for (hardware_signature, fingerprint, cn), candidates in sorted(
+    validated_rows = []
+    state_counts = {"OBSERVED": 0, "CANDIDATE": 0, "VALIDATED": 0}
+    fingerprints_by_state = {
+        "OBSERVED": set(),
+        "CANDIDATE": set(),
+        "VALIDATED": set(),
+    }
+
+    for (hardware_signature, fingerprint, cn), all_candidates in sorted(
         by_preference.items()
     ):
-        if not candidates:
+        if not all_candidates:
             continue
 
-        candidates.sort(
+        ranked = sorted(
+            all_candidates,
             key=lambda x: (
                 float(x["effective_hps"]),
                 -float(x["stale_pct"]),
@@ -600,41 +649,144 @@ def main() -> int:
             ),
             reverse=True,
         )
-        best = candidates[0]
+        best = ranked[0]
+
+        qualified = [
+            x for x in ranked
+            if int(x["scans"]) >= args.candidate_scans
+        ]
+        runner_up = qualified[1] if len(qualified) >= 2 else None
+
+        state = "OBSERVED"
+        if len(qualified) >= 2 and best in qualified:
+            state = "CANDIDATE"
+
+        improvement_pct = math.nan
+        runner_up_batch = ""
+        runner_up_effective_hps = math.nan
+        runner_up_stale_pct = math.nan
+
+        if runner_up is not None:
+            runner_up_batch = int(runner_up["batch"])
+            runner_up_effective_hps = float(runner_up["effective_hps"])
+            runner_up_stale_pct = float(runner_up["stale_pct"])
+            if runner_up_effective_hps > 0.0:
+                improvement_pct = (
+                    (float(best["effective_hps"]) - runner_up_effective_hps)
+                    / runner_up_effective_hps
+                    * 100.0
+                )
+
+            enough_validation_data = (
+                int(best["scans"]) >= args.validated_scans
+                and int(best["sources"]) >= args.validated_sources
+            )
+            clear_win = (
+                math.isfinite(improvement_pct)
+                and improvement_pct >= args.min_win_pct
+            )
+            stale_is_safe = (
+                float(best["stale_pct"])
+                <= runner_up_stale_pct + args.max_stale_regression_pct
+            )
+
+            if (
+                state == "CANDIDATE"
+                and enough_validation_data
+                and clear_win
+                and stale_is_safe
+            ):
+                state = "VALIDATED"
 
         confidence = "low"
         scans = int(best["scans"])
         sources = int(best["sources"])
-        if scans >= 50 and sources >= 3:
+        if state == "VALIDATED":
             confidence = "high"
-        elif scans >= 20 and sources >= 2:
+        elif state == "CANDIDATE":
             confidence = "medium"
 
-        preferred_rows.append(
-            (
-                hardware_signature,
-                fingerprint,
-                cn,
-                int(best["batch"]),
-                scans,
-                sources,
-                int(best["devices"]),
-                f"{float(best['effective_hps']):.3f}",
-                f"{float(best['stale_pct']):.4f}",
-                f"{float(best['avg_scan_ms']):.3f}",
-                confidence,
-                len(candidates),
-            )
+        row = (
+            hardware_signature,
+            fingerprint,
+            cn,
+            state,
+            int(best["batch"]),
+            scans,
+            sources,
+            int(best["devices"]),
+            f"{float(best['effective_hps']):.3f}",
+            f"{float(best['stale_pct']):.4f}",
+            f"{float(best['avg_scan_ms']):.3f}",
+            runner_up_batch,
+            "" if not math.isfinite(runner_up_effective_hps)
+                else f"{runner_up_effective_hps:.3f}",
+            "" if not math.isfinite(runner_up_stale_pct)
+                else f"{runner_up_stale_pct:.4f}",
+            "" if not math.isfinite(improvement_pct)
+                else f"{improvement_pct:.3f}",
+            confidence,
+            len(all_candidates),
+            len(qualified),
         )
+        preferred_rows.append(row)
+        state_counts[state] += 1
+        fingerprints_by_state[state].add(fingerprint)
+
+        if state == "VALIDATED":
+            validated_rows.append(row)
+
+    preference_headers = [
+        "hardware_signature", "fingerprint", "cn", "state",
+        "preferred_batch", "scans", "sources", "devices",
+        "best_effective_hps", "best_stale_pct", "avg_scan_ms",
+        "runner_up_batch", "runner_up_effective_hps",
+        "runner_up_stale_pct", "improvement_pct", "confidence",
+        "observed_batches", "qualified_batches",
+    ]
 
     write_csv(
         args.output / "preferred_batch.csv",
-        [
-            "hardware_signature", "fingerprint", "cn", "preferred_batch",
-            "scans", "sources", "devices", "effective_hps", "stale_pct",
-            "avg_scan_ms", "confidence", "candidate_batches",
-        ],
+        preference_headers,
         preferred_rows,
+    )
+    write_csv(
+        args.output / "validated_batch.csv",
+        preference_headers,
+        validated_rows,
+    )
+
+    unique_batch_fingerprints = {b.fingerprint for b in batches}
+    multi_batch_fingerprints = {
+        fp
+        for fp in unique_batch_fingerprints
+        if len({b.batch for b in batches if b.fingerprint == fp}) > 1
+    }
+
+    coverage_rows = [
+        ("rotation_fingerprints", len(by_fp)),
+        ("batch_fingerprints", len(unique_batch_fingerprints)),
+        ("multi_batch_fingerprints", len(multi_batch_fingerprints)),
+        ("preference_groups", len(preferred_rows)),
+        ("observed_groups", state_counts["OBSERVED"]),
+        ("candidate_groups", state_counts["CANDIDATE"]),
+        ("validated_groups", state_counts["VALIDATED"]),
+        ("observed_fingerprints", len(fingerprints_by_state["OBSERVED"])),
+        ("candidate_fingerprints", len(fingerprints_by_state["CANDIDATE"])),
+        ("validated_fingerprints", len(fingerprints_by_state["VALIDATED"])),
+        ("candidate_scans_threshold", args.candidate_scans),
+        ("validated_scans_threshold", args.validated_scans),
+        ("validated_sources_threshold", args.validated_sources),
+        ("minimum_win_pct", f"{args.min_win_pct:.3f}"),
+        (
+            "maximum_stale_regression_percentage_points",
+            f"{args.max_stale_regression_pct:.3f}",
+        ),
+    ]
+    write_csv(
+        args.output / "coverage_report.csv",
+        ["metric", "value"],
+        coverage_rows,
     )
 
     print(
@@ -646,13 +798,21 @@ def main() -> int:
         f"{len(batches):,} latency batches."
     )
     print(f"Unique fingerprints: {len(by_fp):,}")
-    multi_batch = {
-        fp
-        for fp in {b.fingerprint for b in batches}
-        if len({b.batch for b in batches if b.fingerprint == fp}) > 1
-    }
-    print(f"Fingerprints with multiple observed batch sizes: {len(multi_batch):,}")
-    print(f"Preferred hardware/fingerprint/CN entries: {len(preferred_rows):,}")
+    print(
+        "Fingerprints with multiple observed batch sizes: "
+        f"{len(multi_batch_fingerprints):,}"
+    )
+    print(
+        "Preference groups: "
+        f"{len(preferred_rows):,} "
+        f"(OBSERVED={state_counts['OBSERVED']:,}, "
+        f"CANDIDATE={state_counts['CANDIDATE']:,}, "
+        f"VALIDATED={state_counts['VALIDATED']:,})"
+    )
+    print(
+        "Validated unique fingerprints: "
+        f"{len(fingerprints_by_state['VALIDATED']):,}"
+    )
     print(f"Wrote analysis to: {args.output}")
     return 0
 
