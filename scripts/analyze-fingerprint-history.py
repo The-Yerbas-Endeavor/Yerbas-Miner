@@ -352,6 +352,8 @@ def main() -> int:
                 f"{100.0 * stale_scans / len(samples):.4f}",
                 f"{mean(s.scan_ms for s in samples):.3f}",
                 f"{mean(s.wall_ms for s in samples):.3f}",
+                f"{mean((1000.0 * s.hashes / s.scan_ms) for s in samples if s.scan_ms > 0.0):.3f}",
+                f"{mean((1000.0 * s.hashes / s.wall_ms) for s in samples if s.wall_ms > 0.0 and not s.stale):.3f}",
                 f"{mean(s.useful_device_pct for s in samples):.4f}",
                 "" if target is None else f"{target:.1f}",
                 "" if floor is None else floor,
@@ -363,6 +365,7 @@ def main() -> int:
         [
             "source", "fingerprint", "gpu", "cn", "batch", "scans",
             "stale_scans", "stale_pct", "avg_scan_ms", "avg_wall_ms",
+            "avg_scan_hps", "avg_nonstale_wall_hps",
             "avg_useful_device_pct", "latency_target_ms", "min_batch",
         ],
         batch_rows,
@@ -424,6 +427,8 @@ def main() -> int:
                 stale_scans,
                 f"{100.0 * stale_scans / len(samples):.4f}",
                 f"{mean(s.scan_ms for s in samples):.3f}",
+                f"{mean((1000.0 * s.hashes / s.scan_ms) for s in samples if s.scan_ms > 0.0):.3f}",
+                f"{mean((1000.0 * s.hashes / s.wall_ms) for s in samples if s.wall_ms > 0.0 and not s.stale):.3f}",
                 f"{mean(s.useful_device_pct for s in samples):.4f}",
                 ";".join(
                     str(x)
@@ -439,6 +444,7 @@ def main() -> int:
         [
             "fingerprint", "gpu", "cn", "batch", "scans", "sources",
             "stale_scans", "stale_pct", "avg_scan_ms",
+            "avg_scan_hps", "avg_nonstale_wall_hps",
             "avg_useful_device_pct", "min_batch_values",
         ],
         comparison_rows,
