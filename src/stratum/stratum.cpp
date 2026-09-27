@@ -3555,6 +3555,16 @@ void Client::report_stats(bool force)
         }
 
         {
+            std::ostringstream current;
+            current
+                << fit("CURRENT HASHRATE", 18)
+                << green << bold
+                << format_rate(total_hps)
+                << reset;
+            frame << line(current.str());
+        }
+
+        {
             std::ostringstream average;
             average
                 << fit("AVG HASHRATE", 14)
