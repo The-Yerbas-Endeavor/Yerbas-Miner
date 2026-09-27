@@ -2343,9 +2343,9 @@ void Client::report_stats(bool force)
                 const auto stats =
                     history_stats(history, sample_limit);
                 const std::size_t graph_width =
-                    total_graph_width > 36U
-                        ? total_graph_width - 36U
-                        : 28U;
+                    total_graph_width > 28U
+                        ? total_graph_width - 28U
+                        : 32U;
                 const auto graph =
                     compact_graph(
                         history,
@@ -2355,30 +2355,30 @@ void Client::report_stats(bool force)
                 std::ostringstream header;
                 header
                     << color << bold
-                    << fit(label, 6)
+                    << fit(label, 8)
                     << reset
-                    << " NOW "
+                    << dim << "NOW " << reset
                     << fit(format_rate(now_value), 10)
-                    << " AVG "
+                    << dim << "10M AVG " << reset
                     << fit(format_rate(stats.avg), 10);
 
                 if (session_average >= 0.0) {
                     header
-                        << " SESSION AVG "
+                        << dim << "SESSION " << reset
                         << fit(format_rate(session_average), 10);
                 }
 
                 header
-                    << " LOW "
+                    << dim << "LOW " << reset
                     << fit(format_rate(stats.low), 10)
-                    << " HIGH "
+                    << dim << "HIGH " << reset
                     << fit(format_rate(stats.high), 10);
                 hashrate_rows.push_back(header.str());
 
                 std::ostringstream graph_top;
                 graph_top
-                    << std::string(7U, ' ')
-                    << dim << "│ 10m  " << reset
+                    << std::string(8U, ' ')
+                    << dim << "│ " << reset
                     << color
                     << graph[0]
                     << reset;
@@ -2386,8 +2386,8 @@ void Client::report_stats(bool force)
 
                 std::ostringstream graph_bottom;
                 graph_bottom
-                    << std::string(7U, ' ')
-                    << dim << "└───── " << reset
+                    << std::string(8U, ' ')
+                    << dim << "└ " << reset
                     << color
                     << graph[1]
                     << reset
@@ -2406,10 +2406,12 @@ void Client::report_stats(bool force)
 
             hashrate_rows.push_back(
                 dim + std::string(
-                    total_graph_width > 8U
-                        ? total_graph_width - 8U
+                    total_graph_width > 18U
+                        ? total_graph_width - 18U
                         : 24U,
-                    '-') + reset);
+                    '·') + reset);
+            hashrate_rows.push_back(
+                dim + std::string("WORKERS") + reset);
 
             append_source_trend(
                 "CPU",
