@@ -1196,38 +1196,77 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             : current;
     const std::size_t floor = gpu_latency_floor_for_base(base);
 
-    // Keep a deadband around the target so ordinary timing noise does not
-    // thrash the active batch. This first experiment is reduce-only: the
-    // rotation-selected tuned batch remains the ceiling.
-    if (worker.latency_scan_ms_ewma <= target_ms * 1.12)
+    if (result.cn_mask >= worker.latency_memory.size())
         return;
 
-    const double raw_ratio =
-        target_ms / worker.latency_scan_ms_ewma;
-    const double ratio =
-        std::clamp(raw_ratio, 0.65, 0.90);
+    const auto& memory = worker.latency_memory[result.cn_mask];
+    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0)
+        return;
 
-    std::size_t desired =
-        static_cast<std::size_t>(
-            static_cast<double>(current) * ratio);
+    // Use normalized live device timing to predict the batch that should land
+    // just under the latency target. Unlike the old reduce-only controller,
+    // this can recover upward after an earlier oversized scan pushed the batch
+    // too low. The rotation-selected tuned batch remains the hard ceiling.
+    constexpr double kTargetFraction = 0.95;
+    const double predicted_hashes =
+        (target_ms * kTargetFraction) / memory.ms_per_hash_ewma;
 
     constexpr std::size_t kBatchQuantum = 256U;
-    desired =
-        (desired / kBatchQuantum) * kBatchQuantum;
-    desired =
-        std::clamp(desired, floor, base);
+    std::size_t desired =
+        predicted_hashes > 0.0
+            ? static_cast<std::size_t>(predicted_hashes)
+            : current;
+    desired = (desired / kBatchQuantum) * kBatchQuantum;
+    desired = std::clamp(desired, floor, base);
 
-    if (desired >= current || current - desired < kBatchQuantum)
+    // A small latency deadband avoids chasing normal scan-time jitter.
+    const bool too_slow =
+        result.scan_ms > target_ms * 1.08;
+    const bool has_growth_headroom =
+        result.scan_ms < target_ms * 0.82;
+
+    if (!too_slow && !has_growth_headroom)
+        return;
+
+    // Limit each correction step so noisy scans cannot cause a large jump.
+    const std::size_t shrink_limit =
+        std::max(
+            floor,
+            ((current * 3U / 4U) / kBatchQuantum) *
+                kBatchQuantum);
+    const std::size_t grow_limit =
+        std::min(
+            base,
+            ((current * 5U / 4U) / kBatchQuantum) *
+                kBatchQuantum);
+
+    if (desired < current)
+        desired = std::max(desired, shrink_limit);
+    else if (desired > current)
+        desired = std::min(desired, grow_limit);
+
+    desired = std::clamp(desired, floor, base);
+
+    const std::size_t delta =
+        desired > current
+            ? desired - current
+            : current - desired;
+    if (desired == current || delta < kBatchQuantum)
         return;
 
     worker.engine->set_active_batch_size(desired);
 
     std::cout << "[latency-target] GPU " << worker.device_id
               << " CN=" << cn_mask_names(result.cn_mask)
-              << " scan_ewma_ms=" << std::fixed << std::setprecision(1)
-              << worker.latency_scan_ms_ewma
+              << " scan_ms=" << std::fixed << std::setprecision(1)
+              << result.scan_ms
+              << " scan_ewma_ms=" << worker.latency_scan_ms_ewma
               << " target_ms=" << target_ms
+              << " ms_per_hash=" << std::setprecision(6)
+              << memory.ms_per_hash_ewma
+              << std::setprecision(0)
               << " batch=" << current << " -> " << desired
+              << (desired > current ? " direction=grow" : " direction=shrink")
               << " base=" << base
               << " floor=" << floor
               << "\n";
