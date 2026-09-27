@@ -1161,22 +1161,31 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                                          bool stale)
 {
     const double target_ms = gpu_latency_target_ms();
-    if (target_ms <= 0.0 || stale || result.scan_ms <= 0.0)
+    if (target_ms <= 0.0 || stale || result.scan_ms <= 0.0 ||
+        result.hash_count == 0U)
         return;
 
-    if (result.cn_mask < worker.latency_memory.size() &&
-        result.hash_count != 0U) {
-        auto& memory = worker.latency_memory[result.cn_mask];
-        const double ms_per_hash =
-            result.scan_ms / static_cast<double>(result.hash_count);
-        constexpr double kMemoryNewWeight = 0.20;
-        memory.ms_per_hash_ewma =
-            memory.samples == 0U
-                ? ms_per_hash
-                : memory.ms_per_hash_ewma * (1.0 - kMemoryNewWeight) +
-                      ms_per_hash * kMemoryNewWeight;
-        ++memory.samples;
-    }
+    if (result.cn_mask >= worker.latency_memory.size())
+        return;
+
+    auto& memory = worker.latency_memory[result.cn_mask];
+    const double ms_per_hash =
+        result.scan_ms / static_cast<double>(result.hash_count);
+    const double scan_hps =
+        1000.0 * static_cast<double>(result.hash_count) / result.scan_ms;
+
+    constexpr double kMemoryNewWeight = 0.20;
+    memory.ms_per_hash_ewma =
+        memory.samples == 0U
+            ? ms_per_hash
+            : memory.ms_per_hash_ewma * (1.0 - kMemoryNewWeight) +
+                  ms_per_hash * kMemoryNewWeight;
+    memory.hps_ewma =
+        memory.samples == 0U
+            ? scan_hps
+            : memory.hps_ewma * (1.0 - kMemoryNewWeight) +
+                  scan_hps * kMemoryNewWeight;
+    ++memory.samples;
 
     constexpr double kEwmaNewWeight = 0.35;
     worker.latency_scan_ms_ewma =
@@ -1186,9 +1195,6 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                   result.scan_ms * kEwmaNewWeight;
     ++worker.latency_samples;
 
-    if (worker.latency_samples < 2U)
-        return;
-
     const std::size_t current = worker.engine->batch_size();
     const std::size_t base =
         worker.latency_base_batch != 0U
@@ -1196,17 +1202,71 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             : current;
     const std::size_t floor = gpu_latency_floor_for_base(base);
 
-    if (result.cn_mask >= worker.latency_memory.size())
+    if (memory.probe_pending &&
+        result.hash_count == memory.probe_batch) {
+        constexpr double kProbeMinGain = 0.003;
+        constexpr double kProbeMaxLatencyFactor = 1.10;
+        const double gain =
+            memory.probe_baseline_hps > 0.0
+                ? scan_hps / memory.probe_baseline_hps - 1.0
+                : 0.0;
+        const bool keep =
+            gain >= kProbeMinGain &&
+            result.scan_ms <= target_ms * kProbeMaxLatencyFactor;
+
+        if (!keep) {
+            const std::size_t rollback =
+                std::clamp(memory.probe_from_batch, floor, base);
+            worker.engine->set_active_batch_size(rollback);
+            std::cout << "[throughput-probe] GPU " << worker.device_id
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " batch=" << memory.probe_batch
+                      << " result=revert"
+                      << " hps=" << std::fixed << std::setprecision(2)
+                      << scan_hps
+                      << " baseline=" << memory.probe_baseline_hps
+                      << " gain_pct=" << (gain * 100.0)
+                      << " scan_ms=" << std::setprecision(1)
+                      << result.scan_ms
+                      << " -> " << rollback
+                      << "\n";
+            memory.probe_cooldown = 4U;
+        } else {
+            std::cout << "[throughput-probe] GPU " << worker.device_id
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " batch=" << memory.probe_batch
+                      << " result=keep"
+                      << " hps=" << std::fixed << std::setprecision(2)
+                      << scan_hps
+                      << " baseline=" << memory.probe_baseline_hps
+                      << " gain_pct=" << (gain * 100.0)
+                      << " scan_ms=" << std::setprecision(1)
+                      << result.scan_ms
+                      << "\n";
+            memory.probe_cooldown = 2U;
+        }
+
+        memory.probe_pending = false;
+        memory.probe_from_batch = 0U;
+        memory.probe_batch = 0U;
+        memory.probe_baseline_hps = 0.0;
+        memory.stable_samples = 0U;
+        return;
+    }
+
+    if (memory.probe_pending) {
+        memory.probe_pending = false;
+        memory.probe_from_batch = 0U;
+        memory.probe_batch = 0U;
+        memory.probe_baseline_hps = 0.0;
+        memory.stable_samples = 0U;
+    }
+
+    if (worker.latency_samples < 2U ||
+        memory.samples < 2U ||
+        memory.ms_per_hash_ewma <= 0.0)
         return;
 
-    const auto& memory = worker.latency_memory[result.cn_mask];
-    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0)
-        return;
-
-    // Use normalized live device timing to predict the batch that should land
-    // just under the latency target. Unlike the old reduce-only controller,
-    // this can recover upward after an earlier oversized scan pushed the batch
-    // too low. The rotation-selected tuned batch remains the hard ceiling.
     constexpr double kTargetFraction = 0.95;
     const double predicted_hashes =
         (target_ms * kTargetFraction) / memory.ms_per_hash_ewma;
@@ -1219,16 +1279,52 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     desired = (desired / kBatchQuantum) * kBatchQuantum;
     desired = std::clamp(desired, floor, base);
 
-    // A small latency deadband avoids chasing normal scan-time jitter.
     const bool too_slow =
         result.scan_ms > target_ms * 1.08;
     const bool has_growth_headroom =
         result.scan_ms < target_ms * 0.82;
 
-    if (!too_slow && !has_growth_headroom)
-        return;
+    if (!too_slow && !has_growth_headroom) {
+        const bool probe_zone =
+            result.scan_ms >= target_ms * 0.82 &&
+            result.scan_ms <= target_ms * 1.02;
+        if (probe_zone && current + kBatchQuantum <= base) {
+            if (memory.probe_cooldown != 0U) {
+                --memory.probe_cooldown;
+                memory.stable_samples = 0U;
+                return;
+            }
 
-    // Limit each correction step so noisy scans cannot cause a large jump.
+            ++memory.stable_samples;
+            if (memory.stable_samples >= 3U) {
+                const std::size_t probe_batch =
+                    std::min(base, current + kBatchQuantum);
+                memory.probe_pending = true;
+                memory.probe_from_batch = current;
+                memory.probe_batch = probe_batch;
+                memory.probe_baseline_hps = memory.hps_ewma;
+                memory.stable_samples = 0U;
+                worker.engine->set_active_batch_size(probe_batch);
+
+                std::cout << "[throughput-probe] GPU " << worker.device_id
+                          << " CN=" << cn_mask_names(result.cn_mask)
+                          << " batch=" << current << " -> " << probe_batch
+                          << " baseline_hps=" << std::fixed
+                          << std::setprecision(2)
+                          << memory.probe_baseline_hps
+                          << " scan_ms=" << std::setprecision(1)
+                          << result.scan_ms
+                          << " target_ms=" << target_ms
+                          << "\n";
+            }
+        } else {
+            memory.stable_samples = 0U;
+        }
+        return;
+    }
+
+    memory.stable_samples = 0U;
+
     const std::size_t shrink_limit =
         std::max(
             floor,
@@ -1279,7 +1375,13 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
     if (target_ms <= 0.0 || cn_mask >= worker.latency_memory.size())
         return;
 
-    const auto& memory = worker.latency_memory[cn_mask];
+    auto& memory = worker.latency_memory[cn_mask];
+    memory.probe_pending = false;
+    memory.probe_from_batch = 0U;
+    memory.probe_batch = 0U;
+    memory.probe_baseline_hps = 0.0;
+    memory.stable_samples = 0U;
+
     if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0)
         return;
 
