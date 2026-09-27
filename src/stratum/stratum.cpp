@@ -3472,7 +3472,7 @@ void Client::report_stats(bool force)
 
                 // Long-job garden. Once the main traced leaf is mature, keep
                 // adding terminal cells into unused space rather than freezing
-                // the BLOCK GARDEN panel. The sequence builds two small corner
+                // the BLOCK WORK panel. The sequence builds two small corner
                 // leaves first, then lower sprouts and scattered grow-room
                 // detail. Cells never overwrite the main traced leaf.
                 static const std::vector<LeafCell> overflow_cells{
