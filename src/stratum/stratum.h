@@ -245,9 +245,12 @@ private:
     RotationHashCounter rotation_hashes_done_{RotationHashCounter::Kind::Total};
     RotationHashCounter rotation_cpu_hashes_done_{RotationHashCounter::Kind::Cpu};
 
-    // Production-latency diagnostics are opt-in and never alter scheduling.
-    // The timestamp lets us measure the actual lifetime of each Stratum job.
+    // Timestamp and lightweight lifetime history for transition-aware GPU
+    // dispatch. The lifetime estimate is observational; it never changes the
+    // steady-state learned GPU batch.
     std::chrono::steady_clock::time_point active_job_received_at_{};
+    double job_lifetime_ms_ewma_{0.0};
+    std::uint64_t job_lifetime_samples_{0};
 
 #ifdef YERBAS_HAS_CUDA
     struct GpuScanState {
@@ -262,6 +265,8 @@ private:
         std::uint64_t job_generation{0};
         std::string job_id;
         std::uint64_t hash_count{0};
+        std::size_t learned_batch{0};
+        bool transition_shaped{false};
         std::uint32_t cn_mask{0};
         RotationFingerprint rotation_fingerprint{};
         std::chrono::steady_clock::time_point dispatched_at{};
@@ -276,6 +281,8 @@ private:
         std::uint64_t job_generation{0};
         std::string job_id;
         std::uint64_t hash_count{0};
+        std::size_t learned_batch{0};
+        bool transition_shaped{false};
         std::uint32_t cn_mask{0};
         RotationFingerprint rotation_fingerprint{};
         double queue_ms{0.0};
@@ -361,7 +368,11 @@ private:
 
     void start_gpu_worker(GpuWorker& worker);
     void stop_gpu_workers() noexcept;
-    void dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce);
+    void dispatch_gpu_scan(GpuWorker& worker,
+                           std::uint32_t start_nonce,
+                           std::size_t effective_batch,
+                           std::size_t learned_batch,
+                           bool transition_shaped);
     bool gpu_scan_ready(GpuWorker& worker);
     GpuScanResult take_gpu_scan_result(GpuWorker& worker);
     void record_gpu_scan_telemetry(GpuWorker& worker,
