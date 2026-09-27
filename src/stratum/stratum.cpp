@@ -558,7 +558,7 @@ int Client::run(std::atomic_bool& stop_requested)
                   << (gpu_latency_min_batch_override() == 0U
                           ? std::string("auto")
                           : std::to_string(gpu_latency_min_batch_override()))
-                  << " | mode=reduce-only-per-rotation\n";
+                  << " | mode=bidirectional+throughput-probe\n";
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
         try { if (run_session(stop_requested)) break; }
@@ -1231,6 +1231,10 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                       << " -> " << rollback
                       << "\n";
             memory.probe_cooldown = 4U;
+            memory.rejected_probe_batch = memory.probe_batch;
+            memory.rejected_probe_baseline_hps =
+                memory.probe_baseline_hps;
+            memory.rejected_probe_stable_samples = 0U;
         } else {
             std::cout << "[throughput-probe] GPU " << worker.device_id
                       << " CN=" << cn_mask_names(result.cn_mask)
@@ -1244,6 +1248,12 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                       << result.scan_ms
                       << "\n";
             memory.probe_cooldown = 2U;
+            if (memory.rejected_probe_batch != 0U &&
+                memory.probe_batch >= memory.rejected_probe_batch) {
+                memory.rejected_probe_batch = 0U;
+                memory.rejected_probe_baseline_hps = 0.0;
+                memory.rejected_probe_stable_samples = 0U;
+            }
         }
 
         memory.probe_pending = false;
@@ -1299,6 +1309,47 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             if (memory.stable_samples >= 3U) {
                 const std::size_t probe_batch =
                     std::min(base, current + kBatchQuantum);
+
+                if (memory.rejected_probe_batch != 0U &&
+                    probe_batch >= memory.rejected_probe_batch) {
+                    const double baseline_shift =
+                        memory.rejected_probe_baseline_hps > 0.0
+                            ? std::abs(
+                                  memory.hps_ewma /
+                                      memory.rejected_probe_baseline_hps -
+                                  1.0)
+                            : 0.0;
+                    ++memory.rejected_probe_stable_samples;
+
+                    constexpr double kReopenBaselineShift = 0.025;
+                    constexpr std::uint64_t kReopenStableSamples = 24U;
+                    const bool reopen =
+                        baseline_shift >= kReopenBaselineShift ||
+                        memory.rejected_probe_stable_samples >=
+                            kReopenStableSamples;
+
+                    if (!reopen) {
+                        memory.stable_samples = 0U;
+                        return;
+                    }
+
+                    std::cout << "[throughput-probe] GPU "
+                              << worker.device_id
+                              << " CN="
+                              << cn_mask_names(result.cn_mask)
+                              << " reopening_batch="
+                              << memory.rejected_probe_batch
+                              << " baseline_shift_pct="
+                              << std::fixed << std::setprecision(2)
+                              << (baseline_shift * 100.0)
+                              << " stable_samples="
+                              << memory.rejected_probe_stable_samples
+                              << "\n";
+                    memory.rejected_probe_batch = 0U;
+                    memory.rejected_probe_baseline_hps = 0.0;
+                    memory.rejected_probe_stable_samples = 0U;
+                }
+
                 memory.probe_pending = true;
                 memory.probe_from_batch = current;
                 memory.probe_batch = probe_batch;
