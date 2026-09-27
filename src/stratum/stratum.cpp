@@ -1272,6 +1272,45 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         memory.stable_samples = 0U;
     }
 
+    // Do not burn a second obviously oversized scan just to satisfy the
+    // normal controller's smoothing window.  On the first measured scan for a
+    // previously unseen device/CN family, make one conservative proportional
+    // correction when latency is far above target.  This is derived entirely
+    // from live device timing and remains bounded by the tuned floor/ceiling.
+    constexpr std::size_t kBatchQuantum = 256U;
+    if (worker.latency_samples == 1U &&
+        memory.samples == 1U &&
+        result.scan_ms > target_ms * 1.20) {
+        const double ratio =
+            std::clamp(
+                (target_ms * 0.95) / result.scan_ms,
+                0.50,
+                0.90);
+        std::size_t desired =
+            static_cast<std::size_t>(
+                static_cast<double>(current) * ratio);
+        desired =
+            (desired / kBatchQuantum) * kBatchQuantum;
+        desired =
+            std::clamp(desired, floor, base);
+
+        if (desired + kBatchQuantum <= current) {
+            worker.engine->set_active_batch_size(desired);
+            std::cout << "[latency-first-scan] GPU "
+                      << worker.device_id
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " scan_ms=" << std::fixed
+                      << std::setprecision(1) << result.scan_ms
+                      << " target_ms=" << target_ms
+                      << " batch=" << current
+                      << " -> " << desired
+                      << " base=" << base
+                      << " floor=" << floor
+                      << "\n";
+        }
+        return;
+    }
+
     if (worker.latency_samples < 2U ||
         memory.samples < 2U ||
         memory.ms_per_hash_ewma <= 0.0)
@@ -1446,7 +1485,6 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
     const double predicted_hashes =
         (target_ms * kSeedTargetFraction) / memory.ms_per_hash_ewma;
 
-    constexpr std::size_t kBatchQuantum = 256U;
     std::size_t desired =
         predicted_hashes > 0.0
             ? static_cast<std::size_t>(predicted_hashes)
