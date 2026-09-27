@@ -2182,7 +2182,9 @@ void Client::report_stats(bool force)
         const auto compact_graph = [&history_stats](
             const std::vector<double>& history,
             std::size_t width,
-            std::size_t sample_limit) {
+            std::size_t sample_limit,
+            double scale_low = -1.0,
+            double scale_high = -1.0) {
             static constexpr const char* levels[] = {
                 " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
             };
@@ -2205,14 +2207,18 @@ void Client::report_stats(bool force)
             const auto stats =
                 history_stats(history, sample_limit);
 
-            const double spread =
-                std::max(1.0, stats.high - stats.low);
-            const double pad =
-                std::max(1.0, spread * 0.08);
-            const double low =
-                std::max(0.0, stats.low - pad);
-            const double high =
-                stats.high + pad;
+            double low = scale_low;
+            double high = scale_high;
+            if (!(high > low)) {
+                const double spread =
+                    std::max(1.0, stats.high - stats.low);
+                const double pad =
+                    std::max(1.0, spread * 0.08);
+                low =
+                    std::max(0.0, stats.low - pad);
+                high =
+                    stats.high + pad;
+            }
             const double span =
                 std::max(1.0, high - low);
 
@@ -2602,13 +2608,50 @@ void Client::report_stats(bool force)
 
             std::vector<std::string> hashrate_rows;
 
+            double worker_scale_low =
+                std::numeric_limits<double>::infinity();
+            double worker_scale_high = 0.0;
+
+            const auto include_worker_scale = [&](
+                const std::vector<double>& history) {
+                const auto stats = history_stats(history, 600U);
+                if (stats.high <= 0.0 && stats.low <= 0.0)
+                    return;
+                worker_scale_low =
+                    std::min(worker_scale_low, stats.low);
+                worker_scale_high =
+                    std::max(worker_scale_high, stats.high);
+            };
+
+            include_worker_scale(cpu_history);
+            for (const auto& gpu : gpu_views)
+                include_worker_scale(gpu_history[gpu.id]);
+
+            if (std::isfinite(worker_scale_low) &&
+                worker_scale_high > worker_scale_low) {
+                const double spread =
+                    std::max(
+                        1.0,
+                        worker_scale_high - worker_scale_low);
+                const double pad =
+                    std::max(1.0, spread * 0.08);
+                worker_scale_low =
+                    std::max(0.0, worker_scale_low - pad);
+                worker_scale_high += pad;
+            } else {
+                worker_scale_low = -1.0;
+                worker_scale_high = -1.0;
+            }
+
             const auto append_source_trend = [&](
                 const std::string& label,
                 const std::string& color,
                 const std::vector<double>& history,
                 double now_value,
                 std::size_t sample_limit,
-                double session_average = -1.0) {
+                double session_average = -1.0,
+                double graph_scale_low = -1.0,
+                double graph_scale_high = -1.0) {
                 const auto stats =
                     history_stats(history, sample_limit);
                 const std::size_t graph_width =
@@ -2619,7 +2662,9 @@ void Client::report_stats(bool force)
                     compact_graph(
                         history,
                         graph_width,
-                        sample_limit);
+                        sample_limit,
+                        graph_scale_low,
+                        graph_scale_high);
 
                 std::ostringstream header;
                 header
@@ -2687,7 +2732,10 @@ void Client::report_stats(bool force)
                 yellow,
                 cpu_history,
                 cpu_hps,
-                600U);
+                600U,
+                -1.0,
+                worker_scale_low,
+                worker_scale_high);
 
             for (std::size_t i = 0U;
                  i < gpu_views.size();
@@ -2698,7 +2746,10 @@ void Client::report_stats(bool force)
                     i == 0U ? cyan : magenta,
                     gpu_history[gpu.id],
                     gpu.hps,
-                    600U);
+                    600U,
+                    -1.0,
+                    worker_scale_low,
+                    worker_scale_high);
             }
 
             const auto make_panel = [&](const std::string& title,
