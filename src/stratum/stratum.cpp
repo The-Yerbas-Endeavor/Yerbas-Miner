@@ -28,6 +28,7 @@
 #include <ctime>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -468,6 +469,75 @@ int gpu_host_cpu_for_device(int device_id)
         }
     }
     return -1;
+}
+
+
+std::string live_batch_cache_path()
+{
+    if (const char* value =
+            std::getenv("YERBAS_GPU_LIVE_BATCH_CACHE");
+        value != nullptr && *value != '\0') {
+        return value;
+    }
+    return ".yerbas-miner-live-batches.json";
+}
+
+nlohmann::json& live_batch_cache()
+{
+    static nlohmann::json cache = [] {
+        const std::string path = live_batch_cache_path();
+        std::ifstream in(path);
+        if (!in) return nlohmann::json::object();
+        try {
+            auto parsed = nlohmann::json::parse(in);
+            return parsed.is_object()
+                ? parsed
+                : nlohmann::json::object();
+        } catch (...) {
+            return nlohmann::json::object();
+        }
+    }();
+    return cache;
+}
+
+std::string live_batch_cache_key(const std::string& hardware_key,
+                                 std::uint32_t cn_mask)
+{
+    return hardware_key + "|cn=" + std::to_string(cn_mask);
+}
+
+std::size_t load_live_batch_cache(const std::string& hardware_key,
+                                  std::uint32_t cn_mask)
+{
+    auto& cache = live_batch_cache();
+    const auto key = live_batch_cache_key(hardware_key, cn_mask);
+    const auto it = cache.find(key);
+    if (it == cache.end() || !it->is_object())
+        return 0U;
+
+    const auto value = it->value("batch", 0ULL);
+    return static_cast<std::size_t>(value);
+}
+
+void save_live_batch_cache(const std::string& hardware_key,
+                           std::uint32_t cn_mask,
+                           std::size_t batch,
+                           double hps,
+                           double scan_ms)
+{
+    auto& cache = live_batch_cache();
+    const auto key = live_batch_cache_key(hardware_key, cn_mask);
+    cache[key] = {
+        {"batch", batch},
+        {"hps", hps},
+        {"scan_ms", scan_ms}
+    };
+
+    std::ofstream out(
+        live_batch_cache_path(),
+        std::ios::out | std::ios::trunc);
+    if (out)
+        out << cache.dump(2) << '\n';
 }
 
 } // namespace
@@ -1352,6 +1422,29 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         memory.ms_per_hash_ewma <= 0.0)
         return;
 
+    if (!memory.probe_pending &&
+        memory.baseline_batch == current &&
+        memory.baseline_samples >= 4U &&
+        current < base &&
+        memory.persisted_batch != current &&
+        result.scan_ms <= target_ms * 1.10) {
+        save_live_batch_cache(
+            worker.hardware_key,
+            result.cn_mask,
+            current,
+            memory.baseline_hps_ewma,
+            result.scan_ms);
+        memory.persisted_batch = current;
+        std::cout << "[latency-cache] GPU " << worker.device_id
+                  << " CN=" << cn_mask_names(result.cn_mask)
+                  << " saved_batch=" << current
+                  << " hps=" << std::fixed << std::setprecision(2)
+                  << memory.baseline_hps_ewma
+                  << " scan_ms=" << std::setprecision(1)
+                  << result.scan_ms
+                  << "\n";
+    }
+
     constexpr double kTargetFraction = 0.95;
     const double predicted_hashes =
         (target_ms * kTargetFraction) / memory.ms_per_hash_ewma;
@@ -1535,14 +1628,28 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
     memory.probe_baseline_hps = 0.0;
     memory.stable_samples = 0U;
 
-    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0)
-        return;
-
     const std::size_t base =
         worker.latency_base_batch != 0U
             ? worker.latency_base_batch
             : worker.engine->batch_size();
     const std::size_t floor = gpu_latency_floor_for_base(base);
+
+    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0) {
+        const std::size_t cached =
+            load_live_batch_cache(worker.hardware_key, cn_mask);
+        constexpr std::size_t kBatchQuantum = 256U;
+        if (cached >= floor && cached <= base &&
+            (cached % kBatchQuantum) == 0U) {
+            worker.engine->set_active_batch_size(cached);
+            memory.persisted_batch = cached;
+            std::cout << "[latency-cache] GPU " << worker.device_id
+                      << " CN=" << cn_mask_names(cn_mask)
+                      << " batch=" << base << " -> " << cached
+                      << " source=persistent-live"
+                      << "\n";
+        }
+        return;
+    }
 
     constexpr double kSeedTargetFraction = 0.95;
     constexpr std::size_t kBatchQuantum = 256U;
@@ -1658,6 +1765,16 @@ void Client::initialize_gpu_engines()
         const std::size_t batch_size = config_.gpu.intensity > 0 ? (static_cast<std::size_t>(1) << std::min(config_.gpu.intensity, 24)) : 65536;
         GpuWorker worker;
         worker.device_id = id;
+        {
+            std::ostringstream hardware_key;
+            hardware_key
+                << "cc" << found->compute_major
+                << found->compute_minor
+                << "-sm" << found->multiprocessors
+                << "-warp" << found->warp_size
+                << "-mem" << found->total_memory;
+            worker.hardware_key = hardware_key.str();
+        }
         worker.engine = std::make_unique<cuda::BatchEngine>(id, batch_size);
         const std::size_t actual_batch = worker.engine->batch_size();
         gpu_workers_.push_back(std::move(worker));
