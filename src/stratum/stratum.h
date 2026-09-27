@@ -317,6 +317,12 @@ private:
             std::size_t probe_from_batch{0};
             std::size_t probe_batch{0};
             double probe_baseline_hps{0.0};
+
+            // Remember a recently rejected upper step so live mining does not
+            // spend useful work repeatedly retesting the same losing batch.
+            std::size_t rejected_probe_batch{0};
+            double rejected_probe_baseline_hps{0.0};
+            std::uint64_t rejected_probe_stable_samples{0};
         };
 
         // Optional live latency-targeted production experiment. The base batch
