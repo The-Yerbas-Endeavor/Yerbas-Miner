@@ -2978,12 +2978,6 @@ void Client::report_stats(bool force)
                     work_stats.push_back(gpu_line.str());
                 }
 
-                std::ostringstream waste_line;
-                waste_line
-                    << "GPU WASTE "
-                    << gpu_waste_text.str();
-                work_stats.push_back(waste_line.str());
-
                 std::ostringstream shares_line;
                 shares_line
                     << "SHARES "
