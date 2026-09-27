@@ -1191,6 +1191,24 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                   scan_hps * kMemoryNewWeight;
     ++memory.samples;
 
+    const bool is_probe_result =
+        memory.probe_pending &&
+        result.hash_count == memory.probe_batch;
+    if (!is_probe_result) {
+        if (memory.baseline_batch != result.hash_count) {
+            memory.baseline_batch = result.hash_count;
+            memory.baseline_hps_ewma = scan_hps;
+            memory.baseline_samples = 1U;
+        } else {
+            constexpr double kBaselineNewWeight = 0.35;
+            memory.baseline_hps_ewma =
+                memory.baseline_hps_ewma *
+                    (1.0 - kBaselineNewWeight) +
+                scan_hps * kBaselineNewWeight;
+            ++memory.baseline_samples;
+        }
+    }
+
     constexpr double kEwmaNewWeight = 0.35;
     worker.latency_scan_ms_ewma =
         worker.latency_samples == 0U
@@ -1261,6 +1279,16 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                 memory.rejected_probe_baseline_hps = 0.0;
                 memory.rejected_probe_stable_samples = 0U;
             }
+        }
+
+        if (keep) {
+            memory.baseline_batch = result.hash_count;
+            memory.baseline_hps_ewma = scan_hps;
+            memory.baseline_samples = 1U;
+        } else {
+            memory.baseline_batch = rollback;
+            memory.baseline_samples = 0U;
+            memory.baseline_hps_ewma = 0.0;
         }
 
         memory.probe_pending = false;
@@ -1411,10 +1439,18 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                     memory.rejected_probe_stable_samples = 0U;
                 }
 
+                if (memory.baseline_batch != current ||
+                    memory.baseline_samples < 2U ||
+                    memory.baseline_hps_ewma <= 0.0) {
+                    memory.stable_samples = 0U;
+                    return;
+                }
+
                 memory.probe_pending = true;
                 memory.probe_from_batch = current;
                 memory.probe_batch = probe_batch;
-                memory.probe_baseline_hps = memory.hps_ewma;
+                memory.probe_baseline_hps =
+                    memory.baseline_hps_ewma;
                 memory.stable_samples = 0U;
                 worker.engine->set_active_batch_size(probe_batch);
 
