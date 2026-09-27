@@ -3049,7 +3049,7 @@ void Client::report_stats(bool force)
                 const std::size_t frame_index =
                     static_cast<std::size_t>(
                         (static_cast<std::uint64_t>(uptime) / 5ULL) %
-                        4ULL);
+                        3ULL);
 
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
@@ -3202,8 +3202,8 @@ void Client::report_stats(bool force)
                 // Proof-of-Grass growth animation. All frames share the
                 // same 12-row canvas and soil baseline so the plant grows in
                 // place instead of jumping around the BLOCK WORK panel.
-                // Sequence: seedling -> growing -> harvest -> growing.
-                static const std::array<std::array<const char*, 12>, 4>
+                // Sequence: seedling -> growing -> harvest -> repeat.
+                static const std::array<std::array<const char*, 12>, 3>
                     plant_frames{{
                         {{
                             "                                        ",
@@ -3218,20 +3218,6 @@ void Client::report_stats(bool force)
                             "                   │                    ",
                             "              _____│_____               ",
                             "            [1] SEEDLING                 ",
-                        }},
-                        {{
-                            "                   ╱╲                   ",
-                            "                  ╱  ╲                  ",
-                            "              ╲  ╱ │  ╲  ╱             ",
-                            "               ╲╱  │   ╲╱              ",
-                            "            ────╲  │  ╱────            ",
-                            "                 ╲ │ ╱                 ",
-                            "              ╲───╲│╱───╱              ",
-                            "                ╲  │  ╱                ",
-                            "            ─────╲ │ ╱─────            ",
-                            "                  ╲│╱                  ",
-                            "              _____│_____               ",
-                            "             [2] GROWING                ",
                         }},
                         {{
                             "                   ╱╲                   ",
