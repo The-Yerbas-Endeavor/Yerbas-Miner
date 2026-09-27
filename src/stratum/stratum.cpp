@@ -2554,7 +2554,7 @@ void Client::report_stats(bool force)
             if (mascot_panel_width > 0U) {
                 const std::size_t frame_index =
                     static_cast<std::size_t>(
-                        (hashes_done_ / 2048ULL) % 2ULL);
+                        (hashes_done_ / 1024ULL) % 2ULL);
 
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
@@ -2616,15 +2616,17 @@ void Client::report_stats(bool force)
                     }
                 }
 
+                std::vector<std::string> work_stats;
+
                 std::ostringstream status_line;
                 status_line
                     << operating_color << bold
                     << "STATUS " << operating_status
                     << reset;
-                mascot_rows.push_back(status_line.str());
+                work_stats.push_back(status_line.str());
 
                 std::ostringstream job_line;
-                job_line << "JOB AGE ";
+                job_line << "JOB ";
                 if (active_job_received_at_.time_since_epoch().count() != 0) {
                     const double job_age_seconds =
                         std::chrono::duration<double>(
@@ -2633,24 +2635,34 @@ void Client::report_stats(bool force)
                 } else {
                     job_line << "n/a";
                 }
-                mascot_rows.push_back(job_line.str());
+                work_stats.push_back(job_line.str());
+
+                std::ostringstream rate_line;
+                rate_line
+                    << "RATE " << format_rate(total_hps);
+                work_stats.push_back(rate_line.str());
+
+                std::ostringstream waste_line;
+                waste_line
+                    << "WASTE " << gpu_waste_text.str();
+                work_stats.push_back(waste_line.str());
 
                 if (config_.miner.cpu_enabled) {
                     std::ostringstream cpu_line;
                     cpu_line
-                        << "CPU  "
+                        << "CPU "
                         << yerbas::console::detail::
                                format_temperature(cpu_telemetry)
-                        << "  "
+                        << " "
                         << yerbas::console::detail::
                                format_power(cpu_telemetry);
-                    mascot_rows.push_back(cpu_line.str());
+                    work_stats.push_back(cpu_line.str());
                 }
 
                 for (const auto& worker : gpu_workers_) {
                     std::ostringstream gpu_line;
                     gpu_line
-                        << "GPU" << worker.device_id
+                        << "G" << worker.device_id
                         << " B" << worker.engine->batch_size()
                         << " ";
 
@@ -2680,37 +2692,97 @@ void Client::report_stats(bool force)
                                    format_fan(telemetry);
                     }
 
-                    mascot_rows.push_back(gpu_line.str());
+                    work_stats.push_back(gpu_line.str());
                 }
 
-                std::ostringstream rate_line;
-                rate_line
-                    << "RATE  " << format_rate(total_hps);
-                mascot_rows.push_back(rate_line.str());
-
-                std::ostringstream waste_line;
-                waste_line
-                    << "WASTE " << gpu_waste_text.str();
-                mascot_rows.push_back(waste_line.str());
-
                 std::ostringstream last_share_line;
-                last_share_line << "LAST  ";
+                last_share_line << "LAST ";
                 if (g_last_share_event_at.time_since_epoch().count() != 0) {
                     const double age =
                         std::chrono::duration<double>(
                             now - g_last_share_event_at).count();
                     last_share_line
-                        << (g_last_share_event_accepted ? "✓ " : "! ")
+                        << (g_last_share_event_accepted ? "+ " : "! ")
                         << (g_last_share_event_accepted
                                 ? "ACCEPTED "
                                 : "REJECTED ")
                         << format_duration(age);
-                    if (!g_last_share_event_source.empty())
-                        last_share_line << " " << g_last_share_event_source;
+                    if (!g_last_share_event_source.empty()) {
+                        std::string compact_source =
+                            g_last_share_event_source;
+                        if (compact_source.rfind("GPU ", 0U) == 0U)
+                            compact_source.erase(1U, 2U);
+                        last_share_line << " " << compact_source;
+                    }
                 } else {
                     last_share_line << "none yet";
                 }
-                mascot_rows.push_back(last_share_line.str());
+                work_stats.push_back(last_share_line.str());
+
+                // Eight-line ASCII miner.  The pickaxe alternates between a
+                // raised and striking pose based on actual completed hashes.
+                // When hashing stops, the animation stops with it.
+                static const std::array<std::array<const char*, 8>, 2>
+                    miner_frames{{
+                        {{
+                            "    __/---  ",
+                            " __/        ",
+                            "/___\\       ",
+                            "(o o)       ",
+                            "/|_|\\__     ",
+                            " / \\   \\    ",
+                            "/   \\   *## ",
+                            "_______#####",
+                        }},
+                        {{
+                            "            ",
+                            " ___    ---\\",
+                            "/___\\      \\",
+                            "(o o)       |",
+                            "/|_|\\______/ ",
+                            " / \\     *  ",
+                            "/   \\   /## ",
+                            "_______#####",
+                        }},
+                    }};
+
+                const bool miner_is_working =
+                    operating_status == "HASHING";
+                const std::size_t miner_frame =
+                    miner_is_working ? frame_index : 0U;
+                const std::string miner_color =
+                    miner_is_working
+                        ? lime
+                        : (operating_status == "STALLED"
+                               ? red
+                               : faint);
+
+                constexpr std::size_t miner_width = 13U;
+                constexpr std::size_t miner_rows = 8U;
+
+                while (work_stats.size() < miner_rows)
+                    work_stats.push_back("");
+
+                for (std::size_t row = 0U;
+                     row < miner_rows;
+                     ++row) {
+                    std::string art =
+                        miner_frames[miner_frame][row];
+
+                    if (art.size() < miner_width)
+                        art.append(miner_width - art.size(), ' ');
+                    else if (art.size() > miner_width)
+                        art.resize(miner_width);
+
+                    std::ostringstream combined;
+                    combined
+                        << miner_color
+                        << art
+                        << reset
+                        << " "
+                        << work_stats[row];
+                    mascot_rows.push_back(combined.str());
+                }
 
                 auto mascot_box =
                     make_panel("BLOCK WORK",
