@@ -8,7 +8,8 @@ Outputs:
   rotation_perf.csv       One deduplicated [rotation perf] observation per row.
   batch_summary.csv       Per-source/per-fingerprint/per-GPU/per-batch scan stats.
   fingerprint_summary.csv Historical performance summary keyed by fingerprint.
-  batch_comparison.csv    Same-fingerprint batch alternatives suitable for A/B/C.
+  batch_comparison.csv    Same-hardware/same-fingerprint batch alternatives.
+  preferred_batch.csv      Evidence-based preferred batch per hardware/fingerprint.
 """
 
 from __future__ import annotations
@@ -62,6 +63,14 @@ GHOSTRIDER_RE = re.compile(
     r"\[GhostRider\]\s+rotation=([0-9a-fA-F]+)\s+\|\s+CN=(.+)$"
 )
 
+GPU_INFO_RE = re.compile(
+    r"GPU\s+(\d+):\s+(.+?)\s+\|\s+"
+    r"CC\s+([\d.]+)\s+\|\s+"
+    r"SMs\s+(\d+)\s+\|\s+"
+    r"warp\s+(\d+)\s+\|\s+"
+    r"([\d.]+)\s+GiB"
+)
+
 
 @dataclass(frozen=True)
 class RotationPerf:
@@ -98,6 +107,12 @@ class BatchSample:
     source: str
     fingerprint: str
     gpu: int
+    gpu_name: str
+    compute_capability: str
+    sms: int | None
+    warp_size: int | None
+    vram_gib: float | None
+    hardware_signature: str
     cn: str
     batch: int
     hashes: int
@@ -115,6 +130,7 @@ class BatchSample:
         return (
             self.fingerprint,
             self.gpu,
+            self.hardware_signature,
             self.cn,
             self.batch,
             self.hashes,
@@ -175,6 +191,24 @@ def iter_sources(inputs: Iterable[Path]) -> Iterator[tuple[str, TextIO]]:
                 yield from iter_plain_file(path)
 
 
+def make_hardware_signature(
+    name: str,
+    compute_capability: str,
+    sms: int | None,
+    warp_size: int | None,
+    vram_gib: float | None,
+) -> str:
+    """Return a stable, hardware-neutral device signature from log metadata."""
+    parts = [
+        name.strip() or "unknown",
+        f"cc={compute_capability or 'unknown'}",
+        f"sms={sms if sms is not None else 'unknown'}",
+        f"warp={warp_size if warp_size is not None else 'unknown'}",
+        f"vram={vram_gib:.2f}GiB" if vram_gib is not None else "vram=unknown",
+    ]
+    return "|".join(parts)
+
+
 def parse_sources(inputs: list[Path]) -> tuple[list[RotationPerf], list[BatchSample]]:
     rotations: list[RotationPerf] = []
     batches: list[BatchSample] = []
@@ -183,6 +217,7 @@ def parse_sources(inputs: list[Path]) -> tuple[list[RotationPerf], list[BatchSam
         latency_target_ms: float | None = None
         min_batch: int | None = None
         cn_by_fingerprint: dict[str, str] = {}
+        gpu_info: dict[int, tuple[str, str, int, int, float, str]] = {}
 
         for raw_line in handle:
             line = raw_line.strip()
@@ -195,6 +230,20 @@ def parse_sources(inputs: list[Path]) -> tuple[list[RotationPerf], list[BatchSam
             ghost = GHOSTRIDER_RE.search(line)
             if ghost:
                 cn_by_fingerprint[ghost.group(1).lower()] = ghost.group(2).strip()
+
+            gpu_match = GPU_INFO_RE.search(line)
+            if gpu_match:
+                gpu_id, name, cc, sms, warp, vram = gpu_match.groups()
+                gpu_id_i = int(gpu_id)
+                sms_i = int(sms)
+                warp_i = int(warp)
+                vram_f = float(vram)
+                signature = make_hardware_signature(
+                    name, cc, sms_i, warp_i, vram_f
+                )
+                gpu_info[gpu_id_i] = (
+                    name.strip(), cc, sms_i, warp_i, vram_f, signature
+                )
 
             rotation = ROTATION_RE.search(line)
             if rotation:
@@ -239,11 +288,31 @@ def parse_sources(inputs: list[Path]) -> tuple[list[RotationPerf], list[BatchSam
                     stale,
                     useful_device_pct,
                 ) = batch.groups()
+                gpu_i = int(gpu)
+                info = gpu_info.get(gpu_i)
+                if info is None:
+                    gpu_name = "unknown"
+                    cc = "unknown"
+                    sms_i = None
+                    warp_i = None
+                    vram_f = None
+                    signature = make_hardware_signature(
+                        gpu_name, cc, sms_i, warp_i, vram_f
+                    )
+                else:
+                    gpu_name, cc, sms_i, warp_i, vram_f, signature = info
+
                 batches.append(
                     BatchSample(
                         source=source,
                         fingerprint=fingerprint.lower(),
-                        gpu=int(gpu),
+                        gpu=gpu_i,
+                        gpu_name=gpu_name,
+                        compute_capability=cc,
+                        sms=sms_i,
+                        warp_size=warp_i,
+                        vram_gib=vram_f,
+                        hardware_signature=signature,
                         cn=cn,
                         batch=int(hashes),
                         hashes=int(hashes),
@@ -331,20 +400,30 @@ def main() -> int:
     for b in batches:
         grouped_batches[
             (
-                b.source, b.fingerprint, b.gpu, b.cn, b.batch,
-                b.latency_target_ms, b.min_batch,
+                b.source, b.fingerprint, b.gpu, b.hardware_signature,
+                b.gpu_name, b.compute_capability, b.sms, b.warp_size,
+                b.vram_gib, b.cn, b.batch, b.latency_target_ms, b.min_batch,
             )
         ].append(b)
 
     batch_rows = []
     for key, samples in sorted(grouped_batches.items()):
-        source, fingerprint, gpu, cn, batch, target, floor = key
+        (
+            source, fingerprint, gpu, hardware_signature, gpu_name, cc,
+            sms, warp_size, vram_gib, cn, batch, target, floor
+        ) = key
         stale_scans = sum(s.stale for s in samples)
         batch_rows.append(
             (
                 source,
                 fingerprint,
                 gpu,
+                hardware_signature,
+                gpu_name,
+                cc,
+                "" if sms is None else sms,
+                "" if warp_size is None else warp_size,
+                "" if vram_gib is None else f"{vram_gib:.2f}",
                 cn,
                 batch,
                 len(samples),
@@ -363,7 +442,9 @@ def main() -> int:
     write_csv(
         args.output / "batch_summary.csv",
         [
-            "source", "fingerprint", "gpu", "cn", "batch", "scans",
+            "source", "fingerprint", "gpu", "hardware_signature",
+            "gpu_name", "compute_capability", "sms", "warp_size", "vram_gib",
+            "cn", "batch", "scans",
             "stale_scans", "stale_pct", "avg_scan_ms", "avg_wall_ms",
             "avg_scan_hps", "avg_nonstale_wall_hps",
             "avg_useful_device_pct", "latency_target_ms", "min_batch",
@@ -410,26 +491,65 @@ def main() -> int:
 
     by_compare: dict[tuple, list[BatchSample]] = defaultdict(list)
     for b in batches:
-        by_compare[(b.fingerprint, b.gpu, b.cn, b.batch)].append(b)
+        by_compare[
+            (b.hardware_signature, b.fingerprint, b.cn, b.batch)
+        ].append(b)
 
     comparison_rows = []
-    for (fingerprint, gpu, cn, batch), samples in sorted(by_compare.items()):
+    comparison_stats: dict[tuple, dict[str, float | int | str]] = {}
+
+    for (hardware_signature, fingerprint, cn, batch), samples in sorted(
+        by_compare.items()
+    ):
         sources = {s.source for s in samples}
+        devices = {(s.source, s.gpu) for s in samples}
         stale_scans = sum(s.stale for s in samples)
+        total_wall_ms = sum(s.wall_ms for s in samples)
+        nonstale_hashes = sum(s.hashes for s in samples if not s.stale)
+        effective_hps = (
+            1000.0 * nonstale_hashes / total_wall_ms
+            if total_wall_ms > 0.0 else math.nan
+        )
+
+        stats = {
+            "hardware_signature": hardware_signature,
+            "fingerprint": fingerprint,
+            "cn": cn,
+            "batch": batch,
+            "scans": len(samples),
+            "sources": len(sources),
+            "devices": len(devices),
+            "stale_scans": stale_scans,
+            "stale_pct": 100.0 * stale_scans / len(samples),
+            "avg_scan_ms": mean(s.scan_ms for s in samples),
+            "avg_scan_hps": mean(
+                1000.0 * s.hashes / s.scan_ms
+                for s in samples if s.scan_ms > 0.0
+            ),
+            "effective_hps": effective_hps,
+            "avg_useful_device_pct": mean(
+                s.useful_device_pct for s in samples
+            ),
+        }
+        comparison_stats[
+            (hardware_signature, fingerprint, cn, batch)
+        ] = stats
+
         comparison_rows.append(
             (
+                hardware_signature,
                 fingerprint,
-                gpu,
                 cn,
                 batch,
                 len(samples),
                 len(sources),
+                len(devices),
                 stale_scans,
-                f"{100.0 * stale_scans / len(samples):.4f}",
-                f"{mean(s.scan_ms for s in samples):.3f}",
-                f"{mean((1000.0 * s.hashes / s.scan_ms) for s in samples if s.scan_ms > 0.0):.3f}",
-                f"{mean((1000.0 * s.hashes / s.wall_ms) for s in samples if s.wall_ms > 0.0 and not s.stale):.3f}",
-                f"{mean(s.useful_device_pct for s in samples):.4f}",
+                f"{stats['stale_pct']:.4f}",
+                f"{stats['avg_scan_ms']:.3f}",
+                f"{stats['avg_scan_hps']:.3f}",
+                f"{effective_hps:.3f}",
+                f"{stats['avg_useful_device_pct']:.4f}",
                 ";".join(
                     str(x)
                     for x in sorted(
@@ -442,12 +562,79 @@ def main() -> int:
     write_csv(
         args.output / "batch_comparison.csv",
         [
-            "fingerprint", "gpu", "cn", "batch", "scans", "sources",
-            "stale_scans", "stale_pct", "avg_scan_ms",
-            "avg_scan_hps", "avg_nonstale_wall_hps",
+            "hardware_signature", "fingerprint", "cn", "batch", "scans",
+            "sources", "devices", "stale_scans", "stale_pct",
+            "avg_scan_ms", "avg_scan_hps", "effective_hps",
             "avg_useful_device_pct", "min_batch_values",
         ],
         comparison_rows,
+    )
+
+    # Recommend only from sufficiently sampled observations.  The threshold is
+    # deliberately generic: no model, architecture, vendor, or batch size is
+    # privileged.  Consumers may raise the threshold for stricter confidence.
+    min_preferred_scans = 8
+    by_preference: dict[tuple, list[dict[str, float | int | str]]] = defaultdict(list)
+    for stats in comparison_stats.values():
+        if int(stats["scans"]) >= min_preferred_scans:
+            by_preference[
+                (
+                    str(stats["hardware_signature"]),
+                    str(stats["fingerprint"]),
+                    str(stats["cn"]),
+                )
+            ].append(stats)
+
+    preferred_rows = []
+    for (hardware_signature, fingerprint, cn), candidates in sorted(
+        by_preference.items()
+    ):
+        if not candidates:
+            continue
+
+        candidates.sort(
+            key=lambda x: (
+                float(x["effective_hps"]),
+                -float(x["stale_pct"]),
+                int(x["scans"]),
+            ),
+            reverse=True,
+        )
+        best = candidates[0]
+
+        confidence = "low"
+        scans = int(best["scans"])
+        sources = int(best["sources"])
+        if scans >= 50 and sources >= 3:
+            confidence = "high"
+        elif scans >= 20 and sources >= 2:
+            confidence = "medium"
+
+        preferred_rows.append(
+            (
+                hardware_signature,
+                fingerprint,
+                cn,
+                int(best["batch"]),
+                scans,
+                sources,
+                int(best["devices"]),
+                f"{float(best['effective_hps']):.3f}",
+                f"{float(best['stale_pct']):.4f}",
+                f"{float(best['avg_scan_ms']):.3f}",
+                confidence,
+                len(candidates),
+            )
+        )
+
+    write_csv(
+        args.output / "preferred_batch.csv",
+        [
+            "hardware_signature", "fingerprint", "cn", "preferred_batch",
+            "scans", "sources", "devices", "effective_hps", "stale_pct",
+            "avg_scan_ms", "confidence", "candidate_batches",
+        ],
+        preferred_rows,
     )
 
     print(
@@ -465,6 +652,7 @@ def main() -> int:
         if len({b.batch for b in batches if b.fingerprint == fp}) > 1
     }
     print(f"Fingerprints with multiple observed batch sizes: {len(multi_batch):,}")
+    print(f"Preferred hardware/fingerprint/CN entries: {len(preferred_rows):,}")
     print(f"Wrote analysis to: {args.output}")
     return 0
 
