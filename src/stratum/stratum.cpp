@@ -2223,6 +2223,10 @@ void Client::report_stats(bool force)
             std::size_t sample_limit,
             double scale_low = -1.0,
             double scale_high = -1.0) {
+            static constexpr const char* levels[] = {
+                " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
+            };
+
             std::array<std::string, 2> rows{{"", ""}};
             if (width == 0U)
                 return rows;
@@ -2248,16 +2252,14 @@ void Client::report_stats(bool force)
                     std::max(1.0, stats.high - stats.low);
                 const double pad =
                     std::max(1.0, spread * 0.08);
-                low = std::max(0.0, stats.low - pad);
-                high = stats.high + pad;
+                low =
+                    std::max(0.0, stats.low - pad);
+                high =
+                    stats.high + pad;
             }
             const double span =
                 std::max(1.0, high - low);
 
-            // Four vertical trace levels spread across two terminal rows.
-            // Unlike the former Braille plot, this draws a continuous scope
-            // trace with ordinary box-drawing characters.
-            std::vector<int> levels(width, 3);
             for (std::size_t x = 0U; x < width; ++x) {
                 const double pos =
                     width <= 1U
@@ -2265,6 +2267,7 @@ void Client::report_stats(bool force)
                         : static_cast<double>(x) *
                               static_cast<double>(count - 1U) /
                               static_cast<double>(width - 1U);
+
                 const std::size_t i0 =
                     static_cast<std::size_t>(pos);
                 const std::size_t i1 =
@@ -2276,68 +2279,26 @@ void Client::report_stats(bool force)
                         (1.0 - frac) +
                     (*(begin + static_cast<std::ptrdiff_t>(i1))) *
                         frac;
+
                 const double ratio =
-                    std::clamp((value - low) / span, 0.0, 1.0);
-                levels[x] =
-                    3 - std::clamp(
-                            static_cast<int>(ratio * 3.0 + 0.5),
-                            0,
-                            3);
-            }
+                    std::clamp(
+                        (value - low) / span,
+                        0.0,
+                        1.0);
 
-            const auto row_for = [](int level) {
-                return level < 2 ? 0 : 1;
-            };
+                const int level =
+                    std::clamp(
+                        static_cast<int>(ratio * 16.0 + 0.5),
+                        0,
+                        16);
 
-            const auto flat_char = [](int level) -> const char* {
-                return level == 0 ? "▔" :
-                       level == 1 ? "─" :
-                       level == 2 ? "─" : "_";
-            };
+                const int lower =
+                    std::min(level, 8);
+                const int upper =
+                    std::max(0, level - 8);
 
-            for (std::size_t x = 0U; x < width; ++x) {
-                const int current = levels[x];
-                const int previous =
-                    x == 0U ? current : levels[x - 1U];
-                const int next =
-                    x + 1U < width ? levels[x + 1U] : current;
-
-                std::string top = " ";
-                std::string bottom = " ";
-                const int row = row_for(current);
-
-                const bool rising_in = previous > current;
-                const bool falling_in = previous < current;
-                const bool rising_out = next < current;
-                const bool falling_out = next > current;
-
-                std::string glyph = flat_char(current);
-
-                if (rising_in || falling_out)
-                    glyph = row == 0 ? "╭" : "╰";
-                else if (falling_in || rising_out)
-                    glyph = row == 0 ? "╮" : "╯";
-
-                if (row == 0)
-                    top = glyph;
-                else
-                    bottom = glyph;
-
-                // When the trace crosses between rows, add a vertical bridge
-                // in the otherwise empty row so the path remains connected.
-                const bool crosses_from_previous =
-                    row_for(previous) != row;
-                const bool crosses_to_next =
-                    row_for(next) != row;
-                if (crosses_from_previous || crosses_to_next) {
-                    if (row == 0)
-                        bottom = "│";
-                    else
-                        top = "│";
-                }
-
-                rows[0] += top;
-                rows[1] += bottom;
+                rows[0] += levels[upper];
+                rows[1] += levels[lower];
             }
 
             return rows;
