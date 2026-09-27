@@ -3541,6 +3541,97 @@ void Client::report_stats(bool force)
                     {0U, 38U, U'⠂', 47U}
                 };
 
+                // After the fixed corner plants are established, keep the
+                // garden alive for very long jobs. Fill every still-unused
+                // terminal cell from the ground/edges inward, then repeatedly
+                // densify its Braille dots. At a three-second cadence this
+                // provides well over an hour of visible one-pixel-at-a-time
+                // growth without disturbing the hero leaf.
+                static const std::vector<LeafCell> procedural_cells = [] {
+                    std::array<std::array<bool, plant_cols>, plant_rows>
+                        occupied{};
+
+                    for (std::size_t row = 0U;
+                         row < traced_leaf.size();
+                         ++row) {
+                        for (std::size_t col = 0U;
+                             col < leaf_width;
+                             ++col) {
+                            if (traced_leaf[row][col] != U' ')
+                                occupied[row][leaf_left + col] = true;
+                        }
+                    }
+
+                    for (const auto& cell : overflow_cells) {
+                        if (cell.row < plant_rows &&
+                            cell.col < plant_cols)
+                            occupied[cell.row][cell.col] = true;
+                    }
+
+                    std::vector<LeafCell> cells;
+                    cells.reserve(plant_rows * plant_cols);
+
+                    constexpr std::size_t center_col =
+                        plant_cols / 2U;
+                    for (std::size_t row = 0U;
+                         row < plant_rows;
+                         ++row) {
+                        for (std::size_t col = 0U;
+                             col < plant_cols;
+                             ++col) {
+                            if (occupied[row][col])
+                                continue;
+
+                            const std::size_t height =
+                                plant_rows - 1U - row;
+                            const std::size_t edge_distance =
+                                std::min(
+                                    col,
+                                    plant_cols - 1U - col);
+                            const std::size_t center_distance =
+                                col > center_col
+                                    ? col - center_col
+                                    : center_col - col;
+                            const std::uint64_t jitter =
+                                static_cast<std::uint64_t>(
+                                    (row * 131U +
+                                     col * 17U) % 19U);
+
+                            // Ground first, then outer edges/vines, with a
+                            // small deterministic jitter so growth is organic
+                            // rather than a perfectly straight raster.
+                            const std::uint64_t score =
+                                static_cast<std::uint64_t>(
+                                    height * 100U +
+                                    edge_distance * 18U +
+                                    (plant_cols - center_distance) * 2U) +
+                                jitter;
+
+                            cells.push_back(
+                                LeafCell{
+                                    row,
+                                    col,
+                                    U'⠁',
+                                    score});
+                        }
+                    }
+
+                    std::stable_sort(
+                        cells.begin(),
+                        cells.end(),
+                        [](const LeafCell& a,
+                           const LeafCell& b) {
+                            if (a.growth_score != b.growth_score)
+                                return a.growth_score <
+                                       b.growth_score;
+                            if (a.row != b.row)
+                                return a.row > b.row;
+                            return a.col < b.col;
+                        });
+
+                    return cells;
+                }();
+
                 auto append_utf8 =
                     [](std::string& out, char32_t cp) {
                         if (cp <= 0x7fU) {
@@ -3663,6 +3754,64 @@ void Client::report_stats(bool force)
                         plant_canvas[cell.row][cell.col] == U' ') {
                         plant_canvas[cell.row][cell.col] =
                             cell.glyph;
+                    }
+                }
+
+                // Once all fixed corner growth is visible, use remaining
+                // cells as a deterministic long-job garden. Each pass adds
+                // another Braille dot to one cell, so the panel continues
+                // visibly growing instead of reaching a hard stop.
+                static constexpr double procedural_interval_seconds =
+                    3.0;
+                static constexpr std::array<unsigned char, 8U>
+                    braille_density_masks{{
+                        0x01U, 0x03U, 0x07U, 0x47U,
+                        0x4fU, 0x5fU, 0x7fU, 0xffU
+                    }};
+                const double procedural_start_seconds =
+                    mature_seconds +
+                    overflow_interval_seconds *
+                        static_cast<double>(overflow_cells.size());
+                const double procedural_age =
+                    std::max(
+                        0.0,
+                        current_job_age - procedural_start_seconds);
+                const std::size_t procedural_steps =
+                    static_cast<std::size_t>(
+                        procedural_age /
+                        procedural_interval_seconds);
+
+                if (!procedural_cells.empty() &&
+                    procedural_steps != 0U) {
+                    const std::size_t cell_count =
+                        procedural_cells.size();
+
+                    for (std::size_t i = 0U;
+                         i < cell_count;
+                         ++i) {
+                        if (procedural_steps <= i)
+                            break;
+
+                        const std::size_t touches =
+                            1U +
+                            (procedural_steps - 1U - i) /
+                                cell_count;
+                        const std::size_t stage =
+                            std::min<std::size_t>(
+                                braille_density_masks.size(),
+                                touches);
+                        const auto& cell =
+                            procedural_cells[i];
+
+                        if (cell.row < plant_rows &&
+                            cell.col < plant_cols &&
+                            plant_canvas[cell.row][cell.col] == U' ') {
+                            plant_canvas[cell.row][cell.col] =
+                                static_cast<char32_t>(
+                                    0x2800U +
+                                    braille_density_masks[
+                                        stage - 1U]);
+                        }
                     }
                 }
 
