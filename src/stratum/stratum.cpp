@@ -2179,16 +2179,12 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto compact_graph = [&history_stats](
+        const auto compact_graph = [&history_stats, &utf8_codepoint](
             const std::vector<double>& history,
             std::size_t width,
             std::size_t sample_limit,
             double scale_low = -1.0,
             double scale_high = -1.0) {
-            static constexpr const char* levels[] = {
-                " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
-            };
-
             std::array<std::string, 2> rows{{"", ""}};
             if (width == 0U)
                 return rows;
@@ -2214,21 +2210,48 @@ void Client::report_stats(bool force)
                     std::max(1.0, stats.high - stats.low);
                 const double pad =
                     std::max(1.0, spread * 0.08);
-                low =
-                    std::max(0.0, stats.low - pad);
-                high =
-                    stats.high + pad;
+                low = std::max(0.0, stats.low - pad);
+                high = stats.high + pad;
             }
             const double span =
                 std::max(1.0, high - low);
 
-            for (std::size_t x = 0U; x < width; ++x) {
+            const std::size_t pixel_width = width * 2U;
+            std::array<std::vector<unsigned char>, 2> cells{{
+                std::vector<unsigned char>(width, 0U),
+                std::vector<unsigned char>(width, 0U)
+            }};
+
+            const auto set_dot = [&](std::size_t px, int py) {
+                if (px >= pixel_width || py < 0 || py >= 8)
+                    return;
+
+                const std::size_t row =
+                    py < 4 ? 0U : 1U;
+                const int local_y =
+                    py < 4 ? py : py - 4;
+                const std::size_t cell = px / 2U;
+                const bool right = (px & 1U) != 0U;
+
+                static constexpr unsigned char left_bits[4] = {
+                    0x01U, 0x02U, 0x04U, 0x40U
+                };
+                static constexpr unsigned char right_bits[4] = {
+                    0x08U, 0x10U, 0x20U, 0x80U
+                };
+
+                cells[row][cell] |=
+                    right ? right_bits[local_y] : left_bits[local_y];
+            };
+
+            int prev_y = -1;
+            for (std::size_t px = 0U; px < pixel_width; ++px) {
                 const double pos =
-                    width <= 1U
+                    pixel_width <= 1U
                         ? 0.0
-                        : static_cast<double>(x) *
+                        : static_cast<double>(px) *
                               static_cast<double>(count - 1U) /
-                              static_cast<double>(width - 1U);
+                              static_cast<double>(pixel_width - 1U);
 
                 const std::size_t i0 =
                     static_cast<std::size_t>(pos);
@@ -2248,19 +2271,32 @@ void Client::report_stats(bool force)
                         0.0,
                         1.0);
 
-                const int level =
-                    std::clamp(
-                        static_cast<int>(ratio * 16.0 + 0.5),
-                        0,
-                        16);
+                const int y =
+                    7 - static_cast<int>(ratio * 7.0 + 0.5);
 
-                const int lower =
-                    std::min(level, 8);
-                const int upper =
-                    std::max(0, level - 8);
+                set_dot(px, y);
 
-                rows[0] += levels[upper];
-                rows[1] += levels[lower];
+                if (prev_y >= 0 && std::abs(y - prev_y) > 1) {
+                    const int lo = std::min(prev_y, y);
+                    const int hi = std::max(prev_y, y);
+                    for (int bridge = lo + 1;
+                         bridge < hi;
+                         ++bridge) {
+                        set_dot(px, bridge);
+                    }
+                }
+
+                prev_y = y;
+            }
+
+            for (std::size_t row = 0U; row < 2U; ++row) {
+                for (unsigned char mask : cells[row]) {
+                    if (mask == 0U)
+                        rows[row].push_back(' ');
+                    else
+                        rows[row] +=
+                            utf8_codepoint(0x2800U + mask);
+                }
             }
 
             return rows;
