@@ -3684,7 +3684,7 @@ void Client::report_stats(bool force)
 
                 {
                     std::ostringstream job_line;
-                    job_line << "JOB AGE ";
+                    job_line << "GROW TIME ";
                     if (active_job_received_at_.time_since_epoch().count() != 0) {
                         const double job_age_seconds =
                             std::chrono::duration<double>(
