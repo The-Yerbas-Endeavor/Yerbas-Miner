@@ -1394,6 +1394,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                 std::clamp(memory.probe_from_batch, floor, base);
             worker.engine->set_active_batch_size(rollback);
             std::cout << "[throughput-probe] GPU " << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                      << std::dec
                       << " CN=" << cn_mask_names(result.cn_mask)
                       << " batch=" << memory.probe_batch
                       << " result=revert"
@@ -1412,6 +1415,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.rejected_probe_stable_samples = 0U;
         } else {
             std::cout << "[throughput-probe] GPU " << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                      << std::dec
                       << " CN=" << cn_mask_names(result.cn_mask)
                       << " batch=" << memory.probe_batch
                       << " result=keep"
@@ -1469,8 +1475,10 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     constexpr std::size_t kBatchQuantum = 256U;
     const bool trusted_persistent_batch =
         memory.persisted_batch != 0U &&
-        memory.persisted_rotation_fingerprint ==
-            result.rotation_fingerprint &&
+        static_cast<std::uint64_t>(
+            memory.persisted_rotation_fingerprint) ==
+            static_cast<std::uint64_t>(
+                result.rotation_fingerprint) &&
         result.hash_count == memory.persisted_batch;
 
     if (!trusted_persistent_batch &&
@@ -1493,6 +1501,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             worker.engine->set_active_batch_size(desired);
             std::cout << "[latency-first-scan] GPU "
                       << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                      << std::dec
                       << " CN=" << cn_mask_names(result.cn_mask)
                       << " scan_ms=" << std::fixed
                       << std::setprecision(1) << result.scan_ms
@@ -1610,6 +1621,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
 
                     std::cout << "[throughput-probe] GPU "
                               << worker.device_id
+                              << " rotation=" << std::hex
+                              << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                              << std::dec
                               << " CN="
                               << cn_mask_names(result.cn_mask)
                               << " reopening_batch="
@@ -1641,6 +1655,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                 worker.engine->set_active_batch_size(probe_batch);
 
                 std::cout << "[throughput-probe] GPU " << worker.device_id
+                          << " rotation=" << std::hex
+                          << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                          << std::dec
                           << " CN=" << cn_mask_names(result.cn_mask)
                           << " batch=" << current << " -> " << probe_batch
                           << " baseline_hps=" << std::fixed
@@ -1694,6 +1711,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     }
 
     std::cout << "[latency-target] GPU " << worker.device_id
+              << " rotation=" << std::hex
+              << static_cast<std::uint64_t>(result.rotation_fingerprint)
+              << std::dec
               << " CN=" << cn_mask_names(result.cn_mask)
               << " scan_ms=" << std::fixed << std::setprecision(1)
               << result.scan_ms
