@@ -3042,7 +3042,7 @@ void Client::report_stats(bool force)
                 const std::size_t frame_index =
                     static_cast<std::size_t>(
                         (static_cast<std::uint64_t>(uptime) / 2ULL) %
-                        2ULL);
+                        4ULL);
 
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
@@ -3288,57 +3288,90 @@ void Client::report_stats(bool force)
                 }
                 work_stats.push_back(job_line.str());
 
-                // Compact console miner driven by actual completed work.
-                // Frame 0 has the pickaxe raised; frame 1 shows a horizontal
-                // impact into a rock face. Keep the art separate from telemetry
-                // so neither becomes unreadable in a narrow terminal panel.
-                static const std::array<std::array<const char*, 9>, 2>
-                    miner_frames{{
+                // Proof-of-Grass growth animation. All frames share the
+                // same 12-row canvas and soil baseline so the plant grows in
+                // place instead of jumping around the BLOCK WORK panel.
+                // Sequence: seedling -> growing -> harvest -> growing.
+                static const std::array<std::array<const char*, 12>, 4>
+                    plant_frames{{
                         {{
-                            "        ______        ======",
-                            "       /______\\          \\ ",
-                            "       | o  o |           \\",
-                            "       |  --  |        __/ ",
-                            "      /|______|\\______/    ",
-                            "     / |  ||  |             ",
-                            "       |  ||  |             ",
-                            "      / \\    / \\       ###",
-                            "_____/___\\__/___\\_____#####",
+                            "                                        ",
+                            "                                        ",
+                            "                                        ",
+                            "                 ╲   ╱                  ",
+                            "                  ╲ ╱                   ",
+                            "               ────│────                ",
+                            "                  ╱│╲                   ",
+                            "                 ╱ │ ╲                  ",
+                            "                   │                    ",
+                            "                   │                    ",
+                            "              _____│_____               ",
+                            "            [1] SEEDLING                 ",
                         }},
                         {{
-                            "        ______              ",
-                            "       /______\\             ",
-                            "       | o  o |             ",
-                            "       |  --  |             ",
-                            "      /|______|\\____        ",
-                            "     / |  ||  |    \\======X",
-                            "       |  ||  |          *#",
-                            "      / \\    / \\       *###",
-                            "_____/___\\__/___\\_____#####",
+                            "                   ╱╲                   ",
+                            "                  ╱  ╲                  ",
+                            "              ╲  ╱ │  ╲  ╱             ",
+                            "               ╲╱  │   ╲╱              ",
+                            "            ────╲  │  ╱────            ",
+                            "                 ╲ │ ╱                 ",
+                            "              ╲───╲│╱───╱              ",
+                            "                ╲  │  ╱                ",
+                            "            ─────╲ │ ╱─────            ",
+                            "                  ╲│╱                  ",
+                            "              _____│_____               ",
+                            "             [2] GROWING                ",
+                        }},
+                        {{
+                            "                   ╱╲                   ",
+                            "              ╲   ╱│ ╲   ╱              ",
+                            "          ╲────╲ ╱ │  ╲ ╱────╱          ",
+                            "           ╲    ╲  │  ╱    ╱           ",
+                            "        ╲───╲────╲ │ ╱────╱───╱        ",
+                            "          ╲   ╲   ╲│╱   ╱   ╱          ",
+                            "      ╲────╲───╲───│───╱───╱────╱      ",
+                            "        ╲    ╲  ╲  │  ╱  ╱    ╱        ",
+                            "          ╲───╲──╲ │ ╱──╱───╱          ",
+                            "               ╲  ╲│╱  ╱               ",
+                            "              _____│_____               ",
+                            "             [3] HARVEST                ",
+                        }},
+                        {{
+                            "                   ╱╲                   ",
+                            "                  ╱  ╲                  ",
+                            "              ╲  ╱ │  ╲  ╱             ",
+                            "               ╲╱  │   ╲╱              ",
+                            "            ────╲  │  ╱────            ",
+                            "                 ╲ │ ╱                 ",
+                            "              ╲───╲│╱───╱              ",
+                            "                ╲  │  ╱                ",
+                            "            ─────╲ │ ╱─────            ",
+                            "                  ╲│╱                  ",
+                            "              _____│_____               ",
+                            "             [2] GROWING                ",
                         }},
                     }};
 
-                const bool miner_is_working =
+                const bool plant_is_working =
                     operating_status == "HASHING";
-                const std::size_t miner_frame =
-                    miner_is_working ? frame_index : 0U;
-                const std::string miner_color =
-                    miner_is_working
+                const std::size_t plant_frame =
+                    plant_is_working ? frame_index : 0U;
+                const std::string plant_color =
+                    plant_is_working
                         ? lime
                         : (operating_status == "STALLED"
                                ? red
                                : faint);
 
-                constexpr std::size_t miner_rows = 9U;
+                constexpr std::size_t plant_rows = 12U;
 
                 for (std::size_t row = 0U;
-                     row < miner_rows;
+                     row < plant_rows;
                      ++row) {
                     std::ostringstream art_line;
                     art_line
-                        << miner_color
-                        << "  "
-                        << miner_frames[miner_frame][row]
+                        << plant_color
+                        << plant_frames[plant_frame][row]
                         << reset;
                     mascot_rows.push_back(art_line.str());
                 }
