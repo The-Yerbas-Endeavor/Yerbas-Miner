@@ -3624,8 +3624,7 @@ void Client::report_stats(bool force)
                 yellow + bold +
                 std::string("DEV FEE MINING ACTIVE") +
                 reset + dim +
-                "  •  pool.yerbas.org:3333  •  worker " +
-                kDevFeeWorker +
+                "  •  pool.yerbas.org:3333" +
                 reset);
         }
 
