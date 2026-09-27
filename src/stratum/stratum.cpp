@@ -1760,7 +1760,6 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
         return;
 
     constexpr double kSeedTargetFraction = 0.95;
-    constexpr std::size_t kBatchQuantum = 256U;
     const double predicted_hashes =
         (target_ms * kSeedTargetFraction) / memory.ms_per_hash_ewma;
 
