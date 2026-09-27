@@ -1896,7 +1896,7 @@ void Client::upload_gpu_job()
         worker.latency_base_batch = worker.engine->batch_size();
         worker.latency_scan_ms_ewma = 0.0;
         worker.latency_samples = 0U;
-        worker.transition_shape_stage = 0U;
+        worker.transition_shape_zone = 0U;
         seed_gpu_batch_from_live_memory(worker, gpu_active_cn_mask_);
         const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
         worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start;
@@ -1931,20 +1931,36 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
 
         if (job_lifetime_samples_ >= 4U &&
             job_lifetime_ms_ewma_ >= 20000.0 &&
-            active_job_received_at_.time_since_epoch().count() != 0 &&
-            worker.transition_shape_stage < 2U) {
+            active_job_received_at_.time_since_epoch().count() != 0) {
             const double age_ms =
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() -
                     active_job_received_at_).count();
-            const double threshold =
-                job_lifetime_ms_ewma_ *
-                (worker.transition_shape_stage == 0U ? 0.80 : 0.95);
+            const double age_ratio =
+                age_ms / job_lifetime_ms_ewma_;
 
-            if (age_ms >= threshold) {
-                constexpr std::size_t kTransitionQuantum = 256U;
-                constexpr std::size_t kTransitionMinBatch = 1024U;
-                std::size_t reduced = learned_batch / 2U;
+            constexpr std::size_t kTransitionQuantum = 256U;
+            constexpr std::size_t kTransitionMinBatch = 1024U;
+
+            std::uint32_t transition_zone = 0U;
+            double batch_fraction = 1.0;
+
+            if (age_ratio >= 0.80 && age_ratio < 1.00) {
+                transition_zone = 1U;
+                batch_fraction = 0.50;
+            } else if (age_ratio >= 1.00 && age_ratio < 1.25) {
+                transition_zone = 2U;
+                batch_fraction = 0.75;
+            } else if (age_ratio >= 1.25) {
+                transition_zone = 3U;
+            }
+
+            if (transition_zone == 1U ||
+                transition_zone == 2U) {
+                std::size_t reduced =
+                    static_cast<std::size_t>(
+                        static_cast<double>(learned_batch) *
+                        batch_fraction);
                 reduced =
                     (reduced / kTransitionQuantum) *
                     kTransitionQuantum;
@@ -1954,25 +1970,35 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                         std::max(kTransitionMinBatch, reduced));
                 transition_shaped =
                     effective_batch < learned_batch;
+            }
 
-                if (transition_shaped) {
-                    ++worker.transition_shape_stage;
-                    std::cout
-                        << "[transition-batch] GPU "
-                        << worker.device_id
-                        << " stage="
-                        << worker.transition_shape_stage
-                        << " job_age_ms="
-                        << std::fixed << std::setprecision(1)
-                        << age_ms
-                        << " lifetime_ewma_ms="
-                        << job_lifetime_ms_ewma_
-                        << " batch="
-                        << learned_batch
-                        << " -> "
-                        << effective_batch
-                        << "\n";
-                }
+            if (transition_zone != worker.transition_shape_zone) {
+                worker.transition_shape_zone = transition_zone;
+
+                const char* zone_name =
+                    transition_zone == 1U
+                        ? "late-50pct"
+                        : (transition_zone == 2U
+                               ? "overdue-75pct"
+                               : (transition_zone == 3U
+                                      ? "expired-normal"
+                                      : "normal"));
+
+                std::cout
+                    << "[transition-batch] GPU "
+                    << worker.device_id
+                    << " zone="
+                    << zone_name
+                    << " job_age_ms="
+                    << std::fixed << std::setprecision(1)
+                    << age_ms
+                    << " lifetime_ewma_ms="
+                    << job_lifetime_ms_ewma_
+                    << " batch="
+                    << learned_batch
+                    << " -> "
+                    << effective_batch
+                    << "\n";
             }
         }
 
@@ -2096,20 +2122,36 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
 
         if (job_lifetime_samples_ >= 4U &&
             job_lifetime_ms_ewma_ >= 20000.0 &&
-            active_job_received_at_.time_since_epoch().count() != 0 &&
-            worker.transition_shape_stage < 2U) {
+            active_job_received_at_.time_since_epoch().count() != 0) {
             const double age_ms =
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() -
                     active_job_received_at_).count();
-            const double threshold =
-                job_lifetime_ms_ewma_ *
-                (worker.transition_shape_stage == 0U ? 0.80 : 0.95);
+            const double age_ratio =
+                age_ms / job_lifetime_ms_ewma_;
 
-            if (age_ms >= threshold) {
-                constexpr std::size_t kTransitionQuantum = 256U;
-                constexpr std::size_t kTransitionMinBatch = 1024U;
-                std::size_t reduced = learned_batch / 2U;
+            constexpr std::size_t kTransitionQuantum = 256U;
+            constexpr std::size_t kTransitionMinBatch = 1024U;
+
+            std::uint32_t transition_zone = 0U;
+            double batch_fraction = 1.0;
+
+            if (age_ratio >= 0.80 && age_ratio < 1.00) {
+                transition_zone = 1U;
+                batch_fraction = 0.50;
+            } else if (age_ratio >= 1.00 && age_ratio < 1.25) {
+                transition_zone = 2U;
+                batch_fraction = 0.75;
+            } else if (age_ratio >= 1.25) {
+                transition_zone = 3U;
+            }
+
+            if (transition_zone == 1U ||
+                transition_zone == 2U) {
+                std::size_t reduced =
+                    static_cast<std::size_t>(
+                        static_cast<double>(learned_batch) *
+                        batch_fraction);
                 reduced =
                     (reduced / kTransitionQuantum) *
                     kTransitionQuantum;
@@ -2119,25 +2161,35 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
                         std::max(kTransitionMinBatch, reduced));
                 transition_shaped =
                     effective_batch < learned_batch;
+            }
 
-                if (transition_shaped) {
-                    ++worker.transition_shape_stage;
-                    std::cout
-                        << "[transition-batch] GPU "
-                        << worker.device_id
-                        << " stage="
-                        << worker.transition_shape_stage
-                        << " job_age_ms="
-                        << std::fixed << std::setprecision(1)
-                        << age_ms
-                        << " lifetime_ewma_ms="
-                        << job_lifetime_ms_ewma_
-                        << " batch="
-                        << learned_batch
-                        << " -> "
-                        << effective_batch
-                        << "\n";
-                }
+            if (transition_zone != worker.transition_shape_zone) {
+                worker.transition_shape_zone = transition_zone;
+
+                const char* zone_name =
+                    transition_zone == 1U
+                        ? "late-50pct"
+                        : (transition_zone == 2U
+                               ? "overdue-75pct"
+                               : (transition_zone == 3U
+                                      ? "expired-normal"
+                                      : "normal"));
+
+                std::cout
+                    << "[transition-batch] GPU "
+                    << worker.device_id
+                    << " zone="
+                    << zone_name
+                    << " job_age_ms="
+                    << std::fixed << std::setprecision(1)
+                    << age_ms
+                    << " lifetime_ewma_ms="
+                    << job_lifetime_ms_ewma_
+                    << " batch="
+                    << learned_batch
+                    << " -> "
+                    << effective_batch
+                    << "\n";
             }
         }
 
