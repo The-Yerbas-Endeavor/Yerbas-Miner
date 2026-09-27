@@ -307,12 +307,21 @@ private:
         double telemetry_useful_scan_ms{0.0};
         double telemetry_stale_scan_ms{0.0};
 
+        struct LatencyMemory {
+            double ms_per_hash_ewma{0.0};
+            std::uint64_t samples{0};
+        };
+
         // Optional live latency-targeted production experiment. The base batch
         // is the rotation-selected tuned batch; adaptive changes may only
         // reduce toward the configured latency target and never exceed it.
+        //
+        // Recent non-stale timing is retained per CN mask so a new Stratum job
+        // does not have to relearn the same device/CN throughput from scratch.
         std::size_t latency_base_batch{0};
         double latency_scan_ms_ewma{0.0};
         std::uint64_t latency_samples{0};
+        std::array<LatencyMemory, 64> latency_memory{};
 
         // Latest completed device scan duration for live dashboard telemetry.
         double last_scan_ms{0.0};
@@ -329,6 +338,8 @@ private:
     void adapt_gpu_batch_after_scan(GpuWorker& worker,
                                     const GpuScanResult& result,
                                     bool stale);
+    void seed_gpu_batch_from_live_memory(GpuWorker& worker,
+                                         std::uint32_t cn_mask);
     void drain_gpu_scans() noexcept;
 
     std::vector<GpuWorker> gpu_workers_;
