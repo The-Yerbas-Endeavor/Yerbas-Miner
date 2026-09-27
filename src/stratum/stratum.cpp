@@ -3436,6 +3436,19 @@ void Client::report_stats(bool force)
             frame << line(work.str());
         }
 
+        {
+            std::ostringstream average;
+            average
+                << fit("AVG HASHRATE", 14)
+                << green << bold
+                << format_rate(average_hps)
+                << reset
+                << dim
+                << "   session average"
+                << reset;
+            frame << line(average.str());
+        }
+
         frame << section("ACTIVITY");
 
         if (g_recent_activity.empty()) {
