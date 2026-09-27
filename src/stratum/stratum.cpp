@@ -1208,7 +1208,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
 
     if (memory.probe_pending &&
         result.hash_count == memory.probe_batch) {
-        constexpr double kProbeMinGain = 0.003;
+        constexpr double kProbeMinGain = 0.0075;
         constexpr double kProbeMaxLatencyFactor = 1.10;
         const double gain =
             memory.probe_baseline_hps > 0.0
@@ -1252,6 +1252,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                       << result.scan_ms
                       << "\n";
             memory.probe_cooldown = 2U;
+            memory.proven_batch = memory.probe_batch;
+            memory.proven_hps = scan_hps;
+            memory.proven_latency_overruns = 0U;
             if (memory.rejected_probe_batch != 0U &&
                 memory.probe_batch >= memory.rejected_probe_batch) {
                 memory.rejected_probe_batch = 0U;
@@ -1331,8 +1334,24 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     desired = (desired / kBatchQuantum) * kBatchQuantum;
     desired = std::clamp(desired, floor, base);
 
+    const bool on_proven_batch =
+        memory.proven_batch != 0U &&
+        current == memory.proven_batch;
+    const double slow_limit =
+        target_ms * (on_proven_batch ? 1.10 : 1.08);
+    const bool latency_overrun =
+        result.scan_ms > slow_limit;
+
+    if (latency_overrun && on_proven_batch) {
+        ++memory.proven_latency_overruns;
+    } else if (!latency_overrun) {
+        memory.proven_latency_overruns = 0U;
+    }
+
     const bool too_slow =
-        result.scan_ms > target_ms * 1.08;
+        latency_overrun &&
+        (!on_proven_batch ||
+         memory.proven_latency_overruns >= 2U);
     const bool has_growth_headroom =
         result.scan_ms < target_ms * 0.82;
 
@@ -1445,6 +1464,13 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
 
     worker.engine->set_active_batch_size(desired);
 
+    if (memory.proven_batch != 0U &&
+        desired < memory.proven_batch) {
+        memory.proven_batch = 0U;
+        memory.proven_hps = 0.0;
+        memory.proven_latency_overruns = 0U;
+    }
+
     std::cout << "[latency-target] GPU " << worker.device_id
               << " CN=" << cn_mask_names(result.cn_mask)
               << " scan_ms=" << std::fixed << std::setprecision(1)
@@ -1495,6 +1521,11 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
             : floor;
     desired = (desired / kBatchQuantum) * kBatchQuantum;
     desired = std::clamp(desired, floor, base);
+
+    if (memory.proven_batch >= floor &&
+        memory.proven_batch <= base) {
+        desired = std::max(desired, memory.proven_batch);
+    }
 
     if (desired < base && base - desired >= kBatchQuantum)
         worker.engine->set_active_batch_size(desired);
