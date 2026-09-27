@@ -1311,10 +1311,13 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         result.scan_ms <= 0.0 || result.hash_count == 0U)
         return;
 
-    if (result.cn_mask >= worker.latency_memory.size())
+    const std::uint64_t rotation_key =
+        static_cast<std::uint64_t>(result.rotation_fingerprint);
+    if (rotation_key == 0U)
         return;
 
-    auto& memory = worker.latency_memory[result.cn_mask];
+    auto& memory =
+        worker.rotation_latency_memory[rotation_key];
     if (memory.persisted_batch != 0U &&
         result.hash_count == memory.persisted_batch &&
         memory.samples == 0U &&
@@ -1359,12 +1362,13 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     }
 
     constexpr double kEwmaNewWeight = 0.35;
-    worker.latency_scan_ms_ewma =
-        worker.latency_samples == 0U
+    memory.scan_ms_ewma =
+        memory.samples == 1U
             ? result.scan_ms
-            : worker.latency_scan_ms_ewma * (1.0 - kEwmaNewWeight) +
+            : memory.scan_ms_ewma * (1.0 - kEwmaNewWeight) +
                   result.scan_ms * kEwmaNewWeight;
-    ++worker.latency_samples;
+    worker.latency_scan_ms_ewma = memory.scan_ms_ewma;
+    worker.latency_samples = memory.samples;
 
     const std::size_t current = worker.engine->batch_size();
     const std::size_t base =
@@ -1465,10 +1469,11 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     constexpr std::size_t kBatchQuantum = 256U;
     const bool trusted_persistent_batch =
         memory.persisted_batch != 0U &&
+        memory.persisted_rotation_fingerprint ==
+            result.rotation_fingerprint &&
         result.hash_count == memory.persisted_batch;
 
     if (!trusted_persistent_batch &&
-        worker.latency_samples == 1U &&
         memory.samples == 1U &&
         result.scan_ms > target_ms * 1.20) {
         const double ratio =
@@ -1501,8 +1506,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         return;
     }
 
-    if (worker.latency_samples < 2U ||
-        memory.samples < 2U ||
+    if (memory.samples < 2U ||
         memory.ms_per_hash_ewma <= 0.0)
         return;
 
@@ -1693,7 +1697,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
               << " CN=" << cn_mask_names(result.cn_mask)
               << " scan_ms=" << std::fixed << std::setprecision(1)
               << result.scan_ms
-              << " scan_ewma_ms=" << worker.latency_scan_ms_ewma
+              << " scan_ewma_ms=" << memory.scan_ms_ewma
               << " target_ms=" << target_ms
               << " ms_per_hash=" << std::setprecision(6)
               << memory.ms_per_hash_ewma
@@ -1709,10 +1713,13 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
                                                 std::uint32_t cn_mask)
 {
     const double target_ms = gpu_latency_target_ms();
-    if (target_ms <= 0.0 || cn_mask >= worker.latency_memory.size())
+    const std::uint64_t rotation_key =
+        static_cast<std::uint64_t>(active_rotation_fingerprint_);
+    if (target_ms <= 0.0 || rotation_key == 0U)
         return;
 
-    auto& memory = worker.latency_memory[cn_mask];
+    auto& memory =
+        worker.rotation_latency_memory[rotation_key];
     memory.probe_pending = false;
     memory.probe_from_batch = 0U;
     memory.probe_batch = 0U;
@@ -1779,15 +1786,16 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
         worker.engine->set_active_batch_size(desired);
 
     const std::size_t active = worker.engine->batch_size();
-    worker.latency_scan_ms_ewma =
+    memory.scan_ms_ewma =
         memory.ms_per_hash_ewma * static_cast<double>(active);
-    worker.latency_samples = 1U;
+    worker.latency_scan_ms_ewma = memory.scan_ms_ewma;
+    worker.latency_samples = memory.samples;
 
     std::cout << "[latency-seed] GPU " << worker.device_id
               << " CN=" << cn_mask_names(cn_mask)
               << " remembered_samples=" << memory.samples
               << " predicted_ms=" << std::fixed << std::setprecision(1)
-              << worker.latency_scan_ms_ewma
+              << memory.scan_ms_ewma
               << " target_ms=" << target_ms
               << " batch=" << base << " -> " << active
               << "\n";
