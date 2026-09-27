@@ -862,6 +862,18 @@ void Client::handle_message(const std::string& line)
                     : std::chrono::duration<double, std::milli>(
                           notify_received_at - active_job_received_at_).count();
 
+            if (prior_job_lifetime_ms > 0.0) {
+                constexpr double kJobLifetimeNewWeight = 0.20;
+                job_lifetime_ms_ewma_ =
+                    job_lifetime_samples_ == 0U
+                        ? prior_job_lifetime_ms
+                        : job_lifetime_ms_ewma_ *
+                              (1.0 - kJobLifetimeNewWeight) +
+                              prior_job_lifetime_ms *
+                                  kJobLifetimeNewWeight;
+                ++job_lifetime_samples_;
+            }
+
             job_ = std::move(next);
             active_job_received_at_ = notify_received_at;
             activate_pending_target();
@@ -1122,15 +1134,24 @@ void Client::stop_gpu_workers() noexcept
     }
 }
 
-void Client::dispatch_gpu_scan(GpuWorker& worker, std::uint32_t start_nonce)
+void Client::dispatch_gpu_scan(GpuWorker& worker,
+                               std::uint32_t start_nonce,
+                               std::size_t effective_batch,
+                               std::size_t learned_batch,
+                               bool transition_shaped)
 {
     auto& state = *worker.scan_state;
     std::unique_lock<std::mutex> lock(state.mutex);
     state.cv.wait(lock, [&state]() { return !state.busy && !state.work_pending && !state.result_ready; });
+
+    worker.engine->set_active_batch_size(effective_batch);
+
     state.start_nonce = start_nonce;
     state.job_generation = MiningJob::generation();
     state.job_id = job_.job_id;
-    state.hash_count = static_cast<std::uint64_t>(worker.engine->batch_size());
+    state.hash_count = static_cast<std::uint64_t>(effective_batch);
+    state.learned_batch = learned_batch;
+    state.transition_shaped = transition_shaped;
     state.cn_mask = gpu_active_cn_mask_;
     state.rotation_fingerprint = active_rotation_fingerprint_;
     state.dispatched_at = std::chrono::steady_clock::now();
@@ -1164,6 +1185,8 @@ Client::GpuScanResult Client::take_gpu_scan_result(GpuWorker& worker)
     result.job_generation = state.job_generation;
     result.job_id = state.job_id;
     result.hash_count = state.hash_count;
+    result.learned_batch = state.learned_batch;
+    result.transition_shaped = state.transition_shaped;
     result.cn_mask = state.cn_mask;
     result.rotation_fingerprint = state.rotation_fingerprint;
 
@@ -1188,6 +1211,13 @@ Client::GpuScanResult Client::take_gpu_scan_result(GpuWorker& worker)
     state.result_ready = false;
     lock.unlock();
     state.cv.notify_all();
+
+    if (result.transition_shaped &&
+        result.learned_batch != 0U &&
+        worker.engine->batch_size() != result.learned_batch) {
+        worker.engine->set_active_batch_size(result.learned_batch);
+    }
+
     if (error) std::rethrow_exception(error);
     return result;
 }
@@ -1226,6 +1256,8 @@ void Client::record_gpu_scan_telemetry(GpuWorker& worker,
          << " scan_ms=" << result.scan_ms
          << " wall_ms=" << result.wall_ms
          << " stale=" << (stale ? "yes" : "no")
+         << " transition_shaped="
+         << (result.transition_shaped ? "yes" : "no")
          << " useful_device_pct=" << std::setprecision(2) << useful_pct;
     std::cout << line.str() << '\n';
 }
@@ -1235,8 +1267,8 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                                          bool stale)
 {
     const double target_ms = gpu_latency_target_ms();
-    if (target_ms <= 0.0 || stale || result.scan_ms <= 0.0 ||
-        result.hash_count == 0U)
+    if (target_ms <= 0.0 || stale || result.transition_shaped ||
+        result.scan_ms <= 0.0 || result.hash_count == 0U)
         return;
 
     if (result.cn_mask >= worker.latency_memory.size())
@@ -1864,6 +1896,7 @@ void Client::upload_gpu_job()
         worker.latency_base_batch = worker.engine->batch_size();
         worker.latency_scan_ms_ewma = 0.0;
         worker.latency_samples = 0U;
+        worker.transition_shape_stage = 0U;
         seed_gpu_batch_from_live_memory(worker, gpu_active_cn_mask_);
         const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
         worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start;
@@ -1892,12 +1925,72 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
     };
 
     auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
-        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
-        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end)
+        const std::size_t learned_batch = worker.engine->batch_size();
+        std::size_t effective_batch = learned_batch;
+        bool transition_shaped = false;
+
+        if (job_lifetime_samples_ >= 4U &&
+            job_lifetime_ms_ewma_ >= 20000.0 &&
+            active_job_received_at_.time_since_epoch().count() != 0 &&
+            worker.transition_shape_stage < 2U) {
+            const double age_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    active_job_received_at_).count();
+            const double threshold =
+                job_lifetime_ms_ewma_ *
+                (worker.transition_shape_stage == 0U ? 0.80 : 0.95);
+
+            if (age_ms >= threshold) {
+                constexpr std::size_t kTransitionQuantum = 256U;
+                constexpr std::size_t kTransitionMinBatch = 1024U;
+                std::size_t reduced = learned_batch / 2U;
+                reduced =
+                    (reduced / kTransitionQuantum) *
+                    kTransitionQuantum;
+                effective_batch =
+                    std::min(
+                        learned_batch,
+                        std::max(kTransitionMinBatch, reduced));
+                transition_shaped =
+                    effective_batch < learned_batch;
+
+                if (transition_shaped) {
+                    ++worker.transition_shape_stage;
+                    std::cout
+                        << "[transition-batch] GPU "
+                        << worker.device_id
+                        << " stage="
+                        << worker.transition_shape_stage
+                        << " job_age_ms="
+                        << std::fixed << std::setprecision(1)
+                        << age_ms
+                        << " lifetime_ewma_ms="
+                        << job_lifetime_ms_ewma_
+                        << " batch="
+                        << learned_batch
+                        << " -> "
+                        << effective_batch
+                        << "\n";
+                }
+            }
+        }
+
+        const auto count =
+            static_cast<std::uint64_t>(effective_batch);
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 >
+            worker.region_end)
             worker.next_nonce = worker.region_start;
         const std::uint32_t start = worker.next_nonce;
-        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
-        dispatch_gpu_scan(worker, start);
+        worker.next_nonce =
+            static_cast<std::uint32_t>(
+                static_cast<std::uint64_t>(start) + count);
+        dispatch_gpu_scan(
+            worker,
+            start,
+            effective_batch,
+            learned_batch,
+            transition_shaped);
         return count;
     };
 
@@ -1997,12 +2090,72 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
     };
 
     auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
-        const auto count = static_cast<std::uint64_t>(worker.engine->batch_size());
-        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 > worker.region_end)
+        const std::size_t learned_batch = worker.engine->batch_size();
+        std::size_t effective_batch = learned_batch;
+        bool transition_shaped = false;
+
+        if (job_lifetime_samples_ >= 4U &&
+            job_lifetime_ms_ewma_ >= 20000.0 &&
+            active_job_received_at_.time_since_epoch().count() != 0 &&
+            worker.transition_shape_stage < 2U) {
+            const double age_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    active_job_received_at_).count();
+            const double threshold =
+                job_lifetime_ms_ewma_ *
+                (worker.transition_shape_stage == 0U ? 0.80 : 0.95);
+
+            if (age_ms >= threshold) {
+                constexpr std::size_t kTransitionQuantum = 256U;
+                constexpr std::size_t kTransitionMinBatch = 1024U;
+                std::size_t reduced = learned_batch / 2U;
+                reduced =
+                    (reduced / kTransitionQuantum) *
+                    kTransitionQuantum;
+                effective_batch =
+                    std::min(
+                        learned_batch,
+                        std::max(kTransitionMinBatch, reduced));
+                transition_shaped =
+                    effective_batch < learned_batch;
+
+                if (transition_shaped) {
+                    ++worker.transition_shape_stage;
+                    std::cout
+                        << "[transition-batch] GPU "
+                        << worker.device_id
+                        << " stage="
+                        << worker.transition_shape_stage
+                        << " job_age_ms="
+                        << std::fixed << std::setprecision(1)
+                        << age_ms
+                        << " lifetime_ewma_ms="
+                        << job_lifetime_ms_ewma_
+                        << " batch="
+                        << learned_batch
+                        << " -> "
+                        << effective_batch
+                        << "\n";
+                }
+            }
+        }
+
+        const auto count =
+            static_cast<std::uint64_t>(effective_batch);
+        if (static_cast<std::uint64_t>(worker.next_nonce) + count - 1 >
+            worker.region_end)
             worker.next_nonce = worker.region_start;
         const std::uint32_t start = worker.next_nonce;
-        worker.next_nonce = static_cast<std::uint32_t>(static_cast<std::uint64_t>(start) + count);
-        dispatch_gpu_scan(worker, start);
+        worker.next_nonce =
+            static_cast<std::uint32_t>(
+                static_cast<std::uint64_t>(start) + count);
+        dispatch_gpu_scan(
+            worker,
+            start,
+            effective_batch,
+            learned_batch,
+            transition_shaped);
         return count;
     };
 
