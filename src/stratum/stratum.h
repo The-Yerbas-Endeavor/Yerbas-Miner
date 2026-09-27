@@ -302,6 +302,10 @@ private:
         std::uint64_t hashes_at_last_report{0};
         std::uint64_t rotation_hashes_done{0};
 
+        // Temporary transition shaping is limited to two scans per job so an
+        // unusually long job never gets stuck mining at a reduced batch.
+        std::uint32_t transition_shape_stage{0};
+
         // Opt-in production-latency accounting. Updated only by the Stratum
         // scheduling thread so no atomics are needed.
         std::uint64_t telemetry_batches_launched{0};
