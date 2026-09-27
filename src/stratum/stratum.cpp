@@ -1286,7 +1286,8 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.baseline_hps_ewma = scan_hps;
             memory.baseline_samples = 1U;
         } else {
-            memory.baseline_batch = rollback;
+            memory.baseline_batch =
+                std::clamp(memory.probe_from_batch, floor, base);
             memory.baseline_samples = 0U;
             memory.baseline_hps_ewma = 0.0;
         }
