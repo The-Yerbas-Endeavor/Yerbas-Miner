@@ -3048,7 +3048,7 @@ void Client::report_stats(bool force)
             if (mascot_panel_width > 0U) {
                 const std::size_t frame_index =
                     static_cast<std::size_t>(
-                        (static_cast<std::uint64_t>(uptime) / 2ULL) %
+                        (static_cast<std::uint64_t>(uptime) / 5ULL) %
                         4ULL);
 
                 const std::string lime = "\x1b[38;2;153;255;51m";
