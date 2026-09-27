@@ -401,18 +401,32 @@ double gpu_latency_target_ms()
     return target;
 }
 
-std::size_t gpu_latency_min_batch()
+std::size_t gpu_latency_min_batch_override()
 {
     static const std::size_t minimum = []() {
         const char* value = std::getenv("YERBAS_GPU_LATENCY_MIN_BATCH");
-        if (value == nullptr || *value == '\0') return static_cast<std::size_t>(3584U);
+        if (value == nullptr || *value == '\0') return static_cast<std::size_t>(0U);
         char* end = nullptr;
         const unsigned long long parsed = std::strtoull(value, &end, 10);
         if (end == value || *end != '\0' || parsed < 1024ULL)
-            return static_cast<std::size_t>(3584U);
+            return static_cast<std::size_t>(0U);
         return static_cast<std::size_t>(parsed);
     }();
     return minimum;
+}
+
+std::size_t gpu_latency_floor_for_base(std::size_t base)
+{
+    const std::size_t configured = gpu_latency_min_batch_override();
+    if (configured != 0U)
+        return std::min(base, configured);
+
+    constexpr std::size_t kBatchQuantum = 256U;
+    constexpr std::size_t kAbsoluteMinimum = 1024U;
+    std::size_t automatic = base / 4U;
+    automatic = (automatic / kBatchQuantum) * kBatchQuantum;
+    automatic = std::max(kAbsoluteMinimum, automatic);
+    return std::min(base, automatic);
 }
 
 std::string cn_mask_names(std::uint32_t mask)
@@ -540,7 +554,10 @@ int Client::run(std::atomic_bool& stop_requested)
     if (gpu_latency_target_ms() > 0.0)
         std::cout << "[latency-target] GPU adaptive batching enabled | target_ms="
                   << std::fixed << std::setprecision(0) << gpu_latency_target_ms()
-                  << " | min_batch=" << gpu_latency_min_batch()
+                  << " | min_batch="
+                  << (gpu_latency_min_batch_override() == 0U
+                          ? std::string("auto")
+                          : std::to_string(gpu_latency_min_batch_override()))
                   << " | mode=reduce-only-per-rotation\n";
     std::cout << "Starting Stratum miner. Press Ctrl+C to stop.\n";
     while (!stop_requested.load()) {
@@ -1177,10 +1194,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         worker.latency_base_batch != 0U
             ? worker.latency_base_batch
             : current;
-    const std::size_t configured_floor =
-        gpu_latency_min_batch();
-    const std::size_t floor =
-        std::min(base, configured_floor);
+    const std::size_t floor = gpu_latency_floor_for_base(base);
 
     // Keep a deadband around the target so ordinary timing noise does not
     // thrash the active batch. This first experiment is reduce-only: the
@@ -1234,8 +1248,7 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
         worker.latency_base_batch != 0U
             ? worker.latency_base_batch
             : worker.engine->batch_size();
-    const std::size_t configured_floor = gpu_latency_min_batch();
-    const std::size_t floor = std::min(base, configured_floor);
+    const std::size_t floor = gpu_latency_floor_for_base(base);
 
     constexpr double kSeedTargetFraction = 0.95;
     const double predicted_hashes =
