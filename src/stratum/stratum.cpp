@@ -2217,7 +2217,7 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto compact_graph = [&history_stats, &utf8_codepoint](
+        const auto compact_graph = [&history_stats](
             const std::vector<double>& history,
             std::size_t width,
             std::size_t sample_limit,
@@ -2254,43 +2254,17 @@ void Client::report_stats(bool force)
             const double span =
                 std::max(1.0, high - low);
 
-            const std::size_t pixel_width = width * 2U;
-            std::array<std::vector<unsigned char>, 2> cells{{
-                std::vector<unsigned char>(width, 0U),
-                std::vector<unsigned char>(width, 0U)
-            }};
-
-            const auto set_dot = [&](std::size_t px, int py) {
-                if (px >= pixel_width || py < 0 || py >= 8)
-                    return;
-
-                const std::size_t row =
-                    py < 4 ? 0U : 1U;
-                const int local_y =
-                    py < 4 ? py : py - 4;
-                const std::size_t cell = px / 2U;
-                const bool right = (px & 1U) != 0U;
-
-                static constexpr unsigned char left_bits[4] = {
-                    0x01U, 0x02U, 0x04U, 0x40U
-                };
-                static constexpr unsigned char right_bits[4] = {
-                    0x08U, 0x10U, 0x20U, 0x80U
-                };
-
-                cells[row][cell] |=
-                    right ? right_bits[local_y] : left_bits[local_y];
-            };
-
-            int prev_y = -1;
-            for (std::size_t px = 0U; px < pixel_width; ++px) {
+            // Four vertical trace levels spread across two terminal rows.
+            // Unlike the former Braille plot, this draws a continuous scope
+            // trace with ordinary box-drawing characters.
+            std::vector<int> levels(width, 3);
+            for (std::size_t x = 0U; x < width; ++x) {
                 const double pos =
-                    pixel_width <= 1U
+                    width <= 1U
                         ? 0.0
-                        : static_cast<double>(px) *
+                        : static_cast<double>(x) *
                               static_cast<double>(count - 1U) /
-                              static_cast<double>(pixel_width - 1U);
-
+                              static_cast<double>(width - 1U);
                 const std::size_t i0 =
                     static_cast<std::size_t>(pos);
                 const std::size_t i1 =
@@ -2302,39 +2276,68 @@ void Client::report_stats(bool force)
                         (1.0 - frac) +
                     (*(begin + static_cast<std::ptrdiff_t>(i1))) *
                         frac;
-
                 const double ratio =
-                    std::clamp(
-                        (value - low) / span,
-                        0.0,
-                        1.0);
-
-                const int y =
-                    7 - static_cast<int>(ratio * 7.0 + 0.5);
-
-                set_dot(px, y);
-
-                if (prev_y >= 0 && std::abs(y - prev_y) > 1) {
-                    const int lo = std::min(prev_y, y);
-                    const int hi = std::max(prev_y, y);
-                    for (int bridge = lo + 1;
-                         bridge < hi;
-                         ++bridge) {
-                        set_dot(px, bridge);
-                    }
-                }
-
-                prev_y = y;
+                    std::clamp((value - low) / span, 0.0, 1.0);
+                levels[x] =
+                    3 - std::clamp(
+                            static_cast<int>(ratio * 3.0 + 0.5),
+                            0,
+                            3);
             }
 
-            for (std::size_t row = 0U; row < 2U; ++row) {
-                for (unsigned char mask : cells[row]) {
-                    if (mask == 0U)
-                        rows[row].push_back(' ');
+            const auto row_for = [](int level) {
+                return level < 2 ? 0 : 1;
+            };
+
+            const auto flat_char = [](int level) -> const char* {
+                return level == 0 ? "▔" :
+                       level == 1 ? "─" :
+                       level == 2 ? "─" : "_";
+            };
+
+            for (std::size_t x = 0U; x < width; ++x) {
+                const int current = levels[x];
+                const int previous =
+                    x == 0U ? current : levels[x - 1U];
+                const int next =
+                    x + 1U < width ? levels[x + 1U] : current;
+
+                std::string top = " ";
+                std::string bottom = " ";
+                const int row = row_for(current);
+
+                const bool rising_in = previous > current;
+                const bool falling_in = previous < current;
+                const bool rising_out = next < current;
+                const bool falling_out = next > current;
+
+                std::string glyph = flat_char(current);
+
+                if (rising_in || falling_out)
+                    glyph = row == 0 ? "╭" : "╰";
+                else if (falling_in || rising_out)
+                    glyph = row == 0 ? "╮" : "╯";
+
+                if (row == 0)
+                    top = glyph;
+                else
+                    bottom = glyph;
+
+                // When the trace crosses between rows, add a vertical bridge
+                // in the otherwise empty row so the path remains connected.
+                const bool crosses_from_previous =
+                    row_for(previous) != row;
+                const bool crosses_to_next =
+                    row_for(next) != row;
+                if (crosses_from_previous || crosses_to_next) {
+                    if (row == 0)
+                        bottom = "│";
                     else
-                        rows[row] +=
-                            utf8_codepoint(0x2800U + mask);
+                        top = "│";
                 }
+
+                rows[0] += top;
+                rows[1] += bottom;
             }
 
             return rows;
