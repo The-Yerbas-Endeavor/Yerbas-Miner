@@ -3582,13 +3582,30 @@ void Client::report_stats(bool force)
 
         frame << section("ACTIVITY");
 
+        const bool activity_dev_fee_active =
+            dev_fee_active(mining_started_);
+        const std::size_t activity_event_rows =
+            activity_dev_fee_active ? 9U : 10U;
+
+        if (activity_dev_fee_active) {
+            frame << line(
+                yellow + bold +
+                std::string("DEV FEE MINING ACTIVE") +
+                reset + dim +
+                "  •  pool.yerbas.org:3333  •  worker " +
+                kDevFeeWorker +
+                reset);
+        }
+
         if (g_recent_activity.empty()) {
             frame << line(
                 dim +
                 std::string(
                     "waiting for mining activity...") +
                 reset);
-            for (int i = 0; i < 9; ++i)
+            for (std::size_t i = 1U;
+                 i < activity_event_rows;
+                 ++i)
                 frame << line("");
         } else {
             std::size_t shown = 0U;
@@ -3612,11 +3629,11 @@ void Client::report_stats(bool force)
                 frame << line(
                     color + event + reset);
 
-                if (++shown == 10U)
+                if (++shown == activity_event_rows)
                     break;
             }
 
-            while (shown++ < 10U)
+            while (shown++ < activity_event_rows)
                 frame << line("");
         }
 
