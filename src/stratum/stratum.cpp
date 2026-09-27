@@ -1412,11 +1412,8 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                     ++memory.rejected_probe_stable_samples;
 
                     constexpr double kReopenBaselineShift = 0.025;
-                    constexpr std::uint64_t kReopenStableSamples = 24U;
                     const bool reopen =
-                        baseline_shift >= kReopenBaselineShift ||
-                        memory.rejected_probe_stable_samples >=
-                            kReopenStableSamples;
+                        baseline_shift >= kReopenBaselineShift;
 
                     if (!reopen) {
                         memory.stable_samples = 0U;
