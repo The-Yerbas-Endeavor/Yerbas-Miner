@@ -3088,7 +3088,6 @@ void Client::report_stats(bool force)
                 std::vector<std::string> mascot_rows;
 
                 std::string operating_status = "IDLE";
-                std::string operating_color = faint;
 
                 if (authorized_ && job_.valid && target_ready_) {
                     const double no_progress_seconds =
@@ -3099,100 +3098,10 @@ void Client::report_stats(bool force)
 
                     if (no_progress_seconds >= 3.0) {
                         operating_status = "STALLED";
-                        operating_color = red;
                     } else {
                         operating_status = "HASHING";
-                        operating_color = lime;
                     }
                 }
-
-                std::vector<std::string> work_stats;
-
-                if (config_.miner.cpu_enabled) {
-                    std::ostringstream cpu_line;
-                    cpu_line
-                        << "CPU "
-                        << fit(format_rate(cpu_hps), 9)
-                        << " "
-                        << yerbas::console::detail::
-                               format_temperature(cpu_telemetry)
-                        << " "
-                        << yerbas::console::detail::
-                               format_power(cpu_telemetry);
-                    work_stats.push_back(cpu_line.str());
-                }
-
-                for (const auto& gpu : gpu_views) {
-                    const auto worker_it =
-                        std::find_if(
-                            gpu_workers_.begin(),
-                            gpu_workers_.end(),
-                            [&](const auto& worker) {
-                                return worker.device_id == gpu.id;
-                            });
-
-                    std::ostringstream gpu_line;
-                    gpu_line
-                        << "GPU" << gpu.id << " "
-                        << fit(format_rate(gpu.hps), 9);
-
-                    if (worker_it != gpu_workers_.end()) {
-                        gpu_line
-                            << " B" << worker_it->engine->batch_size();
-
-                        if (worker_it->last_scan_ms > 0.0) {
-                            gpu_line
-                                << " "
-                                << std::fixed
-                                << std::setprecision(1)
-                                << (worker_it->last_scan_ms / 1000.0)
-                                << "s";
-                        }
-                    }
-
-                    const auto telemetry_it =
-                        gpu_telemetry.devices.find(gpu.id);
-                    if (telemetry_it != gpu_telemetry.devices.end()) {
-                        gpu_line
-                            << " "
-                            << yerbas::console::detail::
-                                   format_temperature(
-                                       telemetry_it->second);
-                    }
-
-                    work_stats.push_back(gpu_line.str());
-                }
-
-                std::ostringstream last_accepted_line;
-                last_accepted_line << "LAST ACCEPTED ";
-                if (g_last_accepted_at.time_since_epoch().count() != 0) {
-                    const double age =
-                        std::chrono::duration<double>(
-                            now - g_last_accepted_at).count();
-                    std::string compact_source =
-                        g_last_accepted_source;
-                    if (compact_source.rfind("GPU ", 0U) == 0U)
-                        compact_source.erase(1U, 2U);
-                    last_accepted_line
-                        << compact_source
-                        << " "
-                        << format_duration(age);
-                } else {
-                    last_accepted_line << "none yet";
-                }
-                work_stats.push_back(last_accepted_line.str());
-
-                std::ostringstream job_line;
-                job_line << "JOB AGE ";
-                if (active_job_received_at_.time_since_epoch().count() != 0) {
-                    const double job_age_seconds =
-                        std::chrono::duration<double>(
-                            now - active_job_received_at_).count();
-                    job_line << format_duration(job_age_seconds);
-                } else {
-                    job_line << "n/a";
-                }
-                work_stats.push_back(job_line.str());
 
                 // Proof-of-Grass block growth. A new Stratum job begins
                 // as a three-stroke seedling. Every five seconds exactly one
@@ -3295,9 +3204,6 @@ void Client::report_stats(bool force)
                 mascot_rows.push_back(
                     dim + repeat("·", 40U) + reset);
 
-                for (const auto& stat : work_stats)
-                    mascot_rows.push_back(stat);
-
                 auto mascot_box =
                     make_panel("BLOCK WORK",
                                mascot_rows,
@@ -3388,6 +3294,105 @@ void Client::report_stats(bool force)
             }
 
             frame << line(work.str());
+        }
+
+        {
+            std::ostringstream devices;
+
+            if (config_.miner.cpu_enabled) {
+                devices
+                    << fit("CPU", 8)
+                    << fit(format_rate(cpu_hps), 12)
+                    << fit(
+                           yerbas::console::detail::
+                               format_temperature(cpu_telemetry),
+                           10)
+                    << fit(
+                           yerbas::console::detail::
+                               format_power(cpu_telemetry),
+                           12);
+            }
+
+            for (const auto& gpu : gpu_views) {
+                const auto worker_it =
+                    std::find_if(
+                        gpu_workers_.begin(),
+                        gpu_workers_.end(),
+                        [&](const auto& worker) {
+                            return worker.device_id == gpu.id;
+                        });
+
+                devices
+                    << fit("GPU" + std::to_string(gpu.id), 8)
+                    << fit(format_rate(gpu.hps), 12);
+
+                if (worker_it != gpu_workers_.end()) {
+                    devices
+                        << fit(
+                               "B" +
+                                   std::to_string(
+                                       worker_it->engine->batch_size()),
+                               10);
+
+                    if (worker_it->last_scan_ms > 0.0) {
+                        std::ostringstream scan_time;
+                        scan_time
+                            << std::fixed
+                            << std::setprecision(1)
+                            << (worker_it->last_scan_ms / 1000.0)
+                            << "s";
+                        devices << fit(scan_time.str(), 8);
+                    }
+                }
+
+                const auto telemetry_it =
+                    gpu_telemetry.devices.find(gpu.id);
+                if (telemetry_it != gpu_telemetry.devices.end()) {
+                    devices
+                        << fit(
+                               yerbas::console::detail::
+                                   format_temperature(
+                                       telemetry_it->second),
+                               10);
+                }
+            }
+
+            frame << line(devices.str());
+        }
+
+        {
+            std::ostringstream timing;
+            timing << fit("LAST ACCEPTED", 16);
+
+            if (g_last_accepted_at.time_since_epoch().count() != 0) {
+                const double age =
+                    std::chrono::duration<double>(
+                        now - g_last_accepted_at).count();
+                std::string compact_source = g_last_accepted_source;
+                if (compact_source.rfind("GPU ", 0U) == 0U)
+                    compact_source.erase(1U, 2U);
+
+                timing
+                    << fit(
+                           compact_source + " " +
+                               format_duration(age),
+                           18);
+            } else {
+                timing << fit("none yet", 18);
+            }
+
+            timing << fit("JOB AGE", 12);
+
+            if (active_job_received_at_.time_since_epoch().count() != 0) {
+                const double job_age_seconds =
+                    std::chrono::duration<double>(
+                        now - active_job_received_at_).count();
+                timing << format_duration(job_age_seconds);
+            } else {
+                timing << "n/a";
+            }
+
+            frame << line(timing.str());
         }
 
         {
