@@ -3310,8 +3310,9 @@ void Client::report_stats(bool force)
 
                 // Proof-of-Grass block growth. This fixed Braille mask
                 // was traced from the supplied cannabis-leaf source artwork.
-                // A new job starts at the stem and reveals one traced terminal
-                // cell every five seconds, growing outward through the leaf.
+                // Growth is intentionally front-loaded around Yerbas' roughly
+                // 2.5-minute block cadence: establish the recognizable leaf
+                // early, then spend the remaining time filling fine detail.
                 struct LeafCell {
                     std::size_t row;
                     std::size_t col;
@@ -3324,7 +3325,9 @@ void Client::report_stats(bool force)
                 static constexpr std::size_t leaf_width = 28U;
                 static constexpr std::size_t leaf_left = 6U;
                 static constexpr std::size_t seedling_cells = 3U;
-                static constexpr double growth_interval_seconds = 5.0;
+                static constexpr double recognizable_seconds = 60.0;
+                static constexpr double detail_seconds = 120.0;
+                static constexpr double mature_seconds = 150.0;
 
                 static const std::array<std::u32string, plant_rows>
                     traced_leaf{{
@@ -3454,10 +3457,38 @@ void Client::report_stats(bool force)
                                 now - active_job_received_at_).count());
                 }
 
+                // Front-load the structural silhouette. By 60s expose
+                // about 60% of the trace, by 120s about 90%, and finish
+                // the remaining serration/detail by the 150s average-block
+                // target. The completed leaf remains visible until a new job.
+                const std::size_t total_growth_cells =
+                    growth_cells.size() > seedling_cells
+                        ? growth_cells.size() - seedling_cells
+                        : 0U;
+
+                double growth_fraction = 1.0;
+                if (current_job_age < recognizable_seconds) {
+                    growth_fraction =
+                        0.60 *
+                        (current_job_age / recognizable_seconds);
+                } else if (current_job_age < detail_seconds) {
+                    growth_fraction =
+                        0.60 +
+                        0.30 *
+                        ((current_job_age - recognizable_seconds) /
+                         (detail_seconds - recognizable_seconds));
+                } else if (current_job_age < mature_seconds) {
+                    growth_fraction =
+                        0.90 +
+                        0.10 *
+                        ((current_job_age - detail_seconds) /
+                         (mature_seconds - detail_seconds));
+                }
+
                 const std::size_t timed_cells =
                     static_cast<std::size_t>(
-                        current_job_age /
-                        growth_interval_seconds);
+                        static_cast<double>(total_growth_cells) *
+                        growth_fraction);
                 const std::size_t visible_cells =
                     std::min(
                         growth_cells.size(),
