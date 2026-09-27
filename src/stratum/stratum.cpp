@@ -3310,8 +3310,9 @@ void Client::report_stats(bool force)
 
                 // Proof-of-Grass block growth. A new Stratum job begins
                 // as a three-stroke seedling. Every five seconds exactly one
-                // additional '/', '\\', or '|' stroke is revealed. The
-                // finished plant remains visible until the next job resets it.
+                // additional '/', '\\', or '|' stroke is revealed. Growth
+                // continues across the full fixed canvas instead of stopping
+                // after a small pre-baked set of stages.
                 struct PlantStroke {
                     std::size_t row;
                     std::size_t col;
@@ -3323,46 +3324,99 @@ void Client::report_stats(bool force)
                 static constexpr std::size_t seedling_strokes = 3U;
                 static constexpr double growth_interval_seconds = 5.0;
 
-                static const std::array<PlantStroke, 31> growth_strokes{{
-                    // Seedling: shown immediately when a new job starts.
-                    {12U, 18U, '/'},
-                    {12U, 20U, '\\'},
-                    {11U, 19U, '|'},
+                static const std::vector<PlantStroke> growth_strokes = [] {
+                    std::vector<PlantStroke> strokes;
+                    strokes.reserve(220U);
 
-                    // Build the central stem and lower leaves first.
-                    {10U, 19U, '|'},
-                    {11U, 18U, '\\'},
-                    {11U, 20U, '/'},
-                    {9U, 19U, '|'},
-                    {9U, 17U, '\\'},
-                    {9U, 21U, '/'},
-                    {8U, 19U, '|'},
-                    {8U, 16U, '\\'},
-                    {8U, 22U, '/'},
-                    {7U, 19U, '|'},
-                    {7U, 17U, '\\'},
-                    {7U, 21U, '/'},
+                    auto add = [&strokes](std::size_t row,
+                                          std::size_t col,
+                                          char glyph) {
+                        const auto duplicate =
+                            std::find_if(
+                                strokes.begin(),
+                                strokes.end(),
+                                [row, col](const PlantStroke& stroke) {
+                                    return stroke.row == row &&
+                                           stroke.col == col;
+                                });
+                        if (duplicate == strokes.end())
+                            strokes.push_back({row, col, glyph});
+                    };
 
-                    // Fill out the middle canopy.
-                    {6U, 19U, '|'},
-                    {6U, 16U, '\\'},
-                    {6U, 22U, '/'},
-                    {5U, 19U, '|'},
-                    {5U, 15U, '\\'},
-                    {5U, 23U, '/'},
-                    {4U, 19U, '|'},
-                    {4U, 17U, '\\'},
-                    {4U, 21U, '/'},
+                    // Tiny seedling shown immediately.
+                    add(12U, 18U, '/');
+                    add(12U, 20U, '\\');
+                    add(11U, 19U, '|');
 
-                    // Finish the crown.
-                    {3U, 19U, '|'},
-                    {3U, 16U, '\\'},
-                    {3U, 22U, '/'},
-                    {2U, 19U, '|'},
-                    {2U, 17U, '\\'},
-                    {2U, 21U, '/'},
-                    {1U, 19U, '|'},
-                }};
+                    // Grow the central stem upward first.
+                    for (std::size_t row = 10U; row > 0U; --row)
+                        add(row, 19U, '|');
+                    add(0U, 19U, '|');
+
+                    // Then grow paired branches from the center outward.
+                    // Lower branches stay short; higher/middle branches
+                    // gradually spread into a broad canopy.
+                    for (std::size_t reach = 1U; reach <= 17U; ++reach) {
+                        for (std::size_t row = 11U; row > 0U; --row) {
+                            const std::size_t height_from_bottom =
+                                12U - row;
+                            const std::size_t allowed_reach =
+                                std::min<std::size_t>(
+                                    17U,
+                                    2U + height_from_bottom * 2U);
+
+                            if (reach > allowed_reach)
+                                continue;
+
+                            const std::size_t left_col = 19U - reach;
+                            const std::size_t right_col = 19U + reach;
+
+                            if (left_col < plant_cols)
+                                add(
+                                    row,
+                                    left_col,
+                                    (reach + row) % 3U == 0U
+                                        ? '|'
+                                        : '\\');
+
+                            if (right_col < plant_cols)
+                                add(
+                                    row,
+                                    right_col,
+                                    (reach + row) % 3U == 0U
+                                        ? '|'
+                                        : '/');
+                        }
+                    }
+
+                    // Fill secondary shoots between the main branches so
+                    // unusually long jobs continue visibly growing.
+                    for (std::size_t row = 1U; row <= 10U; ++row) {
+                        for (std::size_t col = 3U;
+                             col + 3U < plant_cols;
+                             col += 2U) {
+                            if (col == 19U)
+                                continue;
+
+                            const std::size_t distance =
+                                col > 19U ? col - 19U : 19U - col;
+                            const std::size_t allowed_reach =
+                                std::min<std::size_t>(
+                                    17U,
+                                    2U + (12U - row) * 2U);
+
+                            if (distance > allowed_reach)
+                                continue;
+
+                            add(
+                                row,
+                                col,
+                                col < 19U ? '\\' : '/');
+                        }
+                    }
+
+                    return strokes;
+                }();
 
                 double current_job_age = 0.0;
                 if (active_job_received_at_.time_since_epoch().count() != 0) {
