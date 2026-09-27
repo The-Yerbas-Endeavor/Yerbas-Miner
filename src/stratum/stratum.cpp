@@ -1384,7 +1384,12 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     // correction when latency is far above target.  This is derived entirely
     // from live device timing and remains bounded by the tuned floor/ceiling.
     constexpr std::size_t kBatchQuantum = 256U;
-    if (worker.latency_samples == 1U &&
+    const bool trusted_persistent_batch =
+        memory.persisted_batch != 0U &&
+        result.hash_count == memory.persisted_batch;
+
+    if (!trusted_persistent_batch &&
+        worker.latency_samples == 1U &&
         memory.samples == 1U &&
         result.scan_ms > target_ms * 1.20) {
         const double ratio =
