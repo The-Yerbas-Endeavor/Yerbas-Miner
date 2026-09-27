@@ -1929,7 +1929,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
         std::size_t effective_batch = learned_batch;
         bool transition_shaped = false;
 
-        if (job_lifetime_samples_ >= 4U &&
+        if (job_lifetime_samples_ >= 3U &&
             job_lifetime_ms_ewma_ >= 20000.0 &&
             active_job_received_at_.time_since_epoch().count() != 0) {
             const double age_ms =
@@ -2120,7 +2120,7 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
         std::size_t effective_batch = learned_batch;
         bool transition_shaped = false;
 
-        if (job_lifetime_samples_ >= 4U &&
+        if (job_lifetime_samples_ >= 3U &&
             job_lifetime_ms_ewma_ >= 20000.0 &&
             active_job_received_at_.time_since_epoch().count() != 0) {
             const double age_ms =
