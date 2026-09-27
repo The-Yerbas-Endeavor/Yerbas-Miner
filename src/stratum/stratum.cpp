@@ -2918,7 +2918,8 @@ void Client::report_stats(bool force)
             if (mascot_panel_width > 0U) {
                 const std::size_t frame_index =
                     static_cast<std::size_t>(
-                        (hashes_done_ / 1024ULL) % 2ULL);
+                        (static_cast<std::uint64_t>(uptime) / 2ULL) %
+                        2ULL);
 
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
