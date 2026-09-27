@@ -311,6 +311,14 @@ private:
             double ms_per_hash_ewma{0.0};
             double hps_ewma{0.0};
             std::uint64_t samples{0};
+
+            // Throughput baseline for the batch currently being observed.
+            // Probe decisions must compare against this batch-local baseline,
+            // not against a CN-family EWMA polluted by other batch sizes.
+            std::size_t baseline_batch{0};
+            double baseline_hps_ewma{0.0};
+            std::uint64_t baseline_samples{0};
+
             std::uint64_t stable_samples{0};
             std::uint64_t probe_cooldown{0};
             bool probe_pending{false};
