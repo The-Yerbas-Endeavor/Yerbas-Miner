@@ -2935,6 +2935,32 @@ void Client::report_stats(bool force)
 
                 std::vector<std::string> work_stats;
 
+                std::string summary_label = "HEALTHY";
+                std::string summary_color = lime;
+                if (operating_status == "STALLED") {
+                    summary_label = "STALLED";
+                    summary_color = red;
+                } else if (shares_rejected_ != 0U) {
+                    summary_label = "DEGRADED";
+                    summary_color = gold;
+                } else if (uptime < 15.0) {
+                    summary_label = "WARMING UP";
+                    summary_color = cyan;
+                }
+
+                std::ostringstream summary_line;
+                summary_line
+                    << summary_color << bold
+                    << "SUMMARY " << summary_label
+                    << reset
+                    << "  "
+                    << format_rate(total_hps)
+                    << "  "
+                    << shares_accepted_ << " accepted"
+                    << " / "
+                    << shares_rejected_ << " rejected";
+                work_stats.push_back(summary_line.str());
+
                 std::ostringstream status_line;
                 status_line
                     << operating_color << bold
