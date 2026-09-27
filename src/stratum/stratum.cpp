@@ -3450,7 +3450,10 @@ void Client::report_stats(bool force)
                 << reset
                 << dim
                 << "   session average"
-                << reset;
+                << reset
+                << "   "
+                << fit("UPTIME", 8)
+                << format_duration(uptime);
             frame << line(average.str());
         }
 
