@@ -2861,38 +2861,33 @@ void Client::report_stats(bool force)
                 }
                 work_stats.push_back(last_share_line.str());
 
-                // Console miner driven by actual completed work. The two poses
-                // are deliberately different: pickaxe overhead, then pickaxe
-                // buried into the rock face with impact sparks.
-                static const std::array<std::array<const char*, 12>, 2>
+                // Compact console miner driven by actual completed work.
+                // Frame 0 has the pickaxe raised; frame 1 shows a horizontal
+                // impact into a rock face. Keep the art separate from telemetry
+                // so neither becomes unreadable in a narrow terminal panel.
+                static const std::array<std::array<const char*, 9>, 2>
                     miner_frames{{
                         {{
-                            "       ========   ",
-                            "          \\       ",
-                            "    ______ \\      ",
-                            "   /______\\ \\     ",
-                            "    (o  o) \\      ",
-                            "    /|__|\\_/       ",
-                            "     |  |          ",
-                            "    /|  |\\         ",
-                            "   / |  | \\   ### ",
-                            "  /  |  |  \\ #####",
-                            "     /  \\    ######",
-                            "____/____\\___######",
+                            "        ______        ======",
+                            "       /______\\          \\ ",
+                            "       | o  o |           \\",
+                            "       |  --  |        __/ ",
+                            "      /|______|\\______/    ",
+                            "     / |  ||  |             ",
+                            "       |  ||  |             ",
+                            "      / \\    / \\       ###",
+                            "_____/___\\__/___\\_____#####",
                         }},
                         {{
-                            "                  ",
-                            "    ______        ",
-                            "   /______\\       ",
-                            "    (o  o)        ",
-                            "    /|__|\\____    ",
-                            "     |  |     \\===",
-                            "    /|  |\\     \\ *",
-                            "   / |  | \\     *#",
-                            "  /  |  |  \\  *###",
-                            "     /  \\    #####",
-                            "    /    \\  ######",
-                            "___________\\######",
+                            "        ______              ",
+                            "       /______\\             ",
+                            "       | o  o |             ",
+                            "       |  --  |             ",
+                            "      /|______|\\____        ",
+                            "     / |  ||  |    \\======X",
+                            "       |  ||  |          *#",
+                            "      / \\    / \\       *###",
+                            "_____/___\\__/___\\_____#####",
                         }},
                     }};
 
@@ -2907,32 +2902,25 @@ void Client::report_stats(bool force)
                                ? red
                                : faint);
 
-                constexpr std::size_t miner_width = 18U;
-                constexpr std::size_t miner_rows = 12U;
-
-                while (work_stats.size() < miner_rows)
-                    work_stats.push_back("");
+                constexpr std::size_t miner_rows = 9U;
 
                 for (std::size_t row = 0U;
                      row < miner_rows;
                      ++row) {
-                    std::string art =
-                        miner_frames[miner_frame][row];
-
-                    if (art.size() < miner_width)
-                        art.append(miner_width - art.size(), ' ');
-                    else if (art.size() > miner_width)
-                        art.resize(miner_width);
-
-                    std::ostringstream combined;
-                    combined
+                    std::ostringstream art_line;
+                    art_line
                         << miner_color
-                        << art
-                        << reset
-                        << " "
-                        << work_stats[row];
-                    mascot_rows.push_back(combined.str());
+                        << "  "
+                        << miner_frames[miner_frame][row]
+                        << reset;
+                    mascot_rows.push_back(art_line.str());
                 }
+
+                mascot_rows.push_back(
+                    dim + repeat("·", 40U) + reset);
+
+                for (const auto& stat : work_stats)
+                    mascot_rows.push_back(stat);
 
                 auto mascot_box =
                     make_panel("BLOCK WORK",
