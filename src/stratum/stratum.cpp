@@ -3046,11 +3046,6 @@ void Client::report_stats(bool force)
                            hashrate_panel_width);
 
             if (mascot_panel_width > 0U) {
-                const std::size_t frame_index =
-                    static_cast<std::size_t>(
-                        (static_cast<std::uint64_t>(uptime) / 5ULL) %
-                        3ULL);
-
                 const std::string lime = "\x1b[38;2;153;255;51m";
                 const std::string gold = "\x1b[38;2;255;224;64m";
                 const std::string aqua = "\x1b[38;2;32;224;255m";
@@ -3199,68 +3194,54 @@ void Client::report_stats(bool force)
                 }
                 work_stats.push_back(job_line.str());
 
-                // Proof-of-Grass growth animation. All frames share the
-                // same 12-row canvas and soil baseline so the plant grows in
-                // place instead of jumping around the BLOCK WORK panel.
-                // Sequence: seedling -> growing -> harvest -> repeat.
-                static const std::array<std::array<const char*, 12>, 3>
-                    plant_frames{{
-                        {{
-                            "                                        ",
-                            "                                        ",
-                            "                                        ",
-                            "                  ╱│╲                   ",
-                            "                 ╱ │ ╲                  ",
-                            "             ╲──╱  │  ╲──╱              ",
-                            "               ╲   │   ╱                ",
-                            "                ╲  │  ╱                 ",
-                            "                   │                    ",
-                            "                   │                    ",
-                            "              _____│_____               ",
-                            "            [1] SEEDLING                ",
-                        }},
-                        {{
-                            "                   ╱╲                   ",
-                            "              ╲   ╱│ ╲   ╱              ",
-                            "          ╲────╲ ╱ │  ╲ ╱────╱          ",
-                            "           ╲    ╲  │  ╱    ╱           ",
-                            "        ╲───╲────╲ │ ╱────╱───╱        ",
-                            "          ╲   ╲   ╲│╱   ╱   ╱          ",
-                            "      ╲────╲───╲───│───╱───╱────╱      ",
-                            "        ╲    ╲  ╲  │  ╱  ╱    ╱        ",
-                            "          ╲───╲──╲ │ ╱──╱───╱          ",
-                            "               ╲  ╲│╱  ╱               ",
-                            "              _____│_____               ",
-                            "             [3] HARVEST                ",
-                        }},
-                        {{
-                            "                   ╱╲                   ",
-                            "                  ╱  ╲                  ",
-                            "              ╲  ╱ │  ╲  ╱             ",
-                            "               ╲╱  │   ╲╱              ",
-                            "            ────╲  │  ╱────            ",
-                            "                 ╲ │ ╱                 ",
-                            "              ╲───╲│╱───╱              ",
-                            "                ╲  │  ╱                ",
-                            "            ─────╲ │ ╱─────            ",
-                            "                  ╲│╱                  ",
-                            "              _____│_____               ",
-                            "             [2] GROWING                ",
-                        }},
-                    }};
+                // Proof-of-Grass block growth. A new Stratum job starts
+                // with the seedling. Every five seconds another row of the
+                // plant is revealed until the harvest-size plant is complete.
+                // The mature plant then remains visible until the next job.
+                static const std::array<const char*, 12> harvest_plant{{
+                    "                   ╱╲                   ",
+                    "              ╲   ╱│ ╲   ╱              ",
+                    "          ╲────╲ ╱ │  ╲ ╱────╱          ",
+                    "           ╲    ╲  │  ╱    ╱           ",
+                    "        ╲───╲────╲ │ ╱────╱───╱        ",
+                    "          ╲   ╲   ╲│╱   ╱   ╱          ",
+                    "      ╲────╲───╲───│───╱───╱────╱      ",
+                    "        ╲    ╲  ╲  │  ╱  ╱    ╱        ",
+                    "             ╲──╱  │  ╲──╱             ",
+                    "               ╲   │   ╱                ",
+                    "                ╲  │  ╱                 ",
+                    "              _____│_____               ",
+                }};
 
-                const bool plant_is_working =
-                    operating_status == "HASHING";
-                const std::size_t plant_frame =
-                    plant_is_working ? frame_index : 0U;
+                constexpr std::size_t plant_rows = harvest_plant.size();
+                constexpr std::size_t seedling_rows = 4U;
+                constexpr double growth_interval_seconds = 5.0;
+
+                double current_job_age = 0.0;
+                if (active_job_received_at_.time_since_epoch().count() != 0) {
+                    current_job_age =
+                        std::max(
+                            0.0,
+                            std::chrono::duration<double>(
+                                now - active_job_received_at_).count());
+                }
+
+                const std::size_t added_growth_rows =
+                    static_cast<std::size_t>(
+                        current_job_age / growth_interval_seconds);
+                const std::size_t visible_rows =
+                    std::min(
+                        plant_rows,
+                        seedling_rows + added_growth_rows);
+                const std::size_t first_visible_row =
+                    plant_rows - visible_rows;
+
                 const std::string plant_color =
-                    plant_is_working
-                        ? lime
-                        : (operating_status == "STALLED"
-                               ? red
+                    operating_status == "STALLED"
+                        ? red
+                        : (operating_status == "HASHING"
+                               ? lime
                                : faint);
-
-                constexpr std::size_t plant_rows = 12U;
 
                 for (std::size_t row = 0U;
                      row < plant_rows;
@@ -3268,7 +3249,9 @@ void Client::report_stats(bool force)
                     std::ostringstream art_line;
                     art_line
                         << plant_color
-                        << plant_frames[plant_frame][row]
+                        << (row >= first_visible_row
+                                ? harvest_plant[row]
+                                : "                                        ")
                         << reset;
                     mascot_rows.push_back(art_line.str());
                 }
