@@ -3464,12 +3464,11 @@ void Client::report_stats(bool force)
         }
 
         {
-            std::ostringstream devices;
-
             if (config_.miner.cpu_enabled) {
-                devices
+                std::ostringstream cpu_line;
+                cpu_line
                     << fit("CPU", 8)
-                    << fit(format_rate(cpu_hps), 12)
+                    << fit(format_rate(cpu_hps), 14)
                     << fit(
                            yerbas::console::detail::
                                format_temperature(cpu_telemetry),
@@ -3478,6 +3477,7 @@ void Client::report_stats(bool force)
                            yerbas::console::detail::
                                format_power(cpu_telemetry),
                            12);
+                frame << line(cpu_line.str());
             }
 
             for (const auto& gpu : gpu_views) {
@@ -3489,12 +3489,13 @@ void Client::report_stats(bool force)
                             return worker.device_id == gpu.id;
                         });
 
-                devices
+                std::ostringstream gpu_line;
+                gpu_line
                     << fit("GPU" + std::to_string(gpu.id), 8)
-                    << fit(format_rate(gpu.hps), 12);
+                    << fit(format_rate(gpu.hps), 14);
 
                 if (worker_it != gpu_workers_.end()) {
-                    devices
+                    gpu_line
                         << fit(
                                "B" +
                                    std::to_string(
@@ -3508,23 +3509,25 @@ void Client::report_stats(bool force)
                             << std::setprecision(1)
                             << (worker_it->last_scan_ms / 1000.0)
                             << "s";
-                        devices << fit(scan_time.str(), 8);
+                        gpu_line << fit(scan_time.str(), 10);
+                    } else {
+                        gpu_line << fit("n/a", 10);
                     }
                 }
 
                 const auto telemetry_it =
                     gpu_telemetry.devices.find(gpu.id);
                 if (telemetry_it != gpu_telemetry.devices.end()) {
-                    devices
+                    gpu_line
                         << fit(
                                yerbas::console::detail::
                                    format_temperature(
                                        telemetry_it->second),
                                10);
                 }
-            }
 
-            frame << line(devices.str());
+                frame << line(gpu_line.str());
+            }
         }
 
         {
