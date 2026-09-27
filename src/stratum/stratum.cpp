@@ -3343,27 +3343,66 @@ void Client::report_stats(bool force)
                             strokes.push_back({row, col, glyph});
                     };
 
-                    // Tiny seedling shown immediately.
-                    add(12U, 18U, '/');
-                    add(12U, 20U, '\\');
-                    add(11U, 19U, '|');
+                    // Preserve the recognizable plant sequence first.
+                    // These are the original one-stroke-at-a-time growth
+                    // coordinates that made the plant read correctly from
+                    // the seedling onward.
+                    static const std::array<PlantStroke, 31> base_growth{{
+                        {12U, 18U, '/'},
+                        {12U, 20U, '\\'},
+                        {11U, 19U, '|'},
+                        {10U, 19U, '|'},
+                        {11U, 18U, '\\'},
+                        {11U, 20U, '/'},
+                        {9U, 19U, '|'},
+                        {9U, 17U, '\\'},
+                        {9U, 21U, '/'},
+                        {8U, 19U, '|'},
+                        {8U, 16U, '\\'},
+                        {8U, 22U, '/'},
+                        {7U, 19U, '|'},
+                        {7U, 17U, '\\'},
+                        {7U, 21U, '/'},
+                        {6U, 19U, '|'},
+                        {6U, 16U, '\\'},
+                        {6U, 22U, '/'},
+                        {5U, 19U, '|'},
+                        {5U, 15U, '\\'},
+                        {5U, 23U, '/'},
+                        {4U, 19U, '|'},
+                        {4U, 17U, '\\'},
+                        {4U, 21U, '/'},
+                        {3U, 19U, '|'},
+                        {3U, 16U, '\\'},
+                        {3U, 22U, '/'},
+                        {2U, 19U, '|'},
+                        {2U, 17U, '\\'},
+                        {2U, 21U, '/'},
+                        {1U, 19U, '|'},
+                    }};
 
-                    // Grow the central stem upward first.
-                    for (std::size_t row = 10U; row > 0U; --row)
-                        add(row, 19U, '|');
-                    add(0U, 19U, '|');
+                    for (const auto& stroke : base_growth)
+                        add(stroke.row, stroke.col, stroke.glyph);
 
-                    // Then grow paired branches from the center outward.
-                    // Lower branches stay short; higher/middle branches
-                    // gradually spread into a broad canopy.
-                    for (std::size_t reach = 1U; reach <= 17U; ++reach) {
-                        for (std::size_t row = 11U; row > 0U; --row) {
+                    // Once the recognizable mature plant exists, keep adding
+                    // one stroke at a time to widen and thicken the canopy on
+                    // long jobs. This extends growth without changing the
+                    // early silhouette.
+                    static const std::array<std::size_t, 10> canopy_rows{{
+                        9U, 8U, 7U, 6U, 5U,
+                        4U, 3U, 2U, 1U, 0U,
+                    }};
+
+                    for (std::size_t reach = 2U;
+                         reach <= 16U;
+                         ++reach) {
+                        for (const std::size_t row : canopy_rows) {
                             const std::size_t height_from_bottom =
                                 12U - row;
                             const std::size_t allowed_reach =
                                 std::min<std::size_t>(
-                                    17U,
-                                    2U + height_from_bottom * 2U);
+                                    16U,
+                                    2U + height_from_bottom);
 
                             if (reach > allowed_reach)
                                 continue;
@@ -3375,7 +3414,7 @@ void Client::report_stats(bool force)
                                 add(
                                     row,
                                     left_col,
-                                    (reach + row) % 3U == 0U
+                                    ((reach + row) % 4U == 0U)
                                         ? '|'
                                         : '\\');
 
@@ -3383,17 +3422,17 @@ void Client::report_stats(bool force)
                                 add(
                                     row,
                                     right_col,
-                                    (reach + row) % 3U == 0U
+                                    ((reach + row) % 4U == 0U)
                                         ? '|'
                                         : '/');
                         }
                     }
 
-                    // Fill secondary shoots between the main branches so
-                    // unusually long jobs continue visibly growing.
-                    for (std::size_t row = 1U; row <= 10U; ++row) {
-                        for (std::size_t col = 3U;
-                             col + 3U < plant_cols;
+                    // Final long-job fill: sparse interior shoots, still one
+                    // character every five seconds.
+                    for (std::size_t row = 1U; row <= 9U; ++row) {
+                        for (std::size_t col = 7U;
+                             col <= 31U;
                              col += 2U) {
                             if (col == 19U)
                                 continue;
@@ -3402,8 +3441,8 @@ void Client::report_stats(bool force)
                                 col > 19U ? col - 19U : 19U - col;
                             const std::size_t allowed_reach =
                                 std::min<std::size_t>(
-                                    17U,
-                                    2U + (12U - row) * 2U);
+                                    16U,
+                                    3U + (12U - row));
 
                             if (distance > allowed_reach)
                                 continue;
