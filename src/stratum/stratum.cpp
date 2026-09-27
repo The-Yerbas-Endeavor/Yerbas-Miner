@@ -3106,94 +3106,6 @@ void Client::report_stats(bool force)
 
                 std::vector<std::string> work_stats;
 
-                std::string summary_label = "HEALTHY";
-                std::string summary_color = lime;
-                if (operating_status == "STALLED") {
-                    summary_label = "STALLED";
-                    summary_color = red;
-                } else if (shares_rejected_ != 0U) {
-                    summary_label = "DEGRADED";
-                    summary_color = gold;
-                } else if (uptime < 15.0) {
-                    summary_label = "WARMING UP";
-                    summary_color = cyan;
-                }
-
-                const std::size_t block_inner_width =
-                    mascot_panel_width > 2U
-                        ? mascot_panel_width - 2U
-                        : 0U;
-
-                const std::string summary_status_text =
-                    "SUMMARY " + summary_label;
-                const std::string summary_rate_text =
-                    format_rate(total_hps);
-                const std::string summary_ar_text =
-                    "A/R " +
-                    std::to_string(shares_accepted_) +
-                    "/" +
-                    std::to_string(shares_rejected_);
-
-                const std::string compact_summary =
-                    summary_status_text +
-                    "  " +
-                    summary_rate_text;
-
-                if (compact_summary.size() <=
-                    block_inner_width) {
-                    std::ostringstream summary_line;
-                    summary_line
-                        << summary_color << bold
-                        << summary_status_text
-                        << reset
-                        << "  "
-                        << summary_rate_text;
-                    work_stats.push_back(
-                        summary_line.str());
-
-                    if (summary_ar_text.size() <=
-                        block_inner_width)
-                        work_stats.push_back(
-                            summary_ar_text);
-                } else {
-                    std::ostringstream summary_line;
-                    summary_line
-                        << summary_color << bold
-                        << summary_status_text
-                        << reset;
-                    work_stats.push_back(
-                        summary_line.str());
-
-                    const std::string detail =
-                        "RATE " +
-                        summary_rate_text +
-                        "  " +
-                        summary_ar_text;
-                    work_stats.push_back(
-                        detail.size() <= block_inner_width
-                            ? detail
-                            : summary_ar_text);
-                }
-
-                std::ostringstream status_line;
-                status_line
-                    << operating_color << bold
-                    << "STATUS " << operating_status
-                    << reset;
-                work_stats.push_back(status_line.str());
-
-                std::ostringstream runtime_line;
-                runtime_line
-                    << "RUNTIME "
-                    << format_duration(uptime);
-                work_stats.push_back(runtime_line.str());
-
-                std::ostringstream rate_line;
-                rate_line
-                    << "HASHRATE "
-                    << format_rate(total_hps);
-                work_stats.push_back(rate_line.str());
-
                 if (config_.miner.cpu_enabled) {
                     std::ostringstream cpu_line;
                     cpu_line
@@ -3248,14 +3160,6 @@ void Client::report_stats(bool force)
 
                     work_stats.push_back(gpu_line.str());
                 }
-
-                std::ostringstream shares_line;
-                shares_line
-                    << "SHARES "
-                    << shares_accepted_ << " accepted"
-                    << " / "
-                    << shares_rejected_ << " rejected";
-                work_stats.push_back(shares_line.str());
 
                 std::ostringstream last_accepted_line;
                 last_accepted_line << "LAST ACCEPTED ";
@@ -3435,7 +3339,7 @@ void Client::report_stats(bool force)
                 << fit(std::to_string(shares_rejected_), 10)
                 << fit("SUBMITTED", 12)
                 << fit(std::to_string(shares_submitted_), 10)
-                << fit("HEALTH", 10)
+                << fit("ACCEPTANCE", 12)
                 << std::fixed
                 << std::setprecision(2)
                 << acceptance << "%";
