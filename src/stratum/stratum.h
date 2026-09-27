@@ -285,6 +285,7 @@ private:
 
     struct GpuWorker {
         int device_id{-1};
+        std::string hardware_key;
         std::unique_ptr<cuda::BatchEngine> engine;
         std::unique_ptr<GpuScanState> scan_state;
         std::uint32_t region_start{0};
@@ -338,6 +339,9 @@ private:
             std::size_t proven_batch{0};
             double proven_hps{0.0};
             std::uint64_t proven_latency_overruns{0};
+
+            // Last stable batch written to the persistent live-batch cache.
+            std::size_t persisted_batch{0};
         };
 
         // Optional live latency-targeted production experiment. The base batch
