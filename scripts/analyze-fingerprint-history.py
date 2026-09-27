@@ -12,6 +12,10 @@ Outputs:
   preferred_batch.csv     Ranked preference with OBSERVED/CANDIDATE/VALIDATED state.
   validated_batch.csv     Only preferences that satisfy validation thresholds.
   coverage_report.csv     Dataset maturity and fingerprint coverage summary.
+  family_batch_comparison.csv
+                          Cross-fingerprint CN-family batch evidence.
+  preferred_family_batch.csv
+                          Read-only family-level batch preference candidates.
 """
 
 from __future__ import annotations
@@ -397,6 +401,18 @@ def main() -> int:
         default=1.0,
         help="Maximum stale-rate regression in percentage points for VALIDATED (default: 1.0).",
     )
+    parser.add_argument(
+        "--family-min-fingerprints",
+        type=int,
+        default=20,
+        help="Minimum distinct exact fingerprints for a family candidate (default: 20).",
+    )
+    parser.add_argument(
+        "--family-min-scans",
+        type=int,
+        default=100,
+        help="Minimum scans for a family candidate (default: 100).",
+    )
     args = parser.parse_args()
 
     if args.candidate_scans < 1:
@@ -409,6 +425,10 @@ def main() -> int:
         parser.error("--min-win-pct must be >= 0")
     if args.max_stale_regression_pct < 0.0:
         parser.error("--max-stale-regression-pct must be >= 0")
+    if args.family_min_fingerprints < 2:
+        parser.error("--family-min-fingerprints must be >= 2")
+    if args.family_min_scans < 1:
+        parser.error("--family-min-scans must be >= 1")
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -763,6 +783,168 @@ def main() -> int:
         if len({b.batch for b in batches if b.fingerprint == fp}) > 1
     }
 
+    # Cross-fingerprint rotation-family analysis.  This intentionally keeps
+    # exact fingerprints as the apples-to-apples unit above, while allowing us
+    # to ask whether a batch preference generalizes across many different
+    # schedules that share the same canonical CN combination on the same
+    # hardware.  Nothing from this table changes live scheduling.
+    by_family: dict[tuple, list[BatchSample]] = defaultdict(list)
+    for b in batches:
+        by_family[
+            (b.hardware_signature, b.cn, b.batch)
+        ].append(b)
+
+    family_rows = []
+    family_stats: dict[tuple, dict[str, float | int | str]] = {}
+
+    for (hardware_signature, cn, batch), samples in sorted(by_family.items()):
+        fingerprints = {s.fingerprint for s in samples}
+        sources = {s.source for s in samples}
+        stale_scans = sum(s.stale for s in samples)
+        total_wall_ms = sum(s.wall_ms for s in samples)
+        nonstale_hashes = sum(s.hashes for s in samples if not s.stale)
+        effective_hps = (
+            1000.0 * nonstale_hashes / total_wall_ms
+            if total_wall_ms > 0.0 else math.nan
+        )
+
+        # Estimate cross-fingerprint dispersion from per-fingerprint effective
+        # H/s so a family with wildly varying schedules does not look more
+        # stable than it really is.
+        per_fp: dict[str, list[BatchSample]] = defaultdict(list)
+        for s in samples:
+            per_fp[s.fingerprint].append(s)
+
+        per_fp_hps = []
+        for fp_samples in per_fp.values():
+            fp_wall = sum(s.wall_ms for s in fp_samples)
+            fp_hashes = sum(s.hashes for s in fp_samples if not s.stale)
+            if fp_wall > 0.0:
+                per_fp_hps.append(1000.0 * fp_hashes / fp_wall)
+
+        dispersion_pct = math.nan
+        if len(per_fp_hps) >= 2:
+            mu = statistics.fmean(per_fp_hps)
+            if mu > 0.0:
+                dispersion_pct = (
+                    statistics.pstdev(per_fp_hps) / mu * 100.0
+                )
+
+        stats = {
+            "hardware_signature": hardware_signature,
+            "cn": cn,
+            "batch": batch,
+            "fingerprints": len(fingerprints),
+            "sources": len(sources),
+            "scans": len(samples),
+            "stale_pct": 100.0 * stale_scans / len(samples),
+            "avg_scan_ms": mean(s.scan_ms for s in samples),
+            "effective_hps": effective_hps,
+            "dispersion_pct": dispersion_pct,
+        }
+        family_stats[(hardware_signature, cn, batch)] = stats
+
+        family_rows.append(
+            (
+                hardware_signature,
+                cn,
+                batch,
+                len(fingerprints),
+                len(sources),
+                len(samples),
+                stale_scans,
+                f"{stats['stale_pct']:.4f}",
+                f"{stats['avg_scan_ms']:.3f}",
+                f"{effective_hps:.3f}",
+                "" if not math.isfinite(dispersion_pct)
+                    else f"{dispersion_pct:.3f}",
+            )
+        )
+
+    write_csv(
+        args.output / "family_batch_comparison.csv",
+        [
+            "hardware_signature", "cn", "batch", "fingerprints", "sources",
+            "scans", "stale_scans", "stale_pct", "avg_scan_ms",
+            "effective_hps", "cross_fingerprint_dispersion_pct",
+        ],
+        family_rows,
+    )
+
+    by_family_pref: dict[tuple, list[dict[str, float | int | str]]] = defaultdict(list)
+    for stats in family_stats.values():
+        if (
+            int(stats["fingerprints"]) >= args.family_min_fingerprints
+            and int(stats["scans"]) >= args.family_min_scans
+        ):
+            by_family_pref[
+                (
+                    str(stats["hardware_signature"]),
+                    str(stats["cn"]),
+                )
+            ].append(stats)
+
+    family_preferred_rows = []
+    for (hardware_signature, cn), candidates in sorted(by_family_pref.items()):
+        if not candidates:
+            continue
+        candidates.sort(
+            key=lambda x: (
+                float(x["effective_hps"]),
+                -float(x["stale_pct"]),
+                int(x["fingerprints"]),
+            ),
+            reverse=True,
+        )
+        best = candidates[0]
+        runner = candidates[1] if len(candidates) >= 2 else None
+
+        improvement_pct = math.nan
+        runner_batch = ""
+        runner_hps = math.nan
+        if runner is not None:
+            runner_batch = int(runner["batch"])
+            runner_hps = float(runner["effective_hps"])
+            if runner_hps > 0.0:
+                improvement_pct = (
+                    (float(best["effective_hps"]) - runner_hps)
+                    / runner_hps
+                    * 100.0
+                )
+
+        family_preferred_rows.append(
+            (
+                hardware_signature,
+                cn,
+                int(best["batch"]),
+                int(best["fingerprints"]),
+                int(best["sources"]),
+                int(best["scans"]),
+                f"{float(best['effective_hps']):.3f}",
+                f"{float(best['stale_pct']):.4f}",
+                "" if not math.isfinite(float(best["dispersion_pct"]))
+                    else f"{float(best['dispersion_pct']):.3f}",
+                runner_batch,
+                "" if not math.isfinite(runner_hps)
+                    else f"{runner_hps:.3f}",
+                "" if not math.isfinite(improvement_pct)
+                    else f"{improvement_pct:.3f}",
+                len(candidates),
+            )
+        )
+
+    write_csv(
+        args.output / "preferred_family_batch.csv",
+        [
+            "hardware_signature", "cn", "preferred_batch",
+            "fingerprints", "sources", "scans", "effective_hps",
+            "stale_pct", "cross_fingerprint_dispersion_pct",
+            "runner_up_batch", "runner_up_effective_hps",
+            "improvement_pct", "qualified_batches",
+        ],
+        family_preferred_rows,
+    )
+
     coverage_rows = [
         ("rotation_fingerprints", len(by_fp)),
         ("batch_fingerprints", len(unique_batch_fingerprints)),
@@ -782,6 +964,10 @@ def main() -> int:
             "maximum_stale_regression_percentage_points",
             f"{args.max_stale_regression_pct:.3f}",
         ),
+        ("family_groups", len(family_stats)),
+        ("family_preference_groups", len(family_preferred_rows)),
+        ("family_min_fingerprints", args.family_min_fingerprints),
+        ("family_min_scans", args.family_min_scans),
     ]
     write_csv(
         args.output / "coverage_report.csv",
@@ -812,6 +998,10 @@ def main() -> int:
     print(
         "Validated unique fingerprints: "
         f"{len(fingerprints_by_state['VALIDATED']):,}"
+    )
+    print(
+        "Cross-fingerprint family preference groups: "
+        f"{len(family_preferred_rows):,}"
     )
     print(f"Wrote analysis to: {args.output}")
     return 0
