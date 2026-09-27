@@ -2262,7 +2262,7 @@ void Client::report_stats(bool force)
                 " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
             };
 
-            std::array<std::string, 2> rows{{"", ""}};
+            std::array<std::string, 3> rows{{"", "", ""}};
             if (width == 0U)
                 return rows;
 
@@ -2271,6 +2271,7 @@ void Client::report_stats(bool force)
             if (count == 0U) {
                 rows[0].assign(width, ' ');
                 rows[1].assign(width, ' ');
+                rows[2].assign(width, ' ');
                 return rows;
             }
 
@@ -2323,17 +2324,20 @@ void Client::report_stats(bool force)
 
                 const int level =
                     std::clamp(
-                        static_cast<int>(ratio * 16.0 + 0.5),
+                        static_cast<int>(ratio * 24.0 + 0.5),
                         0,
-                        16);
+                        24);
 
                 const int lower =
                     std::min(level, 8);
+                const int middle =
+                    std::clamp(level - 8, 0, 8);
                 const int upper =
-                    std::max(0, level - 8);
+                    std::clamp(level - 16, 0, 8);
 
                 rows[0] += levels[upper];
-                rows[1] += levels[lower];
+                rows[1] += levels[middle];
+                rows[2] += levels[lower];
             }
 
             return rows;
@@ -2771,12 +2775,21 @@ void Client::report_stats(bool force)
                     << reset;
                 hashrate_rows.push_back(graph_top.str());
 
+                std::ostringstream graph_mid;
+                graph_mid
+                    << std::string(8U, ' ')
+                    << dim << "│ " << reset
+                    << color
+                    << graph[1]
+                    << reset;
+                hashrate_rows.push_back(graph_mid.str());
+
                 std::ostringstream graph_bottom;
                 graph_bottom
                     << std::string(8U, ' ')
                     << dim << "└ " << reset
                     << color
-                    << graph[1]
+                    << graph[2]
                     << reset
                     << ' '
                     << color << "●" << reset;
