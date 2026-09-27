@@ -394,7 +394,7 @@ double gpu_latency_target_ms()
 {
     static const double target = []() {
         const char* value = std::getenv("YERBAS_GPU_LATENCY_TARGET_MS");
-        if (value == nullptr || *value == '\0') return 0.0;
+        if (value == nullptr || *value == '\0') return 3500.0;
         char* end = nullptr;
         const double parsed = std::strtod(value, &end);
         if (end == value || *end != '\0' || !(parsed >= 1000.0 && parsed <= 10000.0))
@@ -501,36 +501,76 @@ nlohmann::json& live_batch_cache()
 }
 
 std::string live_batch_cache_key(const std::string& hardware_key,
-                                 std::uint32_t cn_mask)
+                                 std::uint32_t cn_mask,
+                                 RotationFingerprint rotation_fingerprint)
+{
+    std::ostringstream key;
+    key << hardware_key
+        << "|cn=" << cn_mask
+        << "|rotation=" << std::hex
+        << static_cast<std::uint64_t>(rotation_fingerprint);
+    return key.str();
+}
+
+std::string legacy_live_batch_cache_key(const std::string& hardware_key,
+                                        std::uint32_t cn_mask)
 {
     return hardware_key + "|cn=" + std::to_string(cn_mask);
 }
 
 std::size_t load_live_batch_cache(const std::string& hardware_key,
-                                  std::uint32_t cn_mask)
+                                  std::uint32_t cn_mask,
+                                  RotationFingerprint rotation_fingerprint,
+                                  bool* exact_rotation_match = nullptr)
 {
     auto& cache = live_batch_cache();
-    const auto key = live_batch_cache_key(hardware_key, cn_mask);
-    const auto it = cache.find(key);
-    if (it == cache.end() || !it->is_object())
-        return 0U;
+    const auto key =
+        live_batch_cache_key(
+            hardware_key,
+            cn_mask,
+            rotation_fingerprint);
+    auto it = cache.find(key);
+    if (it != cache.end() && it->is_object()) {
+        if (exact_rotation_match != nullptr)
+            *exact_rotation_match = true;
+        const auto value = it->value("batch", 0ULL);
+        return static_cast<std::size_t>(value);
+    }
 
+    // One-way compatibility with caches written before rotation-specific
+    // learning. A legacy CN-family entry may seed the first encounter, but
+    // the next stable save is written under the exact rotation fingerprint.
+    it = cache.find(legacy_live_batch_cache_key(hardware_key, cn_mask));
+    if (it == cache.end() || !it->is_object()) {
+        if (exact_rotation_match != nullptr)
+            *exact_rotation_match = false;
+        return 0U;
+    }
+
+    if (exact_rotation_match != nullptr)
+        *exact_rotation_match = false;
     const auto value = it->value("batch", 0ULL);
     return static_cast<std::size_t>(value);
 }
 
 void save_live_batch_cache(const std::string& hardware_key,
                            std::uint32_t cn_mask,
+                           RotationFingerprint rotation_fingerprint,
                            std::size_t batch,
                            double hps,
                            double scan_ms)
 {
     auto& cache = live_batch_cache();
-    const auto key = live_batch_cache_key(hardware_key, cn_mask);
+    const auto key =
+        live_batch_cache_key(
+            hardware_key,
+            cn_mask,
+            rotation_fingerprint);
     cache[key] = {
         {"batch", batch},
         {"hps", hps},
-        {"scan_ms", scan_ms}
+        {"scan_ms", scan_ms},
+        {"rotation", static_cast<std::uint64_t>(rotation_fingerprint)}
     };
 
     std::ofstream out(
@@ -1335,7 +1375,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
 
     if (memory.probe_pending &&
         result.hash_count == memory.probe_batch) {
-        constexpr double kProbeMinGain = 0.0075;
+        constexpr double kProbeMinGain = 0.0100;
         constexpr double kProbeMaxLatencyFactor = 1.10;
         const double gain =
             memory.probe_baseline_hps > 0.0
@@ -1475,11 +1515,18 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         save_live_batch_cache(
             worker.hardware_key,
             result.cn_mask,
+            result.rotation_fingerprint,
             current,
             memory.baseline_hps_ewma,
             result.scan_ms);
         memory.persisted_batch = current;
+        memory.persisted_rotation_fingerprint =
+            result.rotation_fingerprint;
         std::cout << "[latency-cache] GPU " << worker.device_id
+                  << " rotation=" << std::hex
+                  << static_cast<std::uint64_t>(
+                         result.rotation_fingerprint)
+                  << std::dec
                   << " CN=" << cn_mask_names(result.cn_mask)
                   << " saved_batch=" << current
                   << " hps=" << std::fixed << std::setprecision(2)
@@ -1678,22 +1725,39 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
             : worker.engine->batch_size();
     const std::size_t floor = gpu_latency_floor_for_base(base);
 
-    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0) {
-        const std::size_t cached =
-            load_live_batch_cache(worker.hardware_key, cn_mask);
-        constexpr std::size_t kBatchQuantum = 256U;
-        if (cached >= floor && cached <= base &&
-            (cached % kBatchQuantum) == 0U) {
-            worker.engine->set_active_batch_size(cached);
-            memory.persisted_batch = cached;
-            std::cout << "[latency-cache] GPU " << worker.device_id
-                      << " CN=" << cn_mask_names(cn_mask)
-                      << " batch=" << base << " -> " << cached
-                      << " source=persistent-live"
-                      << "\n";
-        }
+    bool exact_rotation_match = false;
+    const std::size_t cached =
+        load_live_batch_cache(
+            worker.hardware_key,
+            cn_mask,
+            active_rotation_fingerprint_,
+            &exact_rotation_match);
+    constexpr std::size_t kBatchQuantum = 256U;
+    if (cached >= floor && cached <= base &&
+        (cached % kBatchQuantum) == 0U) {
+        worker.engine->set_active_batch_size(cached);
+        memory.persisted_batch = cached;
+        memory.persisted_rotation_fingerprint =
+            exact_rotation_match
+                ? active_rotation_fingerprint_
+                : RotationFingerprint{};
+        std::cout << "[latency-cache] GPU " << worker.device_id
+                  << " rotation=" << std::hex
+                  << static_cast<std::uint64_t>(
+                         active_rotation_fingerprint_)
+                  << std::dec
+                  << " CN=" << cn_mask_names(cn_mask)
+                  << " batch=" << base << " -> " << cached
+                  << " source="
+                  << (exact_rotation_match
+                          ? "persistent-rotation"
+                          : "legacy-cn-fallback")
+                  << "\n";
         return;
     }
+
+    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0)
+        return;
 
     constexpr double kSeedTargetFraction = 0.95;
     constexpr std::size_t kBatchQuantum = 256U;
