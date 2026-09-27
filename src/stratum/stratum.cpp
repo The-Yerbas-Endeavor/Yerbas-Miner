@@ -3308,154 +3308,142 @@ void Client::report_stats(bool force)
                     }
                 }
 
-                // Proof-of-Grass block growth. A new Stratum job begins
-                // as a three-stroke seedling. Every five seconds exactly one
-                // additional '/', '\\', or '|' stroke is revealed. Growth
-                // continues across the full fixed canvas instead of stopping
-                // after a small pre-baked set of stages.
-                struct PlantStroke {
+                // Proof-of-Grass block growth. This fixed Braille mask
+                // was traced from the supplied cannabis-leaf source artwork.
+                // A new job starts at the stem and reveals one traced terminal
+                // cell every five seconds, growing outward through the leaf.
+                struct LeafCell {
                     std::size_t row;
                     std::size_t col;
-                    char glyph;
+                    char32_t glyph;
+                    std::uint64_t growth_score;
                 };
 
                 static constexpr std::size_t plant_rows = 13U;
                 static constexpr std::size_t plant_cols = 40U;
-                static constexpr std::size_t seedling_strokes = 3U;
+                static constexpr std::size_t leaf_width = 28U;
+                static constexpr std::size_t leaf_left = 6U;
+                static constexpr std::size_t seedling_cells = 3U;
                 static constexpr double growth_interval_seconds = 5.0;
 
-                static const std::vector<PlantStroke> growth_strokes = [] {
-                    std::vector<PlantStroke> strokes;
-                    strokes.reserve(220U);
-
-                    auto add = [&strokes](std::size_t row,
-                                          std::size_t col,
-                                          char glyph) {
-                        const auto duplicate =
-                            std::find_if(
-                                strokes.begin(),
-                                strokes.end(),
-                                [row, col](const PlantStroke& stroke) {
-                                    return stroke.row == row &&
-                                           stroke.col == col;
-                                });
-                        if (duplicate == strokes.end())
-                            strokes.push_back({row, col, glyph});
-                    };
-
-                    // Preserve the recognizable plant sequence first.
-                    // These are the original one-stroke-at-a-time growth
-                    // coordinates that made the plant read correctly from
-                    // the seedling onward.
-                    static const std::array<PlantStroke, 31> base_growth{{
-                        {12U, 18U, '/'},
-                        {12U, 20U, '\\'},
-                        {11U, 19U, '|'},
-                        {10U, 19U, '|'},
-                        {11U, 18U, '\\'},
-                        {11U, 20U, '/'},
-                        {9U, 19U, '|'},
-                        {9U, 17U, '\\'},
-                        {9U, 21U, '/'},
-                        {8U, 19U, '|'},
-                        {8U, 16U, '\\'},
-                        {8U, 22U, '/'},
-                        {7U, 19U, '|'},
-                        {7U, 17U, '\\'},
-                        {7U, 21U, '/'},
-                        {6U, 19U, '|'},
-                        {6U, 16U, '\\'},
-                        {6U, 22U, '/'},
-                        {5U, 19U, '|'},
-                        {5U, 15U, '\\'},
-                        {5U, 23U, '/'},
-                        {4U, 19U, '|'},
-                        {4U, 17U, '\\'},
-                        {4U, 21U, '/'},
-                        {3U, 19U, '|'},
-                        {3U, 16U, '\\'},
-                        {3U, 22U, '/'},
-                        {2U, 19U, '|'},
-                        {2U, 17U, '\\'},
-                        {2U, 21U, '/'},
-                        {1U, 19U, '|'},
+                static const std::array<std::u32string, plant_rows>
+                    traced_leaf{{
+                        U"             ⠠⠄             ",
+                        U"            ⢠⢃⠘⡄            ",
+                        U"           ⢰⠃⢀ ⠐⠆           ",
+                        U"          ⢀⣯⠁  ⠈⣝⡀          ",
+                        U" ⠈⠅⠂⢄⡀    ⢨⠆    ⠰⡄    ⢀⡠⠐⠨⠁ ",
+                        U"  ⠺⡀⠠⡈⠑⢤  ⠰⡃ ⢐  ⢘⠆ ⢀⡤⠊⢀⠄⢀⠗  ",
+                        U"  ⠈⣧ ⠈⢢⡀⠘⢠⠘⡅ ⠐⠂ ⢨⠃⣤⠃⢀⠔⠁ ⣼⠁  ",
+                        U"   ⠈⠰⡀ ⠐⢆ ⢳⡱ ⠐  ⣎⡚ ⡰⠂ ⢐⠆⠁   ",
+                        U"     ⠈⠃⠦⢀⠑⢄⠸⢅  ⡸⠇⡠⠊⡀⠴⠚⠁     ",
+                        U" ⠶⢖⡉⠉⠉⣉⣉⠛⠛⠶⣵⣌⢄⡤⣡⣮⠶⠛⠋⣉⣉⠍⠉⢉⡲⠶ ",
+                        U"   ⠈⠒⠤⠄⣄⣈⡉⣁⠶⠟⠋⡝⠻⠖⣈⣉⣁⣠⠠⠤⠒⠁   ",
+                        U"         ⠁   ⢸⡇             ",
+                        U"             ⠰⠂             ",
                     }};
 
-                    for (const auto& stroke : base_growth)
-                        add(stroke.row, stroke.col, stroke.glyph);
+                static const std::vector<LeafCell> growth_cells = [] {
+                    std::vector<LeafCell> cells;
+                    cells.reserve(180U);
 
-                    // Once the recognizable mature plant exists, keep adding
-                    // one stroke at a time to widen and thicken the canopy on
-                    // long jobs. This extends growth without changing the
-                    // early silhouette.
-                    static const std::array<std::size_t, 10> canopy_rows{{
-                        9U, 8U, 7U, 6U, 5U,
-                        4U, 3U, 2U, 1U, 0U,
-                    }};
+                    // The base of the traced stem is centered between source
+                    // columns 13 and 14 on the bottom row. Integer doubled
+                    // coordinates avoid floating-point work in the ordering.
+                    constexpr std::int64_t base_row = 12;
+                    constexpr std::int64_t base_col_x2 = 27;
 
-                    for (std::size_t reach = 2U;
-                         reach <= 16U;
-                         ++reach) {
-                        for (const std::size_t row : canopy_rows) {
-                            const std::size_t height_from_bottom =
-                                12U - row;
-                            const std::size_t allowed_reach =
-                                std::min<std::size_t>(
-                                    16U,
-                                    2U + height_from_bottom);
-
-                            if (reach > allowed_reach)
+                    for (std::size_t row = 0U;
+                         row < traced_leaf.size();
+                         ++row) {
+                        for (std::size_t col = 0U;
+                             col < leaf_width;
+                             ++col) {
+                            const char32_t glyph =
+                                traced_leaf[row][col];
+                            if (glyph == U' ')
                                 continue;
 
-                            const std::size_t left_col = 19U - reach;
-                            const std::size_t right_col = 19U + reach;
+                            const std::int64_t dr =
+                                base_row -
+                                static_cast<std::int64_t>(row);
+                            const std::int64_t dc_x2 =
+                                static_cast<std::int64_t>(col) * 2 -
+                                base_col_x2;
 
-                            if (left_col < plant_cols)
-                                add(
-                                    row,
-                                    left_col,
-                                    ((reach + row) % 4U == 0U)
-                                        ? '|'
-                                        : '\\');
+                            // Grow generally from the stem outward/upward,
+                            // with slightly less horizontal penalty so the
+                            // lower leaflets begin forming early.
+                            const std::uint64_t score =
+                                static_cast<std::uint64_t>(
+                                    dr * dr * 100 +
+                                    dc_x2 * dc_x2 * 18);
 
-                            if (right_col < plant_cols)
-                                add(
+                            cells.push_back(
+                                LeafCell{
                                     row,
-                                    right_col,
-                                    ((reach + row) % 4U == 0U)
-                                        ? '|'
-                                        : '/');
+                                    leaf_left + col,
+                                    glyph,
+                                    score});
                         }
                     }
 
-                    // Final long-job fill: sparse interior shoots, still one
-                    // character every five seconds.
-                    for (std::size_t row = 1U; row <= 9U; ++row) {
-                        for (std::size_t col = 7U;
-                             col <= 31U;
-                             col += 2U) {
-                            if (col == 19U)
-                                continue;
+                    std::stable_sort(
+                        cells.begin(),
+                        cells.end(),
+                        [](const LeafCell& a,
+                           const LeafCell& b) {
+                            if (a.growth_score != b.growth_score)
+                                return a.growth_score <
+                                       b.growth_score;
+                            if (a.row != b.row)
+                                return a.row > b.row;
+                            return a.col < b.col;
+                        });
 
-                            const std::size_t distance =
-                                col > 19U ? col - 19U : 19U - col;
-                            const std::size_t allowed_reach =
-                                std::min<std::size_t>(
-                                    16U,
-                                    3U + (12U - row));
-
-                            if (distance > allowed_reach)
-                                continue;
-
-                            add(
-                                row,
-                                col,
-                                col < 19U ? '\\' : '/');
-                        }
-                    }
-
-                    return strokes;
+                    return cells;
                 }();
+
+                auto append_utf8 =
+                    [](std::string& out, char32_t cp) {
+                        if (cp <= 0x7fU) {
+                            out.push_back(
+                                static_cast<char>(cp));
+                        } else if (cp <= 0x7ffU) {
+                            out.push_back(
+                                static_cast<char>(
+                                    0xc0U | (cp >> 6U)));
+                            out.push_back(
+                                static_cast<char>(
+                                    0x80U | (cp & 0x3fU)));
+                        } else if (cp <= 0xffffU) {
+                            out.push_back(
+                                static_cast<char>(
+                                    0xe0U | (cp >> 12U)));
+                            out.push_back(
+                                static_cast<char>(
+                                    0x80U |
+                                    ((cp >> 6U) & 0x3fU)));
+                            out.push_back(
+                                static_cast<char>(
+                                    0x80U | (cp & 0x3fU)));
+                        } else {
+                            out.push_back(
+                                static_cast<char>(
+                                    0xf0U | (cp >> 18U)));
+                            out.push_back(
+                                static_cast<char>(
+                                    0x80U |
+                                    ((cp >> 12U) & 0x3fU)));
+                            out.push_back(
+                                static_cast<char>(
+                                    0x80U |
+                                    ((cp >> 6U) & 0x3fU)));
+                            out.push_back(
+                                static_cast<char>(
+                                    0x80U | (cp & 0x3fU)));
+                        }
+                    };
 
                 double current_job_age = 0.0;
                 if (active_job_received_at_.time_since_epoch().count() != 0) {
@@ -3466,21 +3454,26 @@ void Client::report_stats(bool force)
                                 now - active_job_received_at_).count());
                 }
 
-                const std::size_t timed_strokes =
+                const std::size_t timed_cells =
                     static_cast<std::size_t>(
-                        current_job_age / growth_interval_seconds);
-                const std::size_t visible_strokes =
+                        current_job_age /
+                        growth_interval_seconds);
+                const std::size_t visible_cells =
                     std::min(
-                        growth_strokes.size(),
-                        seedling_strokes + timed_strokes);
+                        growth_cells.size(),
+                        seedling_cells + timed_cells);
 
-                std::array<std::string, plant_rows> plant_canvas{};
+                std::array<std::u32string, plant_rows>
+                    plant_canvas{};
                 for (auto& row : plant_canvas)
-                    row.assign(plant_cols, ' ');
+                    row.assign(plant_cols, U' ');
 
-                for (std::size_t i = 0U; i < visible_strokes; ++i) {
-                    const auto& stroke = growth_strokes[i];
-                    plant_canvas[stroke.row][stroke.col] = stroke.glyph;
+                for (std::size_t i = 0U;
+                     i < visible_cells;
+                     ++i) {
+                    const auto& cell = growth_cells[i];
+                    plant_canvas[cell.row][cell.col] =
+                        cell.glyph;
                 }
 
                 const std::string plant_color =
@@ -3491,10 +3484,15 @@ void Client::report_stats(bool force)
                                : faint);
 
                 for (const auto& row : plant_canvas) {
+                    std::string utf8_row;
+                    utf8_row.reserve(plant_cols * 3U);
+                    for (const char32_t glyph : row)
+                        append_utf8(utf8_row, glyph);
+
                     std::ostringstream art_line;
                     art_line
                         << plant_color
-                        << row
+                        << utf8_row
                         << reset;
                     mascot_rows.push_back(art_line.str());
                 }
