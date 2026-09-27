@@ -2419,7 +2419,8 @@ void Client::report_stats(bool force)
         {
             const std::size_t panel_gap = 2U;
             const std::size_t mascot_panel_width =
-                inner_width >= 145U ? 36U : 0U;
+                inner_width >= 155U ? 46U :
+                (inner_width >= 145U ? 42U : 0U);
             const std::size_t hashrate_panel_width =
                 mascot_panel_width > 0U
                     ? inner_width - mascot_panel_width - panel_gap
@@ -2701,7 +2702,7 @@ void Client::report_stats(bool force)
                 for (const auto& worker : gpu_workers_) {
                     std::ostringstream gpu_line;
                     gpu_line
-                        << "G" << worker.device_id
+                        << "GPU" << worker.device_id
                         << " B" << worker.engine->batch_size()
                         << " ";
 
@@ -2758,30 +2759,38 @@ void Client::report_stats(bool force)
                 }
                 work_stats.push_back(last_share_line.str());
 
-                // Eight-line ASCII miner.  The pickaxe alternates between a
-                // raised and striking pose based on actual completed hashes.
-                // When hashing stops, the animation stops with it.
-                static const std::array<std::array<const char*, 8>, 2>
+                // Console miner driven by actual completed work. The two poses
+                // are deliberately different: pickaxe overhead, then pickaxe
+                // buried into the rock face with impact sparks.
+                static const std::array<std::array<const char*, 12>, 2>
                     miner_frames{{
                         {{
-                            "    __/---  ",
-                            " __/        ",
-                            "/___\\       ",
-                            "(o o)       ",
-                            "/|_|\\__     ",
-                            " / \\   \\    ",
-                            "/   \\   *## ",
-                            "_______#####",
+                            "       ========   ",
+                            "          \\       ",
+                            "    ______ \\      ",
+                            "   /______\\ \\     ",
+                            "    (o  o) \\      ",
+                            "    /|__|\\_/       ",
+                            "     |  |          ",
+                            "    /|  |\\         ",
+                            "   / |  | \\   ### ",
+                            "  /  |  |  \\ #####",
+                            "     /  \\    ######",
+                            "____/____\\___######",
                         }},
                         {{
-                            "            ",
-                            " ___    ---\\",
-                            "/___\\      \\",
-                            "(o o)       |",
-                            "/|_|\\______/ ",
-                            " / \\     *  ",
-                            "/   \\   /## ",
-                            "_______#####",
+                            "                  ",
+                            "    ______        ",
+                            "   /______\\       ",
+                            "    (o  o)        ",
+                            "    /|__|\\____    ",
+                            "     |  |     \\===",
+                            "    /|  |\\     \\ *",
+                            "   / |  | \\     *#",
+                            "  /  |  |  \\  *###",
+                            "     /  \\    #####",
+                            "    /    \\  ######",
+                            "___________\\######",
                         }},
                     }};
 
@@ -2796,8 +2805,8 @@ void Client::report_stats(bool force)
                                ? red
                                : faint);
 
-                constexpr std::size_t miner_width = 13U;
-                constexpr std::size_t miner_rows = 8U;
+                constexpr std::size_t miner_width = 18U;
+                constexpr std::size_t miner_rows = 12U;
 
                 while (work_stats.size() < miner_rows)
                     work_stats.push_back("");
