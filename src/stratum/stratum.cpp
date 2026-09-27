@@ -2405,11 +2405,11 @@ void Client::report_stats(bool force)
                 average_hps);
 
             hashrate_rows.push_back(
-                dim + std::string(
+                dim + repeat(
+                    "·",
                     total_graph_width > 18U
                         ? total_graph_width - 18U
-                        : 24U,
-                    '·') + reset);
+                        : 24U) + reset);
             hashrate_rows.push_back(
                 dim + std::string("WORKERS") + reset);
 
