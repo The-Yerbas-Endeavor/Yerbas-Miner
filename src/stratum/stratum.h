@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -323,6 +324,7 @@ private:
         struct LatencyMemory {
             double ms_per_hash_ewma{0.0};
             double hps_ewma{0.0};
+            double scan_ms_ewma{0.0};
             std::uint64_t samples{0};
 
             // Throughput baseline for the batch currently being observed.
@@ -363,12 +365,15 @@ private:
         // is the rotation-selected tuned batch; adaptive changes may only
         // reduce toward the configured latency target and never exceed it.
         //
-        // Recent non-stale timing is retained per CN mask so a new Stratum job
-        // does not have to relearn the same device/CN throughput from scratch.
+        // Recent non-stale timing is retained per exact GhostRider rotation
+        // fingerprint. Rotations that share the same unordered CN mask can
+        // still have materially different stage ordering and throughput, so
+        // they must not share EWMA/probe state.
         std::size_t latency_base_batch{0};
         double latency_scan_ms_ewma{0.0};
         std::uint64_t latency_samples{0};
-        std::array<LatencyMemory, 64> latency_memory{};
+        std::unordered_map<std::uint64_t, LatencyMemory>
+            rotation_latency_memory{};
 
         // Latest completed device scan duration for live dashboard telemetry.
         double last_scan_ms{0.0};
