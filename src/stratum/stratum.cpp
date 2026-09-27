@@ -3470,6 +3470,69 @@ void Client::report_stats(bool force)
                     return cells;
                 }();
 
+                // Long-job garden. Once the main traced leaf is mature, keep
+                // adding terminal cells into unused space rather than freezing
+                // the BLOCK WORK panel. The sequence builds two small corner
+                // leaves first, then lower sprouts and scattered grow-room
+                // detail. Cells never overwrite the main traced leaf.
+                static const std::vector<LeafCell> overflow_cells{
+                    // Upper-left mini leaf, stem first then leaflets.
+                    {5U, 3U, U'⠸', 0U},
+                    {4U, 3U, U'⢸', 1U},
+                    {3U, 3U, U'⣾', 2U},
+                    {3U, 2U, U'⢠', 3U},
+                    {3U, 4U, U'⡄', 4U},
+                    {2U, 2U, U'⢀', 5U},
+                    {2U, 4U, U'⡀', 6U},
+                    {2U, 1U, U'⠈', 7U},
+                    {2U, 5U, U'⠁', 8U},
+                    {1U, 3U, U'⠂', 9U},
+
+                    // Upper-right mini leaf.
+                    {5U, 36U, U'⠸', 10U},
+                    {4U, 36U, U'⢸', 11U},
+                    {3U, 36U, U'⣾', 12U},
+                    {3U, 35U, U'⢠', 13U},
+                    {3U, 37U, U'⡄', 14U},
+                    {2U, 35U, U'⢀', 15U},
+                    {2U, 37U, U'⡀', 16U},
+                    {2U, 34U, U'⠈', 17U},
+                    {2U, 38U, U'⠁', 18U},
+                    {1U, 36U, U'⠂', 19U},
+
+                    // Lower-corner sprouts.
+                    {12U, 2U, U'⠸', 20U},
+                    {11U, 2U, U'⢸', 21U},
+                    {10U, 1U, U'⢠', 22U},
+                    {10U, 3U, U'⡄', 23U},
+                    {9U, 0U, U'⠈', 24U},
+                    {9U, 4U, U'⠁', 25U},
+                    {12U, 37U, U'⠸', 26U},
+                    {11U, 37U, U'⢸', 27U},
+                    {10U, 36U, U'⢠', 28U},
+                    {10U, 38U, U'⡄', 29U},
+                    {9U, 35U, U'⠈', 30U},
+                    {9U, 39U, U'⠁', 31U},
+
+                    // Extra edge growth for unusually long jobs.
+                    {7U, 1U, U'⠂', 32U},
+                    {6U, 4U, U'⠄', 33U},
+                    {4U, 0U, U'⠐', 34U},
+                    {1U, 6U, U'⠂', 35U},
+                    {0U, 4U, U'⠄', 36U},
+                    {7U, 38U, U'⠂', 37U},
+                    {6U, 35U, U'⠄', 38U},
+                    {4U, 39U, U'⠐', 39U},
+                    {1U, 33U, U'⠂', 40U},
+                    {0U, 35U, U'⠄', 41U},
+                    {8U, 2U, U'⠈', 42U},
+                    {8U, 37U, U'⠁', 43U},
+                    {6U, 0U, U'⠠', 44U},
+                    {6U, 39U, U'⠄', 45U},
+                    {0U, 1U, U'⠂', 46U},
+                    {0U, 38U, U'⠂', 47U}
+                };
+
                 auto append_utf8 =
                     [](std::string& out, char32_t cp) {
                         if (cp <= 0x7fU) {
@@ -3523,7 +3586,7 @@ void Client::report_stats(bool force)
                 // Front-load the structural silhouette. By 60s expose
                 // about 60% of the trace, by 120s about 90%, and finish
                 // the remaining serration/detail by the 150s average-block
-                // target. The completed leaf remains visible until a new job.
+                // target. After that, continue growing the surrounding garden.
                 const std::size_t total_growth_cells =
                     growth_cells.size() > seedling_cells
                         ? growth_cells.size() - seedling_cells
@@ -3568,6 +3631,31 @@ void Client::report_stats(bool force)
                     const auto& cell = growth_cells[i];
                     plant_canvas[cell.row][cell.col] =
                         cell.glyph;
+                }
+
+                // Continue visibly growing after the main leaf matures.
+                // One additional garden cell appears every four seconds.
+                // If a decorative cell would overlap the hero leaf, skip it.
+                static constexpr double overflow_interval_seconds = 4.0;
+                const double overflow_age =
+                    std::max(0.0, current_job_age - mature_seconds);
+                const std::size_t visible_overflow_cells =
+                    std::min(
+                        overflow_cells.size(),
+                        static_cast<std::size_t>(
+                            overflow_age /
+                            overflow_interval_seconds));
+
+                for (std::size_t i = 0U;
+                     i < visible_overflow_cells;
+                     ++i) {
+                    const auto& cell = overflow_cells[i];
+                    if (cell.row < plant_rows &&
+                        cell.col < plant_cols &&
+                        plant_canvas[cell.row][cell.col] == U' ') {
+                        plant_canvas[cell.row][cell.col] =
+                            cell.glyph;
+                    }
                 }
 
                 const std::string plant_color =
