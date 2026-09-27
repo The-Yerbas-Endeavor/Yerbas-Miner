@@ -353,7 +353,10 @@ private:
             std::uint64_t proven_latency_overruns{0};
 
             // Last stable batch written to the persistent live-batch cache.
+            // The fingerprint prevents a CN-family memory entry from being
+            // mistaken for an exact-rotation learned result.
             std::size_t persisted_batch{0};
+            RotationFingerprint persisted_rotation_fingerprint{};
         };
 
         // Optional live latency-targeted production experiment. The base batch
