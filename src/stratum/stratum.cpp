@@ -1243,6 +1243,13 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         return;
 
     auto& memory = worker.latency_memory[result.cn_mask];
+    if (memory.persisted_batch != 0U &&
+        result.hash_count == memory.persisted_batch &&
+        memory.samples == 0U &&
+        result.scan_ms > target_ms * 1.20) {
+        return;
+    }
+
     const double ms_per_hash =
         result.scan_ms / static_cast<double>(result.hash_count);
     const double scan_hps =
