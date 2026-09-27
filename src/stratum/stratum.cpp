@@ -3533,39 +3533,10 @@ void Client::report_stats(bool force)
             }
 
             for (const auto& gpu : gpu_views) {
-                const auto worker_it =
-                    std::find_if(
-                        gpu_workers_.begin(),
-                        gpu_workers_.end(),
-                        [&](const auto& worker) {
-                            return worker.device_id == gpu.id;
-                        });
-
                 std::ostringstream gpu_line;
                 gpu_line
                     << fit("GPU" + std::to_string(gpu.id), 8)
                     << fit(format_rate(gpu.hps), 14);
-
-                if (worker_it != gpu_workers_.end()) {
-                    gpu_line
-                        << fit(
-                               "B" +
-                                   std::to_string(
-                                       worker_it->engine->batch_size()),
-                               10);
-
-                    if (worker_it->last_scan_ms > 0.0) {
-                        std::ostringstream scan_time;
-                        scan_time
-                            << std::fixed
-                            << std::setprecision(1)
-                            << (worker_it->last_scan_ms / 1000.0)
-                            << "s";
-                        gpu_line << fit(scan_time.str(), 10);
-                    } else {
-                        gpu_line << fit("n/a", 10);
-                    }
-                }
 
                 const auto telemetry_it =
                     gpu_telemetry.devices.find(gpu.id);
@@ -3575,7 +3546,16 @@ void Client::report_stats(bool force)
                                yerbas::console::detail::
                                    format_temperature(
                                        telemetry_it->second),
-                               10);
+                               10)
+                        << fit(
+                               yerbas::console::detail::
+                                   format_power(
+                                       telemetry_it->second),
+                               12);
+                } else {
+                    gpu_line
+                        << fit("n/a", 10)
+                        << fit("n/a", 12);
                 }
 
                 frame << line(gpu_line.str());
