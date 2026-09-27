@@ -1147,6 +1147,20 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     if (target_ms <= 0.0 || stale || result.scan_ms <= 0.0)
         return;
 
+    if (result.cn_mask < worker.latency_memory.size() &&
+        result.hash_count != 0U) {
+        auto& memory = worker.latency_memory[result.cn_mask];
+        const double ms_per_hash =
+            result.scan_ms / static_cast<double>(result.hash_count);
+        constexpr double kMemoryNewWeight = 0.20;
+        memory.ms_per_hash_ewma =
+            memory.samples == 0U
+                ? ms_per_hash
+                : memory.ms_per_hash_ewma * (1.0 - kMemoryNewWeight) +
+                      ms_per_hash * kMemoryNewWeight;
+        ++memory.samples;
+    }
+
     constexpr double kEwmaNewWeight = 0.35;
     worker.latency_scan_ms_ewma =
         worker.latency_samples == 0U
@@ -1202,6 +1216,54 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
               << " batch=" << current << " -> " << desired
               << " base=" << base
               << " floor=" << floor
+              << "\n";
+}
+
+void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
+                                                std::uint32_t cn_mask)
+{
+    const double target_ms = gpu_latency_target_ms();
+    if (target_ms <= 0.0 || cn_mask >= worker.latency_memory.size())
+        return;
+
+    const auto& memory = worker.latency_memory[cn_mask];
+    if (memory.samples < 2U || memory.ms_per_hash_ewma <= 0.0)
+        return;
+
+    const std::size_t base =
+        worker.latency_base_batch != 0U
+            ? worker.latency_base_batch
+            : worker.engine->batch_size();
+    const std::size_t configured_floor = gpu_latency_min_batch();
+    const std::size_t floor = std::min(base, configured_floor);
+
+    constexpr double kSeedTargetFraction = 0.95;
+    const double predicted_hashes =
+        (target_ms * kSeedTargetFraction) / memory.ms_per_hash_ewma;
+
+    constexpr std::size_t kBatchQuantum = 256U;
+    std::size_t desired =
+        predicted_hashes > 0.0
+            ? static_cast<std::size_t>(predicted_hashes)
+            : floor;
+    desired = (desired / kBatchQuantum) * kBatchQuantum;
+    desired = std::clamp(desired, floor, base);
+
+    if (desired < base && base - desired >= kBatchQuantum)
+        worker.engine->set_active_batch_size(desired);
+
+    const std::size_t active = worker.engine->batch_size();
+    worker.latency_scan_ms_ewma =
+        memory.ms_per_hash_ewma * static_cast<double>(active);
+    worker.latency_samples = 1U;
+
+    std::cout << "[latency-seed] GPU " << worker.device_id
+              << " CN=" << cn_mask_names(cn_mask)
+              << " remembered_samples=" << memory.samples
+              << " predicted_ms=" << std::fixed << std::setprecision(1)
+              << worker.latency_scan_ms_ewma
+              << " target_ms=" << target_ms
+              << " batch=" << base << " -> " << active
               << "\n";
 }
 
@@ -1360,6 +1422,7 @@ void Client::upload_gpu_job()
         worker.latency_base_batch = worker.engine->batch_size();
         worker.latency_scan_ms_ewma = 0.0;
         worker.latency_samples = 0U;
+        seed_gpu_batch_from_live_memory(worker, gpu_active_cn_mask_);
         const std::uint64_t start = i * region_size; const std::uint64_t end = (i + 1 == gpu_workers_.size()) ? gpu_space : (i + 1) * region_size;
         worker.region_start = static_cast<std::uint32_t>(start); worker.region_end = static_cast<std::uint32_t>(end - 1); worker.next_nonce = worker.region_start;
     }
