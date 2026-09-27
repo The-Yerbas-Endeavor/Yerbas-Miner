@@ -1768,7 +1768,8 @@ void Client::initialize_gpu_engines()
         {
             std::ostringstream hardware_key;
             hardware_key
-                << "cc" << found->compute_major
+                << "gpu" << id
+                << "-cc" << found->compute_major
                 << found->compute_minor
                 << "-sm" << found->multiprocessors
                 << "-warp" << found->warp_size
