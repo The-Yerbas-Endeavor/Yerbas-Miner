@@ -3357,6 +3357,20 @@ void Client::report_stats(bool force)
                 mascot_rows.push_back(
                     dim + repeat("·", 40U) + reset);
 
+                {
+                    std::ostringstream job_line;
+                    job_line << "JOB AGE ";
+                    if (active_job_received_at_.time_since_epoch().count() != 0) {
+                        const double job_age_seconds =
+                            std::chrono::duration<double>(
+                                now - active_job_received_at_).count();
+                        job_line << format_duration(job_age_seconds);
+                    } else {
+                        job_line << "n/a";
+                    }
+                    mascot_rows.push_back(job_line.str());
+                }
+
                 auto mascot_box =
                     make_panel("BLOCK WORK",
                                mascot_rows,
@@ -3532,17 +3546,6 @@ void Client::report_stats(bool force)
                            18);
             } else {
                 timing << fit("none yet", 18);
-            }
-
-            timing << fit("JOB AGE", 12);
-
-            if (active_job_received_at_.time_since_epoch().count() != 0) {
-                const double job_age_seconds =
-                    std::chrono::duration<double>(
-                        now - active_job_received_at_).count();
-                timing << format_duration(job_age_seconds);
-            } else {
-                timing << "n/a";
             }
 
             frame << line(timing.str());
