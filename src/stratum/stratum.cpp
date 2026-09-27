@@ -104,6 +104,8 @@ std::deque<std::string> g_recent_activity;
 std::chrono::steady_clock::time_point g_last_share_event_at{};
 bool g_last_share_event_accepted = false;
 std::string g_last_share_event_source;
+std::chrono::steady_clock::time_point g_last_accepted_at{};
+std::string g_last_accepted_source;
 
 bool dev_fee_active(std::chrono::steady_clock::time_point mining_started)
 {
@@ -736,6 +738,8 @@ void Client::handle_message(const std::string& line)
                 g_last_share_event_at = std::chrono::steady_clock::now();
                 g_last_share_event_accepted = true;
                 g_last_share_event_source = source;
+                g_last_accepted_at = g_last_share_event_at;
+                g_last_accepted_source = source;
                 record_activity("✓ share accepted  " + source + "  total=" + std::to_string(shares_accepted_));
 
                 std::cout << timestamp() << kAcceptBadge << " SHARE ACCEPTED " << kColorReset;
@@ -2907,8 +2911,108 @@ void Client::report_stats(bool force)
                     << reset;
                 work_stats.push_back(status_line.str());
 
+                std::ostringstream runtime_line;
+                runtime_line
+                    << "RUNTIME "
+                    << format_duration(uptime);
+                work_stats.push_back(runtime_line.str());
+
+                std::ostringstream rate_line;
+                rate_line
+                    << "HASHRATE "
+                    << format_rate(total_hps);
+                work_stats.push_back(rate_line.str());
+
+                if (config_.miner.cpu_enabled) {
+                    std::ostringstream cpu_line;
+                    cpu_line
+                        << "CPU "
+                        << fit(format_rate(cpu_hps), 9)
+                        << " "
+                        << yerbas::console::detail::
+                               format_temperature(cpu_telemetry)
+                        << " "
+                        << yerbas::console::detail::
+                               format_power(cpu_telemetry);
+                    work_stats.push_back(cpu_line.str());
+                }
+
+                for (const auto& gpu : gpu_views) {
+                    const auto worker_it =
+                        std::find_if(
+                            gpu_workers_.begin(),
+                            gpu_workers_.end(),
+                            [&](const auto& worker) {
+                                return worker.device_id == gpu.id;
+                            });
+
+                    std::ostringstream gpu_line;
+                    gpu_line
+                        << "GPU" << gpu.id << " "
+                        << fit(format_rate(gpu.hps), 9);
+
+                    if (worker_it != gpu_workers_.end()) {
+                        gpu_line
+                            << " B" << worker_it->engine->batch_size();
+
+                        if (worker_it->last_scan_ms > 0.0) {
+                            gpu_line
+                                << " "
+                                << std::fixed
+                                << std::setprecision(1)
+                                << (worker_it->last_scan_ms / 1000.0)
+                                << "s";
+                        }
+                    }
+
+                    const auto telemetry_it =
+                        gpu_telemetry.devices.find(gpu.id);
+                    if (telemetry_it != gpu_telemetry.devices.end()) {
+                        gpu_line
+                            << " "
+                            << yerbas::console::detail::
+                                   format_temperature(
+                                       telemetry_it->second);
+                    }
+
+                    work_stats.push_back(gpu_line.str());
+                }
+
+                std::ostringstream waste_line;
+                waste_line
+                    << "GPU WASTE "
+                    << gpu_waste_text.str();
+                work_stats.push_back(waste_line.str());
+
+                std::ostringstream shares_line;
+                shares_line
+                    << "SHARES "
+                    << shares_accepted_ << " accepted"
+                    << " / "
+                    << shares_rejected_ << " rejected";
+                work_stats.push_back(shares_line.str());
+
+                std::ostringstream last_accepted_line;
+                last_accepted_line << "LAST ACCEPTED ";
+                if (g_last_accepted_at.time_since_epoch().count() != 0) {
+                    const double age =
+                        std::chrono::duration<double>(
+                            now - g_last_accepted_at).count();
+                    std::string compact_source =
+                        g_last_accepted_source;
+                    if (compact_source.rfind("GPU ", 0U) == 0U)
+                        compact_source.erase(1U, 2U);
+                    last_accepted_line
+                        << compact_source
+                        << " "
+                        << format_duration(age);
+                } else {
+                    last_accepted_line << "none yet";
+                }
+                work_stats.push_back(last_accepted_line.str());
+
                 std::ostringstream job_line;
-                job_line << "JOB ";
+                job_line << "JOB AGE ";
                 if (active_job_received_at_.time_since_epoch().count() != 0) {
                     const double job_age_seconds =
                         std::chrono::duration<double>(
@@ -2918,88 +3022,6 @@ void Client::report_stats(bool force)
                     job_line << "n/a";
                 }
                 work_stats.push_back(job_line.str());
-
-                std::ostringstream rate_line;
-                rate_line
-                    << "RATE " << format_rate(total_hps);
-                work_stats.push_back(rate_line.str());
-
-                std::ostringstream waste_line;
-                waste_line
-                    << "WASTE " << gpu_waste_text.str();
-                work_stats.push_back(waste_line.str());
-
-                if (config_.miner.cpu_enabled) {
-                    std::ostringstream cpu_line;
-                    cpu_line
-                        << "CPU "
-                        << yerbas::console::detail::
-                               format_temperature(cpu_telemetry)
-                        << " "
-                        << yerbas::console::detail::
-                               format_power(cpu_telemetry);
-                    work_stats.push_back(cpu_line.str());
-                }
-
-                for (const auto& worker : gpu_workers_) {
-                    std::ostringstream gpu_line;
-                    gpu_line
-                        << "GPU" << worker.device_id
-                        << " B" << worker.engine->batch_size()
-                        << " ";
-
-                    if (worker.last_scan_ms > 0.0) {
-                        gpu_line
-                            << std::fixed
-                            << std::setprecision(1)
-                            << (worker.last_scan_ms / 1000.0)
-                            << "s";
-                    } else {
-                        gpu_line << "n/a";
-                    }
-
-                    const auto telemetry_it =
-                        gpu_telemetry.devices.find(worker.device_id);
-                    if (telemetry_it != gpu_telemetry.devices.end()) {
-                        const auto& telemetry = telemetry_it->second;
-                        gpu_line
-                            << " "
-                            << yerbas::console::detail::
-                                   format_temperature(telemetry)
-                            << " "
-                            << yerbas::console::detail::
-                                   format_power(telemetry)
-                            << " "
-                            << yerbas::console::detail::
-                                   format_fan(telemetry);
-                    }
-
-                    work_stats.push_back(gpu_line.str());
-                }
-
-                std::ostringstream last_share_line;
-                last_share_line << "LAST ";
-                if (g_last_share_event_at.time_since_epoch().count() != 0) {
-                    const double age =
-                        std::chrono::duration<double>(
-                            now - g_last_share_event_at).count();
-                    last_share_line
-                        << (g_last_share_event_accepted ? "+ " : "! ")
-                        << (g_last_share_event_accepted
-                                ? "ACCEPTED "
-                                : "REJECTED ")
-                        << format_duration(age);
-                    if (!g_last_share_event_source.empty()) {
-                        std::string compact_source =
-                            g_last_share_event_source;
-                        if (compact_source.rfind("GPU ", 0U) == 0U)
-                            compact_source.erase(1U, 2U);
-                        last_share_line << " " << compact_source;
-                    }
-                } else {
-                    last_share_line << "none yet";
-                }
-                work_stats.push_back(last_share_line.str());
 
                 // Compact console miner driven by actual completed work.
                 // Frame 0 has the pickaxe raised; frame 1 shows a horizontal
