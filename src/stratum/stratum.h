@@ -309,7 +309,14 @@ private:
 
         struct LatencyMemory {
             double ms_per_hash_ewma{0.0};
+            double hps_ewma{0.0};
             std::uint64_t samples{0};
+            std::uint64_t stable_samples{0};
+            std::uint64_t probe_cooldown{0};
+            bool probe_pending{false};
+            std::size_t probe_from_batch{0};
+            std::size_t probe_batch{0};
+            double probe_baseline_hps{0.0};
         };
 
         // Optional live latency-targeted production experiment. The base batch
