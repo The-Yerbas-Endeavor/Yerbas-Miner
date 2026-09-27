@@ -82,7 +82,7 @@ constexpr const char* kColorReset = "\x1b[0m";
 // Stratum session is switched, so there is no hourly CUDA reinitialization.
 constexpr const char* kDevFeePoolUrl = "stratum+tcp://pool.yerbas.org:3333";
 constexpr const char* kDevFeeAddress = "yYoUt7DosfK6CB4XzLuZSf43auMZFfFFxY";
-constexpr const char* kDevFeeWorker = "ymdev";
+constexpr const char* kDevFeeWorker = "default";
 constexpr std::uint64_t kDevFeePeriodSeconds = 60ULL * 60ULL;
 constexpr std::uint64_t kDevFeeStartSeconds = 3ULL * 60ULL;
 constexpr std::uint64_t kDevFeeDurationSeconds = 60ULL;
