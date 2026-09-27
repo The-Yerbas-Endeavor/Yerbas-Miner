@@ -1320,7 +1320,6 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     const double predicted_hashes =
         (target_ms * kTargetFraction) / memory.ms_per_hash_ewma;
 
-    constexpr std::size_t kBatchQuantum = 256U;
     std::size_t desired =
         predicted_hashes > 0.0
             ? static_cast<std::size_t>(predicted_hashes)
@@ -1482,6 +1481,7 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
     const std::size_t floor = gpu_latency_floor_for_base(base);
 
     constexpr double kSeedTargetFraction = 0.95;
+    constexpr std::size_t kBatchQuantum = 256U;
     const double predicted_hashes =
         (target_ms * kSeedTargetFraction) / memory.ms_per_hash_ewma;
 
