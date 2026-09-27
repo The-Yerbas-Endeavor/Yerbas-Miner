@@ -3194,28 +3194,61 @@ void Client::report_stats(bool force)
                 }
                 work_stats.push_back(job_line.str());
 
-                // Proof-of-Grass block growth. A new Stratum job starts
-                // with the seedling. Every five seconds another row of the
-                // plant is revealed until the harvest-size plant is complete.
-                // The mature plant then remains visible until the next job.
-                static const std::array<const char*, 12> harvest_plant{{
-                    "                   ╱╲                   ",
-                    "              ╲   ╱│ ╲   ╱              ",
-                    "          ╲────╲ ╱ │  ╲ ╱────╱          ",
-                    "           ╲    ╲  │  ╱    ╱           ",
-                    "        ╲───╲────╲ │ ╱────╱───╱        ",
-                    "          ╲   ╲   ╲│╱   ╱   ╱          ",
-                    "      ╲────╲───╲───│───╱───╱────╱      ",
-                    "        ╲    ╲  ╲  │  ╱  ╱    ╱        ",
-                    "             ╲──╱  │  ╲──╱             ",
-                    "               ╲   │   ╱                ",
-                    "                ╲  │  ╱                 ",
-                    "              _____│_____               ",
-                }};
+                // Proof-of-Grass block growth. A new Stratum job begins
+                // as a three-stroke seedling. Every five seconds exactly one
+                // additional '/', '\\', or '|' stroke is revealed. The
+                // finished plant remains visible until the next job resets it.
+                struct PlantStroke {
+                    std::size_t row;
+                    std::size_t col;
+                    char glyph;
+                };
 
-                constexpr std::size_t plant_rows = harvest_plant.size();
-                constexpr std::size_t seedling_rows = 4U;
-                constexpr double growth_interval_seconds = 5.0;
+                static constexpr std::size_t plant_rows = 13U;
+                static constexpr std::size_t plant_cols = 40U;
+                static constexpr std::size_t seedling_strokes = 3U;
+                static constexpr double growth_interval_seconds = 5.0;
+
+                static const std::array<PlantStroke, 31> growth_strokes{{
+                    // Seedling: shown immediately when a new job starts.
+                    {12U, 18U, '/'},
+                    {12U, 20U, '\\'},
+                    {11U, 19U, '|'},
+
+                    // Build the central stem and lower leaves first.
+                    {10U, 19U, '|'},
+                    {11U, 18U, '\\'},
+                    {11U, 20U, '/'},
+                    {9U, 19U, '|'},
+                    {9U, 17U, '\\'},
+                    {9U, 21U, '/'},
+                    {8U, 19U, '|'},
+                    {8U, 16U, '\\'},
+                    {8U, 22U, '/'},
+                    {7U, 19U, '|'},
+                    {7U, 17U, '\\'},
+                    {7U, 21U, '/'},
+
+                    // Fill out the middle canopy.
+                    {6U, 19U, '|'},
+                    {6U, 16U, '\\'},
+                    {6U, 22U, '/'},
+                    {5U, 19U, '|'},
+                    {5U, 15U, '\\'},
+                    {5U, 23U, '/'},
+                    {4U, 19U, '|'},
+                    {4U, 17U, '\\'},
+                    {4U, 21U, '/'},
+
+                    // Finish the crown.
+                    {3U, 19U, '|'},
+                    {3U, 16U, '\\'},
+                    {3U, 22U, '/'},
+                    {2U, 19U, '|'},
+                    {2U, 17U, '\\'},
+                    {2U, 21U, '/'},
+                    {1U, 19U, '|'},
+                }};
 
                 double current_job_age = 0.0;
                 if (active_job_received_at_.time_since_epoch().count() != 0) {
@@ -3226,15 +3259,22 @@ void Client::report_stats(bool force)
                                 now - active_job_received_at_).count());
                 }
 
-                const std::size_t added_growth_rows =
+                const std::size_t timed_strokes =
                     static_cast<std::size_t>(
                         current_job_age / growth_interval_seconds);
-                const std::size_t visible_rows =
+                const std::size_t visible_strokes =
                     std::min(
-                        plant_rows,
-                        seedling_rows + added_growth_rows);
-                const std::size_t first_visible_row =
-                    plant_rows - visible_rows;
+                        growth_strokes.size(),
+                        seedling_strokes + timed_strokes);
+
+                std::array<std::string, plant_rows> plant_canvas{};
+                for (auto& row : plant_canvas)
+                    row.assign(plant_cols, ' ');
+
+                for (std::size_t i = 0U; i < visible_strokes; ++i) {
+                    const auto& stroke = growth_strokes[i];
+                    plant_canvas[stroke.row][stroke.col] = stroke.glyph;
+                }
 
                 const std::string plant_color =
                     operating_status == "STALLED"
@@ -3243,15 +3283,11 @@ void Client::report_stats(bool force)
                                ? lime
                                : faint);
 
-                for (std::size_t row = 0U;
-                     row < plant_rows;
-                     ++row) {
+                for (const auto& row : plant_canvas) {
                     std::ostringstream art_line;
                     art_line
                         << plant_color
-                        << (row >= first_visible_row
-                                ? harvest_plant[row]
-                                : "                                        ")
+                        << row
                         << reset;
                     mascot_rows.push_back(art_line.str());
                 }
