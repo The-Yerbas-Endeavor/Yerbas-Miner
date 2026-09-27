@@ -3695,13 +3695,7 @@ void Client::report_stats(bool force)
                 << fit("AVG HASHRATE", 14)
                 << green << bold
                 << format_rate(average_hps)
-                << reset
-                << dim
-                << "   session average"
-                << reset
-                << "   "
-                << fit("UPTIME", 8)
-                << format_duration(uptime);
+                << reset;
             frame << line(average.str());
         }
 
