@@ -23,6 +23,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Windows host compiler preflight
+        shell: pwsh
+        run: |
+          cmake -S . -B build-preflight -G "Visual Studio 17 2022" -A x64 `
+            -DYERBAS_ENABLE_CUDA=OFF `
+            -DBUILD_TESTING=OFF
+          cmake --build build-preflight --config Release --target yerbas-miner --parallel 2
+
       - name: Install CUDA Toolkit 12.8.1
         id: cuda-toolkit
         timeout-minutes: 20
