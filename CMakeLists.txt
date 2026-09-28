@@ -1,5 +1,35 @@
 cmake_minimum_required(VERSION 3.24)
-project(YerbasMiner VERSION 0.5.2 LANGUAGES C CXX)
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" YERBAS_VERSION_STRING)
+string(STRIP "${YERBAS_VERSION_STRING}" YERBAS_VERSION_STRING)
+if(NOT YERBAS_VERSION_STRING MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    message(FATAL_ERROR "VERSION must use the existing Yerbas-Miner release format X.Y.Z.N")
+endif()
+set(YERBAS_PROJECT_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+set(YERBAS_RELEASE_REVISION "${CMAKE_MATCH_4}")
+project(YerbasMiner VERSION ${YERBAS_PROJECT_VERSION} LANGUAGES C CXX)
+
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE YERBAS_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE YERBAS_GIT_RESULT
+)
+if(NOT YERBAS_GIT_RESULT EQUAL 0 OR YERBAS_GIT_COMMIT STREQUAL "")
+    set(YERBAS_GIT_COMMIT "unknown")
+endif()
+
+set(YERBAS_SCHEDULER_REVISION "remaining-time-v1")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_info.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.h"
+    @ONLY
+)
+message(STATUS "Yerbas Miner version: ${YERBAS_VERSION_STRING}")
+message(STATUS "Yerbas Miner commit: ${YERBAS_GIT_COMMIT}")
+message(STATUS "Yerbas scheduler revision: ${YERBAS_SCHEDULER_REVISION}")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -216,7 +246,10 @@ add_executable(yerbas-miner
     src/crypto/sha256.cpp
     src/stratum/stratum.cpp
 )
-target_include_directories(yerbas-miner PRIVATE src)
+target_include_directories(yerbas-miner PRIVATE
+    src
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
 target_link_libraries(yerbas-miner PRIVATE yerbas-ghostrider-reference nlohmann_json::nlohmann_json)
 
 if(MSVC)
