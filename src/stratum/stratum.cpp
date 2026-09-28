@@ -522,7 +522,9 @@ std::size_t load_live_batch_cache(const std::string& hardware_key,
                                   std::uint32_t cn_mask,
                                   RotationFingerprint rotation_fingerprint,
                                   bool* exact_rotation_match = nullptr,
-                                  bool* provisional_match = nullptr)
+                                  bool* provisional_match = nullptr,
+                                  std::size_t* rejected_probe_batch = nullptr,
+                                  double* rejected_probe_baseline_hps = nullptr)
 {
     auto& cache = live_batch_cache();
     const auto key =
@@ -538,6 +540,13 @@ std::size_t load_live_batch_cache(const std::string& hardware_key,
             *provisional_match =
                 it->value("confidence", std::string("confirmed")) ==
                 "provisional";
+        if (rejected_probe_batch != nullptr)
+            *rejected_probe_batch =
+                static_cast<std::size_t>(
+                    it->value("rejected_probe_batch", 0ULL));
+        if (rejected_probe_baseline_hps != nullptr)
+            *rejected_probe_baseline_hps =
+                it->value("rejected_probe_baseline_hps", 0.0);
         const auto value = it->value("batch", 0ULL);
         return static_cast<std::size_t>(value);
     }
@@ -551,6 +560,10 @@ std::size_t load_live_batch_cache(const std::string& hardware_key,
             *exact_rotation_match = false;
         if (provisional_match != nullptr)
             *provisional_match = false;
+        if (rejected_probe_batch != nullptr)
+            *rejected_probe_batch = 0U;
+        if (rejected_probe_baseline_hps != nullptr)
+            *rejected_probe_baseline_hps = 0.0;
         return 0U;
     }
 
@@ -558,6 +571,10 @@ std::size_t load_live_batch_cache(const std::string& hardware_key,
         *exact_rotation_match = false;
     if (provisional_match != nullptr)
         *provisional_match = false;
+    if (rejected_probe_batch != nullptr)
+        *rejected_probe_batch = 0U;
+    if (rejected_probe_baseline_hps != nullptr)
+        *rejected_probe_baseline_hps = 0.0;
     const auto value = it->value("batch", 0ULL);
     return static_cast<std::size_t>(value);
 }
@@ -585,6 +602,37 @@ void save_live_batch_cache(const std::string& hardware_key,
         {"confidence", provisional ? "provisional" : "confirmed"},
         {"samples", samples}
     };
+
+    std::ofstream out(
+        live_batch_cache_path(),
+        std::ios::out | std::ios::trunc);
+    if (out)
+        out << cache.dump(2) << '\n';
+}
+
+void save_live_probe_rejection(const std::string& hardware_key,
+                               std::uint32_t cn_mask,
+                               RotationFingerprint rotation_fingerprint,
+                               std::size_t rejected_batch,
+                               double baseline_hps)
+{
+    auto& cache = live_batch_cache();
+    const auto key =
+        live_batch_cache_key(
+            hardware_key,
+            cn_mask,
+            rotation_fingerprint);
+    auto it = cache.find(key);
+    if (it == cache.end() || !it->is_object())
+        return;
+
+    if (rejected_batch == 0U) {
+        it->erase("rejected_probe_batch");
+        it->erase("rejected_probe_baseline_hps");
+    } else {
+        (*it)["rejected_probe_batch"] = rejected_batch;
+        (*it)["rejected_probe_baseline_hps"] = baseline_hps;
+    }
 
     std::ofstream out(
         live_batch_cache_path(),
@@ -1433,6 +1481,12 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.rejected_probe_baseline_hps =
                 memory.probe_baseline_hps;
             memory.rejected_probe_stable_samples = 0U;
+            save_live_probe_rejection(
+                worker.hardware_key,
+                result.cn_mask,
+                result.rotation_fingerprint,
+                memory.rejected_probe_batch,
+                memory.rejected_probe_baseline_hps);
         } else {
             std::cout << "[throughput-probe] GPU " << worker.device_id
                       << " rotation=" << std::hex
@@ -1458,6 +1512,12 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                 memory.rejected_probe_batch = 0U;
                 memory.rejected_probe_baseline_hps = 0.0;
                 memory.rejected_probe_stable_samples = 0U;
+                save_live_probe_rejection(
+                    worker.hardware_key,
+                    result.cn_mask,
+                    result.rotation_fingerprint,
+                    0U,
+                    0.0);
             }
         }
 
@@ -1826,13 +1886,17 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
 
     bool exact_rotation_match = false;
     bool provisional_match = false;
+    std::size_t persisted_rejected_probe_batch = 0U;
+    double persisted_rejected_probe_baseline_hps = 0.0;
     const std::size_t cached =
         load_live_batch_cache(
             worker.hardware_key,
             cn_mask,
             active_rotation_fingerprint_,
             &exact_rotation_match,
-            &provisional_match);
+            &provisional_match,
+            &persisted_rejected_probe_batch,
+            &persisted_rejected_probe_baseline_hps);
     constexpr std::size_t kBatchQuantum = 256U;
     if (cached >= floor && cached <= base &&
         (cached % kBatchQuantum) == 0U) {
@@ -1844,6 +1908,13 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
                 : RotationFingerprint{};
         memory.persisted_provisional =
             exact_rotation_match && provisional_match;
+        if (exact_rotation_match) {
+            memory.rejected_probe_batch =
+                persisted_rejected_probe_batch;
+            memory.rejected_probe_baseline_hps =
+                persisted_rejected_probe_baseline_hps;
+            memory.rejected_probe_stable_samples = 0U;
+        }
         std::cout << "[latency-cache] GPU " << worker.device_id
                   << " rotation=" << std::hex
                   << static_cast<std::uint64_t>(
@@ -1856,8 +1927,13 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
                           ? (provisional_match
                                  ? "persistent-rotation-provisional"
                                  : "persistent-rotation")
-                          : "legacy-cn-fallback")
-                  << "\n";
+                          : "legacy-cn-fallback");
+        if (exact_rotation_match &&
+            persisted_rejected_probe_batch != 0U) {
+            std::cout << " rejected-probe="
+                      << persisted_rejected_probe_batch;
+        }
+        std::cout << "\n";
         return;
     }
 
