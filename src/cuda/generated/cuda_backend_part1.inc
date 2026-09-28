@@ -65,14 +65,94 @@ void check_cuda(cudaError_t status, const char* what)
 std::filesystem::path cn_cache_directory()
 {
 #ifdef _WIN32
-    if (const char* local = std::getenv("LOCALAPPDATA"); local && *local)
-        return std::filesystem::path(local) / "Yerbas-Miner";
-#endif
+    static const std::filesystem::path windows_cache = [] {
+        std::filesystem::path primary;
+        std::vector<std::filesystem::path> import_dirs;
+
+        if (const char* local = std::getenv("LOCALAPPDATA");
+            local && *local) {
+            const auto root =
+                std::filesystem::path(local) / "Yerbas-Miner";
+            primary = root / "cache";
+
+            // Older Windows CUDA builds wrote directly into the parent
+            // Yerbas-Miner directory instead of the shared cache directory.
+            import_dirs.push_back(root);
+        } else if (const char* profile = std::getenv("USERPROFILE");
+                   profile && *profile) {
+            primary =
+                std::filesystem::path(profile) /
+                ".cache" / "yerbas-miner";
+        } else {
+            primary =
+                std::filesystem::current_path() /
+                ".yerbas-miner-cache";
+        }
+
+        // Portable ZIP users often keep tuning files beside the executable.
+        import_dirs.push_back(std::filesystem::current_path());
+
+        std::error_code ec;
+        std::filesystem::create_directories(primary, ec);
+
+        const auto is_tuning_cache_file =
+            [](const std::string& name) {
+                return name.rfind("gpu-", 0) == 0 ||
+                       name.rfind("cn-", 0) == 0;
+            };
+
+        std::size_t imported = 0U;
+        for (const auto& source : import_dirs) {
+            ec.clear();
+            if (source == primary ||
+                !std::filesystem::exists(source, ec))
+                continue;
+
+            std::filesystem::directory_iterator it(source, ec);
+            const std::filesystem::directory_iterator end;
+            while (!ec && it != end) {
+                if (it->is_regular_file(ec)) {
+                    const std::string name =
+                        it->path().filename().string();
+                    if (is_tuning_cache_file(name)) {
+                        const auto destination = primary / name;
+                        std::error_code copy_ec;
+                        if (!std::filesystem::exists(
+                                destination, copy_ec)) {
+                            copy_ec.clear();
+                            if (std::filesystem::copy_file(
+                                    it->path(),
+                                    destination,
+                                    std::filesystem::copy_options::none,
+                                    copy_ec)) {
+                                ++imported;
+                            }
+                        }
+                    }
+                }
+                it.increment(ec);
+            }
+        }
+
+        if (imported != 0U) {
+            std::cout
+                << "[cache] imported Windows tuning files"
+                << " | count=" << imported
+                << " | destination=" << primary.string()
+                << '\n';
+        }
+
+        return primary;
+    }();
+
+    return windows_cache;
+#else
     if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
         return std::filesystem::path(xdg) / "yerbas-miner";
     if (const char* home = std::getenv("HOME"); home && *home)
         return std::filesystem::path(home) / ".cache" / "yerbas-miner";
     return std::filesystem::current_path() / ".yerbas-miner-cache";
+#endif
 }
 
 std::string sanitize_cache_component(std::string value)
