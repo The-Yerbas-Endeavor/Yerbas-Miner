@@ -3835,21 +3835,38 @@ void Client::report_stats(bool force)
                             glyph > 0x28ffU)
                             return glyph;
 
-                        // Classic Windows Console Host frequently lacks reliable
-                        // Braille font coverage. Preserve the same traced shape by
-                        // mapping Braille dot density to single-cell shade glyphs.
-                        unsigned int bits =
+                        // Approximate each 2x4 Braille cell with a 2x2 quadrant
+                        // block. Unlike the old density-only fallback, this
+                        // preserves LEFT/RIGHT and TOP/BOTTOM structure, which
+                        // keeps the leaf silhouette recognizable in Windows
+                        // console fonts that do not render Braille well.
+                        const unsigned int bits =
                             static_cast<unsigned int>(glyph - 0x2800U);
-                        unsigned int dots = 0U;
-                        while (bits != 0U) {
-                            dots += bits & 1U;
-                            bits >>= 1U;
-                        }
 
-                        if (dots <= 2U) return U'░';
-                        if (dots <= 4U) return U'▒';
-                        if (dots <= 6U) return U'▓';
-                        return U'█';
+                        unsigned int quadrants = 0U;
+                        if ((bits & (0x01U | 0x02U)) != 0U) quadrants |= 0x1U; // upper-left
+                        if ((bits & (0x08U | 0x10U)) != 0U) quadrants |= 0x2U; // upper-right
+                        if ((bits & (0x04U | 0x40U)) != 0U) quadrants |= 0x4U; // lower-left
+                        if ((bits & (0x20U | 0x80U)) != 0U) quadrants |= 0x8U; // lower-right
+
+                        switch (quadrants) {
+                            case 0x0U: return U' ';
+                            case 0x1U: return U'▘';
+                            case 0x2U: return U'▝';
+                            case 0x3U: return U'▀';
+                            case 0x4U: return U'▖';
+                            case 0x5U: return U'▌';
+                            case 0x6U: return U'▞';
+                            case 0x7U: return U'▛';
+                            case 0x8U: return U'▗';
+                            case 0x9U: return U'▚';
+                            case 0xaU: return U'▐';
+                            case 0xbU: return U'▜';
+                            case 0xcU: return U'▄';
+                            case 0xdU: return U'▙';
+                            case 0xeU: return U'▟';
+                            default:   return U'█';
+                        }
                     };
 
                 auto append_utf8 =
@@ -4068,7 +4085,7 @@ void Client::report_stats(bool force)
                         << "GLYPHS "
                         << (use_braille_garden
                                 ? "BRAILLE"
-                                : "SHADED BLOCK")
+                                : "QUADRANT BLOCK")
                         << reset;
                     mascot_rows.push_back(mode_line.str());
                 }
@@ -4281,8 +4298,27 @@ void Client::report_stats(bool force)
 
         const bool activity_dev_fee_active =
             dev_fee_active(mining_started_);
+
+        // Keep the top of the dashboard visible on shorter terminals. The full
+        // layout uses ten activity rows when height allows; on smaller Windows
+        // viewports the activity feed contracts before the YERBAS MINER banner
+        // can be pushed off-screen.
+        const std::size_t terminal_height =
+            yerbas::console::detail::terminal_rows();
+        const std::size_t activity_total_rows =
+            terminal_height >= 45U
+                ? 10U
+                : std::max<std::size_t>(
+                      1U,
+                      terminal_height > 35U
+                          ? terminal_height - 35U
+                          : 1U);
         const std::size_t activity_event_rows =
-            activity_dev_fee_active ? 9U : 10U;
+            activity_dev_fee_active
+                ? (activity_total_rows > 1U
+                       ? activity_total_rows - 1U
+                       : 1U)
+                : activity_total_rows;
 
         if (activity_dev_fee_active) {
             frame << line(
