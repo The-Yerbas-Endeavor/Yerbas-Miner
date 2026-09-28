@@ -205,7 +205,7 @@ inline std::string windows_render_probe_line(
     if (mode == GlyphMode::Ascii)
         return "Render test: ASCII +-|#*";
     if (mode == GlyphMode::Block)
-        return "Render test: SAFE BLOCK â â â â â";
+        return "Render test: SAFE BLOCK ▀ ▄ ▌ ▐ █";
     return "Render test: BOX ╭─╮│╰─╯  BLOCK ▁▂▃▄▅▆▇█  BRAILLE ⠁⠄⠸⢸⣾  NOW ◆";
 }
 #endif
