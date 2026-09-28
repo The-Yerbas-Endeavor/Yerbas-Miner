@@ -15,7 +15,10 @@ if(MSVC)
     # Source files intentionally contain Unicode terminal artwork. Force UTF-8
     # source/execution handling so MSVC does not interpret UTF-8 bytes using the
     # runner's legacy active code page.
-    add_compile_options(/utf-8)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:/utf-8>
+        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+    )
 endif()
 
 option(YERBAS_ENABLE_CUDA "Build the NVIDIA CUDA backend" ON)
