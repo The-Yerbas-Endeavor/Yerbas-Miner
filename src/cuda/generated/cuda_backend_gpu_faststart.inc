@@ -42,7 +42,6 @@ public:
           progress_(progress),
           total_(total),
           detail_(std::move(detail)),
-          started_(std::chrono::steady_clock::now()),
           thread_([this]() {
               unsigned int elapsed_seconds = 0U;
               while (!done_.load()) {
@@ -68,6 +67,11 @@ public:
 
     ~GpuAutotuneHeartbeat()
     {
+        stop();
+    }
+
+    void stop()
+    {
         done_.store(true);
         if (thread_.joinable()) thread_.join();
     }
@@ -77,7 +81,6 @@ private:
     unsigned int progress_{0U};
     unsigned int total_{0U};
     std::string detail_;
-    std::chrono::steady_clock::time_point started_{};
     std::atomic_bool done_{false};
     std::thread thread_;
 };
@@ -572,6 +575,7 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                     " batch=" + std::to_string(nominal));
             double best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                   scratchpads, contexts, jobs[cls], best);
+            heartbeat_nominal.stop();
             std::cout << std::fixed << std::setprecision(2)
                       << " done | " << best_hps << " H/s | best=" << best_hps << " H/s"
                       << std::defaultfloat << '\n';
@@ -595,6 +599,7 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                         " batch=" + std::to_string(reduced));
                 const double hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                        scratchpads, contexts, jobs[cls], candidate);
+                heartbeat_reduced.stop();
                 const double gain_pct = best_hps > 0.0 ? (hps / best_hps - 1.0) * 100.0 : 0.0;
                 const bool wins = hps > best_hps * kGpuCalibrationMinimumGain;
                 std::cout << std::fixed << std::setprecision(2)
