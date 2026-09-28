@@ -563,7 +563,13 @@ GpuTunePolicy run_gpu_calibration(int device_id,
             std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
                       << " | class=" << kGpuBatchClassNames[cls]
                       << " | CN=" << gpu_calibration_cn_summary(jobs[cls])
-                      << " | batch=" << nominal << " | testing..." << std::flush;
+                      << " | batch=" << nominal << " | testing...\n" << std::flush;
+            GpuAutotuneHeartbeat heartbeat_nominal(
+                device_id,
+                progress,
+                total_measurements,
+                std::string("class=") + kGpuBatchClassNames[cls] +
+                    " batch=" + std::to_string(nominal));
             double best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                   scratchpads, contexts, jobs[cls], best);
             std::cout << std::fixed << std::setprecision(2)
@@ -580,7 +586,13 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                 candidate.batch = reduced;
                 std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
                           << " | class=" << kGpuBatchClassNames[cls]
-                          << " | batch=" << reduced << " | testing..." << std::flush;
+                          << " | batch=" << reduced << " | testing...\n" << std::flush;
+                GpuAutotuneHeartbeat heartbeat_reduced(
+                    device_id,
+                    progress,
+                    total_measurements,
+                    std::string("class=") + kGpuBatchClassNames[cls] +
+                        " batch=" + std::to_string(reduced));
                 const double hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                        scratchpads, contexts, jobs[cls], candidate);
                 const double gain_pct = best_hps > 0.0 ? (hps / best_hps - 1.0) * 100.0 : 0.0;
