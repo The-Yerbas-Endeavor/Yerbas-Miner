@@ -3737,6 +3737,34 @@ void Client::report_stats(bool force)
                     return cells;
                 }();
 
+                const bool use_braille_garden =
+                    yerbas::console::detail::block_garden_use_braille();
+
+                const auto display_garden_glyph =
+                    [use_braille_garden](char32_t glyph) {
+                        if (use_braille_garden ||
+                            glyph == U' ' ||
+                            glyph < 0x2800U ||
+                            glyph > 0x28ffU)
+                            return glyph;
+
+                        // Classic Windows Console Host frequently lacks reliable
+                        // Braille font coverage. Preserve the same traced shape by
+                        // mapping Braille dot density to single-cell shade glyphs.
+                        unsigned int bits =
+                            static_cast<unsigned int>(glyph - 0x2800U);
+                        unsigned int dots = 0U;
+                        while (bits != 0U) {
+                            dots += bits & 1U;
+                            bits >>= 1U;
+                        }
+
+                        if (dots <= 2U) return U'░';
+                        if (dots <= 4U) return U'▒';
+                        if (dots <= 6U) return U'▓';
+                        return U'█';
+                    };
+
                 auto append_utf8 =
                     [](std::string& out, char32_t cp) {
                         if (cp <= 0x7fU) {
@@ -3931,7 +3959,9 @@ void Client::report_stats(bool force)
                     std::string utf8_row;
                     utf8_row.reserve(plant_cols * 3U);
                     for (const char32_t glyph : row)
-                        append_utf8(utf8_row, glyph);
+                        append_utf8(
+                            utf8_row,
+                            display_garden_glyph(glyph));
 
                     std::ostringstream art_line;
                     art_line
@@ -3943,6 +3973,18 @@ void Client::report_stats(bool force)
 
                 mascot_rows.push_back(
                     dim + repeat("·", 40U) + reset);
+
+                {
+                    std::ostringstream mode_line;
+                    mode_line
+                        << dim
+                        << "GLYPHS "
+                        << (use_braille_garden
+                                ? "BRAILLE"
+                                : "SHADED BLOCK")
+                        << reset;
+                    mascot_rows.push_back(mode_line.str());
+                }
 
                 {
                     std::ostringstream job_line;
