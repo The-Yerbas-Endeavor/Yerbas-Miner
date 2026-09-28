@@ -24,27 +24,45 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_sha: ${{ steps.version.outputs.release_sha }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@v4
-      - name: Validate requested version
+      - name: Prepare requested version
         id: version
         shell: bash
         env:
           MANUAL_VERSION: ${{ inputs.version }}
         run: |
           set -euxo pipefail
-          source_version="$(tr -d '\r\n' < VERSION)"
+
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             requested_version="$MANUAL_VERSION"
           else
             requested_version="$GITHUB_REF_NAME"
           fi
+
           [[ "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$source_version" = "$requested_version"
+
+          source_version="$(tr -d '\r\n' < VERSION)"
+          release_sha="$RELEASE_SHA"
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$source_version" != "$requested_version" ]; then
+            printf '%s\n' "$requested_version" > VERSION
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add VERSION
+            git commit -m "Set Yerbas Miner version $requested_version"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+            release_sha="$(git rev-parse HEAD)"
+          else
+            test "$source_version" = "$requested_version"
+          fi
+
           echo "version=$requested_version" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "Release version: $requested_version"
-          echo "Commit: $GITHUB_SHA"
+          echo "Release commit: $release_sha"
 
   linux-cuda:
     name: Linux CUDA x86_64
@@ -52,10 +70,13 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
     timeout-minutes: 300
     steps:
-      - name: Checkout tagged source
+      - name: Checkout release source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.release_sha }}
       - name: Install build dependencies
         run: |
           set -euxo pipefail
@@ -141,7 +162,7 @@ jobs:
           cp README.md config.example.json VERSION "$out/"
           {
             echo "Yerbas Miner $RELEASE_VERSION"
-            echo "Commit: $GITHUB_SHA"
+            echo "Commit: $RELEASE_SHA"
             echo "Scheduler: remaining-time-v1"
             echo "Platform: Linux CUDA x86_64"
             echo "CUDA Toolkit: 12.8.1"
@@ -161,10 +182,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     env:
       RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
     timeout-minutes: 120
     steps:
-      - name: Checkout tagged source
+      - name: Checkout release source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.release_sha }}
 
       - name: Install build dependencies
         shell: bash
@@ -196,7 +220,7 @@ jobs:
           cp README.md config.example.json VERSION "$out/"
           {
             echo "Yerbas Miner $RELEASE_VERSION"
-            echo "Commit: $GITHUB_SHA"
+            echo "Commit: $RELEASE_SHA"
             echo "Scheduler: remaining-time-v1"
             echo "Platform: Linux ARM64"
             echo "GPU backend: CPU-only build"
@@ -217,10 +241,13 @@ jobs:
     runs-on: windows-2022
     env:
       RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
     timeout-minutes: 300
     steps:
-      - name: Checkout tagged source
+      - name: Checkout release source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.release_sha }}
       - name: Windows host compiler preflight
         shell: pwsh
         run: |
@@ -276,7 +303,7 @@ jobs:
           Copy-Item README.md "$out/README.md"
           Copy-Item config.example.json "$out/config.example.json"
           Copy-Item VERSION "$out/VERSION"
-          @("Yerbas Miner $env:RELEASE_VERSION","Commit: $env:GITHUB_SHA","Scheduler: remaining-time-v1","Platform: Windows CUDA x86_64","CUDA Toolkit: 12.8.1") | Set-Content "$out/BUILD-INFO.txt"
+          @("Yerbas Miner $env:RELEASE_VERSION","Commit: $env:RELEASE_SHA","Scheduler: remaining-time-v1","Platform: Windows CUDA x86_64","CUDA Toolkit: 12.8.1") | Set-Content "$out/BUILD-INFO.txt"
           Compress-Archive -Path "$out/*" -DestinationPath 'dist/yerbas-miner-windows-cuda-x86_64.zip'
       - name: Upload Windows release candidate
         uses: actions/upload-artifact@v4
@@ -309,19 +336,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
         shell: bash
         run: |
           set -euxo pipefail
           tag="$RELEASE_VERSION"
 
           existing_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)"
-          if [ -n "$existing_sha" ] && [ "$existing_sha" != "$GITHUB_SHA" ]; then
-            echo "ERROR: tag $tag already points to $existing_sha, not $GITHUB_SHA" >&2
+          if [ -n "$existing_sha" ] && [ "$existing_sha" != "$RELEASE_SHA" ]; then
+            echo "ERROR: tag $tag already points to $existing_sha, not $RELEASE_SHA" >&2
             exit 1
           fi
 
           if [ -z "$existing_sha" ]; then
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs"               -f ref="refs/tags/$tag"               -f sha="$GITHUB_SHA"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs"               -f ref="refs/tags/$tag"               -f sha="$RELEASE_SHA"
           fi
 
           if gh release view "$tag" >/dev/null 2>&1; then
