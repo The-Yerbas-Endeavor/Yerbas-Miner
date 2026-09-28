@@ -1,4 +1,5 @@
 #include "miner.h"
+#include "build_info.h"
 #include "cpu/cpu_autotune.h"
 #include "cpu/cpu_features.h"
 #include "cpu/cpu_worker_pool.h"
@@ -214,7 +215,10 @@ int Miner::run()
     cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
     configure_gpu_tuning_environment(config_.gpu);
 
-    std::cout << "Yerbas Miner 0.5.2\n";
+    std::cout << "Yerbas Miner " << YERBAS_VERSION_STRING
+              << " | commit " << YERBAS_GIT_COMMIT
+              << " | scheduler " << YERBAS_SCHEDULER_REVISION
+              << "\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
     std::cout << "------------------------------------------------------------\n";
     std::cout << "Config: " << config_.config_path << "\n";
