@@ -2,7 +2,9 @@ name: Linux CUDA Build
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/console-ui-hashrate
   workflow_dispatch:
 
 permissions:
