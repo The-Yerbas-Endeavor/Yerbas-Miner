@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (must exactly match VERSION, e.g. 1.0.0.4)'
+        description: 'Release version to create (e.g. 1.0.0.5)'
         required: true
         type: string
 
@@ -45,7 +45,7 @@ jobs:
           [[ "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
           source_version="$(tr -d '\r\n' < VERSION)"
-          release_sha="$RELEASE_SHA"
+          release_sha="$GITHUB_SHA"
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$source_version" != "$requested_version" ]; then
             printf '%s\n' "$requested_version" > VERSION
