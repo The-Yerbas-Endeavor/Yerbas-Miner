@@ -83,6 +83,7 @@ struct WindowsConsoleStatus {
     bool vt_enabled{false};
     std::size_t columns{0U};
     bool block_garden_side_by_side{false};
+    bool block_garden_braille{false};
 };
 
 inline WindowsConsoleStatus windows_console_status()
@@ -99,8 +100,13 @@ inline WindowsConsoleStatus windows_console_status()
         (term_program != nullptr &&
          std::string(term_program).find("Windows_Terminal") != std::string::npos)) {
         status.host = "Windows Terminal";
+        status.block_garden_braille = true;
     } else {
         status.host = "Windows Console Host";
+        // Classic conhost's active font is not reliably queryable for Braille
+        // coverage. Prefer a shaded-block fallback there so the garden remains
+        // recognizable instead of depending on tofu/missing-glyph behavior.
+        status.block_garden_braille = false;
     }
 
     HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -125,7 +131,11 @@ inline std::string windows_console_status_line()
         << " | BLOCK GARDEN="
         << (status.block_garden_side_by_side
                 ? "side-by-side"
-                : "stacked");
+                : "stacked")
+        << " | glyphs="
+        << (status.block_garden_braille
+                ? "braille"
+                : "shaded-block");
     return out.str();
 }
 
@@ -136,6 +146,16 @@ inline std::string windows_render_probe_line()
     // malformed, the problem is the active Windows terminal/font rather than
     // BLOCK GARDEN's layout math.
     return "Render test: BOX ╭─╮│╰─╯  BLOCK ▁▂▃▄▅▆▇█  BRAILLE ⠁⠄⠸⢸⣾  NOW ◆";
+}
+
+inline bool block_garden_use_braille()
+{
+    return windows_console_status().block_garden_braille;
+}
+#else
+inline bool block_garden_use_braille()
+{
+    return true;
 }
 #endif
 
