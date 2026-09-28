@@ -398,6 +398,10 @@ private:
     void seed_gpu_batch_from_live_memory(GpuWorker& worker,
                                          std::uint32_t cn_mask);
     void drain_gpu_scans() noexcept;
+    std::size_t transition_batch_for_worker(
+        GpuWorker& worker,
+        std::size_t learned_batch,
+        bool& transition_shaped);
 
     std::vector<GpuWorker> gpu_workers_;
     JobLoadedFlag gpu_job_loaded_{};
