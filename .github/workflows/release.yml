@@ -139,6 +139,60 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  linux-arm64:
+    name: Linux ARM64
+    needs: validate-version
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build git libboost-dev
+
+      - name: Configure ARM64 release
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -S . -B build-arm64 -G Ninja             -DCMAKE_BUILD_TYPE=Release             -DYERBAS_ENABLE_CUDA=OFF             -DYERBAS_NATIVE_CPU=OFF             -DBUILD_TESTING=ON
+
+      - name: Build and test ARM64
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --build build-arm64 --target yerbas-miner --parallel
+          ctest --test-dir build-arm64 --output-on-failure
+
+      - name: Package ARM64 release
+        shell: bash
+        run: |
+          set -euxo pipefail
+          out='dist/yerbas-miner-linux-arm64'
+          mkdir -p "$out"
+          cp build-arm64/yerbas-miner "$out/yerbas-miner"
+          cp README.md config.example.json VERSION "$out/"
+          {
+            echo "Yerbas Miner $GITHUB_REF_NAME"
+            echo "Commit: $GITHUB_SHA"
+            echo "Scheduler: remaining-time-v1"
+            echo "Platform: Linux ARM64"
+            echo "GPU backend: CPU-only build"
+          } > "$out/BUILD-INFO.txt"
+          cmake -E tar cf dist/yerbas-miner-linux-arm64.zip --format=zip "$out"
+
+      - name: Upload ARM64 release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64
+          path: dist/yerbas-miner-linux-arm64.zip
+          if-no-files-found: error
+          retention-days: 30
+
   windows-cuda:
     name: Windows CUDA x86_64
     needs: validate-version
@@ -214,13 +268,13 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [validate-version, linux-cuda, windows-cuda]
+    needs: [validate-version, linux-cuda, windows-cuda, linux-arm64]
     runs-on: ubuntu-24.04
     steps:
       - name: Download successful release builds
         uses: actions/download-artifact@v4
         with:
-          pattern: release-*-cuda
+          pattern: release-*
           path: dist
           merge-multiple: true
       - name: Verify release assets
@@ -229,6 +283,7 @@ jobs:
           set -euxo pipefail
           test -f dist/yerbas-miner-linux-cuda-x86_64.zip
           test -f dist/yerbas-miner-windows-cuda-x86_64.zip
+          test -f dist/yerbas-miner-linux-arm64.zip
           sha256sum dist/*.zip | tee dist/SHA256SUMS.txt
       - name: Create release only after both builds succeeded
         env:
@@ -238,7 +293,7 @@ jobs:
           set -euxo pipefail
           tag="$GITHUB_REF_NAME"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/yerbas-miner-linux-cuda-x86_64.zip dist/yerbas-miner-windows-cuda-x86_64.zip dist/SHA256SUMS.txt --clobber
+            gh release upload "$tag" dist/yerbas-miner-linux-cuda-x86_64.zip dist/yerbas-miner-windows-cuda-x86_64.zip dist/yerbas-miner-linux-arm64.zip dist/SHA256SUMS.txt --clobber
           else
-            gh release create "$tag" dist/yerbas-miner-linux-cuda-x86_64.zip dist/yerbas-miner-windows-cuda-x86_64.zip dist/SHA256SUMS.txt --title "$tag" --generate-notes
+            gh release create "$tag" dist/yerbas-miner-linux-cuda-x86_64.zip dist/yerbas-miner-windows-cuda-x86_64.zip dist/yerbas-miner-linux-arm64.zip dist/SHA256SUMS.txt --title "$tag" --generate-notes
           fi
