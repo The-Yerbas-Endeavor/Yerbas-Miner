@@ -56,7 +56,12 @@ inline int cn_setup_launch_threads(int device_id, std::uint8_t variant)
     if (device_id >= 0 && device_id < kCnWordPhaseMaxDevices && variant < 6U &&
         g_cn_setup_threads[device_id][variant] != 0)
         return g_cn_setup_threads[device_id][variant];
-    return 128;
+
+    // Production fallback derived from the Pascal/GTX 1080 Ti phase-2
+    // measurements: setup consistently benefits from one warp while final
+    // remains best at 128 threads. Exact cached/tuned geometry and explicit
+    // environment overrides still take precedence above this fallback.
+    return 32;
 }
 
 inline int cn_final_launch_threads(int device_id, std::uint8_t variant)
@@ -68,6 +73,8 @@ inline int cn_final_launch_threads(int device_id, std::uint8_t variant)
     if (device_id >= 0 && device_id < kCnWordPhaseMaxDevices && variant < 6U &&
         g_cn_final_threads[device_id][variant] != 0)
         return g_cn_final_threads[device_id][variant];
+
+    // Keep the measured production final-phase fallback at 128 threads.
     return 128;
 }
 
