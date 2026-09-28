@@ -3226,11 +3226,15 @@ void Client::report_stats(bool force)
                     << fit(format_rate(stats.high), 10);
                 hashrate_rows.push_back(header.str());
 
+                // Layer the same filled silhouette with three visual
+                // intensities. The crest is brightest, the middle is normal,
+                // and the base is subdued so the graph reads as one coherent
+                // shape instead of three equally-heavy terminal rows.
                 std::ostringstream graph_top;
                 graph_top
                     << std::string(8U, ' ')
-                    << dim << "│ " << reset
-                    << color
+                    << dim << "╷ " << reset
+                    << bold << color
                     << graph[0]
                     << reset;
                 hashrate_rows.push_back(graph_top.str());
@@ -3247,12 +3251,12 @@ void Client::report_stats(bool force)
                 std::ostringstream graph_bottom;
                 graph_bottom
                     << std::string(8U, ' ')
-                    << dim << "└ " << reset
-                    << color
+                    << dim << "╰ " << reset
+                    << dim << color
                     << graph[2]
                     << reset
                     << ' '
-                    << color << "●" << reset;
+                    << bold << color << "◆" << reset;
                 hashrate_rows.push_back(graph_bottom.str());
             };
 
@@ -3266,12 +3270,12 @@ void Client::report_stats(bool force)
 
             hashrate_rows.push_back(
                 dim + repeat(
-                    "·",
+                    "─",
                     total_graph_width > 18U
                         ? total_graph_width - 18U
                         : 24U) + reset);
             hashrate_rows.push_back(
-                dim + std::string("WORKERS") + reset);
+                dim + std::string("WORKER DETAIL") + reset);
 
             append_source_trend(
                 "CPU",
