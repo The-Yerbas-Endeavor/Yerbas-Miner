@@ -1733,17 +1733,26 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
 
                 if (memory.rejected_probe_batch != 0U &&
                     probe_batch >= memory.rejected_probe_batch) {
+                    // A rejected upper step is authoritative for this exact
+                    // rotation until the CURRENT batch-local baseline has
+                    // changed materially and has enough samples to prove that
+                    // the operating point is genuinely different. Do not use
+                    // the all-batch EWMA here: it can be shifted by old probes
+                    // and create false reopenings.
                     const double baseline_shift =
-                        memory.rejected_probe_baseline_hps > 0.0
+                        memory.rejected_probe_baseline_hps > 0.0 &&
+                        memory.baseline_hps_ewma > 0.0
                             ? std::abs(
-                                  memory.hps_ewma /
+                                  memory.baseline_hps_ewma /
                                       memory.rejected_probe_baseline_hps -
                                   1.0)
                             : 0.0;
                     ++memory.rejected_probe_stable_samples;
 
-                    constexpr double kReopenBaselineShift = 0.025;
+                    constexpr double kReopenBaselineShift = 0.050;
+                    constexpr std::uint64_t kReopenBaselineSamples = 6U;
                     const bool reopen =
+                        memory.baseline_samples >= kReopenBaselineSamples &&
                         baseline_shift >= kReopenBaselineShift;
 
                     if (!reopen) {
@@ -1751,6 +1760,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                         return;
                     }
 
+                    // Keep the rejection metadata until a new probe actually
+                    // wins. If the reopened probe is interrupted or loses, the
+                    // previous negative knowledge remains intact.
                     std::cout << "[throughput-probe] GPU "
                               << worker.device_id
                               << " rotation=" << std::hex
@@ -1763,12 +1775,11 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                               << " baseline_shift_pct="
                               << std::fixed << std::setprecision(2)
                               << (baseline_shift * 100.0)
-                              << " stable_samples="
+                              << " baseline_samples="
+                              << memory.baseline_samples
+                              << " rejected_stable_samples="
                               << memory.rejected_probe_stable_samples
                               << "\n";
-                    memory.rejected_probe_batch = 0U;
-                    memory.rejected_probe_baseline_hps = 0.0;
-                    memory.rejected_probe_stable_samples = 0U;
                 }
 
                 if (memory.baseline_batch != current ||
