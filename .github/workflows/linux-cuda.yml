@@ -1,9 +1,8 @@
-name: Linux CUDA Release
+name: Linux CUDA Build
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
