@@ -186,6 +186,30 @@ Priority is command line, then JSON config, then built-in defaults. Explicit dev
 - GPU device/intensity settings
 - Stratum endpoint parsing and configuration plumbing
 
+## Releases and versioning
+
+Yerbas-Miner uses the existing four-part release format:
+
+```text
+1.0.0.N
+```
+
+The repository-level `VERSION` file is the source of truth for the next release number. Release tags use the exact same value with **no `v` prefix** (for example, `1.0.0.4`).
+
+Every configured binary embeds three identifiers and prints them at startup:
+
+```text
+Yerbas Miner 1.0.0.4 | commit <git-sha> | scheduler <scheduler-revision>
+```
+
+A tag matching `VERSION` triggers the dedicated **Publish CUDA Release** workflow. It builds Linux CUDA x86_64 and Windows CUDA x86_64 independently. The GitHub Release is created or updated only after **both** builds succeed, and it publishes:
+
+- `yerbas-miner-linux-cuda-x86_64.zip`
+- `yerbas-miner-windows-cuda-x86_64.zip`
+- `SHA256SUMS.txt`
+
+This keeps the Releases page aligned with validated binaries rather than development commits.
+
 ## Build
 
 ### Fast development/testing build
