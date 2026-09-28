@@ -134,6 +134,7 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
             double best_hps = gpu_calibration_hps(
                 stream, d_job, d_nonces, states, scratchpads, contexts,
                 jobs[cls], best);
+            heartbeat_nominal.stop();
             std::cout << std::fixed << std::setprecision(2)
                       << " done | " << best_hps << " H/s | best="
                       << best_hps << " H/s" << std::defaultfloat << '\n';
@@ -164,6 +165,7 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                 const double hps = gpu_calibration_hps(
                     stream, d_job, d_nonces, states, scratchpads, contexts,
                     jobs[cls], candidate);
+                heartbeat_candidate.stop();
                 const double gain_pct = best_hps > 0.0
                     ? (hps / best_hps - 1.0) * 100.0 : 0.0;
                 const bool wins = hps > best_hps * kGpuCalibrationMinimumGain;
