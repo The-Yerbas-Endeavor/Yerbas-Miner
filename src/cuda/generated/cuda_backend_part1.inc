@@ -24,6 +24,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace yerbas::cuda {
 namespace {
 
@@ -90,6 +94,21 @@ std::filesystem::path cn_cache_directory()
         }
 
         // Portable ZIP users often keep tuning files beside the executable.
+        // Resolve the module path so a shortcut or different working directory
+        // does not hide an otherwise valid cache.
+        {
+            std::array<char, 32768> module_path{};
+            const DWORD len = GetModuleFileNameA(
+                nullptr,
+                module_path.data(),
+                static_cast<DWORD>(module_path.size()));
+            if (len != 0 && len < module_path.size()) {
+                import_dirs.push_back(
+                    std::filesystem::path(
+                        std::string(module_path.data(), len))
+                        .parent_path());
+            }
+        }
         import_dirs.push_back(std::filesystem::current_path());
 
         std::error_code ec;
