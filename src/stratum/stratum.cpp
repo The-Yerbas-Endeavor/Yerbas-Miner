@@ -2192,40 +2192,78 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() -
                     active_job_received_at_).count();
-            const double age_ratio =
-                age_ms / job_lifetime_ms_ewma_;
+            const double remaining_ms =
+                job_lifetime_ms_ewma_ - age_ms;
 
             constexpr std::size_t kTransitionQuantum = 256U;
             constexpr std::size_t kTransitionMinBatch = 1024U;
+            constexpr double kTransitionSafetyFraction = 0.65;
+            constexpr double kTransitionTriggerFactor = 1.35;
+            constexpr double kTransitionMinBudgetMs = 750.0;
+            constexpr double kTransitionOverdueBudgetMs = 1250.0;
 
-            std::uint32_t transition_zone = 0U;
-            double batch_fraction = 1.0;
-
-            if (age_ratio >= 0.80 && age_ratio < 1.00) {
-                transition_zone = 1U;
-                batch_fraction = 0.50;
-            } else if (age_ratio >= 1.00 && age_ratio < 1.25) {
-                transition_zone = 2U;
-                batch_fraction = 0.75;
-            } else if (age_ratio >= 1.25) {
-                transition_zone = 3U;
+            double ms_per_hash = 0.0;
+            const auto memory_it =
+                worker.rotation_latency_memory.find(
+                    static_cast<std::uint64_t>(
+                        active_rotation_fingerprint_));
+            if (memory_it != worker.rotation_latency_memory.end() &&
+                memory_it->second.ms_per_hash_ewma > 0.0) {
+                ms_per_hash =
+                    memory_it->second.ms_per_hash_ewma;
+            } else if (worker.latency_scan_ms_ewma > 0.0 &&
+                       learned_batch != 0U) {
+                ms_per_hash =
+                    worker.latency_scan_ms_ewma /
+                    static_cast<double>(learned_batch);
             }
 
-            if (transition_zone == 1U ||
-                transition_zone == 2U) {
-                std::size_t reduced =
-                    static_cast<std::size_t>(
-                        static_cast<double>(learned_batch) *
-                        batch_fraction);
-                reduced =
-                    (reduced / kTransitionQuantum) *
-                    kTransitionQuantum;
-                effective_batch =
-                    std::min(
-                        learned_batch,
-                        std::max(kTransitionMinBatch, reduced));
-                transition_shaped =
-                    effective_batch < learned_batch;
+            std::uint32_t transition_zone = 0U;
+            double predicted_scan_ms = 0.0;
+            double scan_budget_ms = 0.0;
+
+            if (ms_per_hash > 0.0 && learned_batch != 0U) {
+                predicted_scan_ms =
+                    ms_per_hash *
+                    static_cast<double>(learned_batch);
+
+                if (remaining_ms <= 0.0) {
+                    transition_zone = 2U;
+                    scan_budget_ms =
+                        std::min(
+                            predicted_scan_ms,
+                            kTransitionOverdueBudgetMs);
+                } else if (remaining_ms <=
+                           predicted_scan_ms *
+                               kTransitionTriggerFactor) {
+                    transition_zone = 1U;
+                    scan_budget_ms =
+                        std::clamp(
+                            remaining_ms *
+                                kTransitionSafetyFraction,
+                            kTransitionMinBudgetMs,
+                            predicted_scan_ms);
+                }
+
+                if (transition_zone != 0U &&
+                    scan_budget_ms < predicted_scan_ms) {
+                    std::size_t reduced =
+                        static_cast<std::size_t>(
+                            scan_budget_ms /
+                            ms_per_hash);
+                    reduced =
+                        (reduced /
+                         kTransitionQuantum) *
+                        kTransitionQuantum;
+                    effective_batch =
+                        std::min(
+                            learned_batch,
+                            std::max(
+                                kTransitionMinBatch,
+                                reduced));
+                    transition_shaped =
+                        effective_batch < learned_batch;
+                }
             }
 
             if (transition_zone != worker.transition_shape_zone) {
@@ -2233,12 +2271,10 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
 
                 const char* zone_name =
                     transition_zone == 1U
-                        ? "late-50pct"
+                        ? "remaining-time"
                         : (transition_zone == 2U
-                               ? "overdue-75pct"
-                               : (transition_zone == 3U
-                                      ? "expired-normal"
-                                      : "normal"));
+                               ? "overdue-short"
+                               : "normal");
 
                 std::cout
                     << "[transition-batch] GPU "
@@ -2250,6 +2286,12 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                     << age_ms
                     << " lifetime_ewma_ms="
                     << job_lifetime_ms_ewma_
+                    << " remaining_ms="
+                    << remaining_ms
+                    << " predicted_scan_ms="
+                    << predicted_scan_ms
+                    << " budget_ms="
+                    << scan_budget_ms
                     << " batch="
                     << learned_batch
                     << " -> "
