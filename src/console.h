@@ -128,6 +128,15 @@ inline std::string windows_console_status_line()
                 : "stacked");
     return out.str();
 }
+
+inline std::string windows_render_probe_line()
+{
+    // These are the same rendering primitives used by the TUI: box-drawing,
+    // block levels, Braille, and the current-point diamond. If this line looks
+    // malformed, the problem is the active Windows terminal/font rather than
+    // BLOCK GARDEN's layout math.
+    return "Render test: BOX ╭─╮│╰─╯  BLOCK ▁▂▃▄▅▆▇█  BRAILLE ⠁⠄⠸⢸⣾  NOW ◆";
+}
 #endif
 
 inline const char* color_for_line(const std::string& line)
