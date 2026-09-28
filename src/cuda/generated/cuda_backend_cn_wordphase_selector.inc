@@ -295,23 +295,118 @@ bool load_cn_phase_geometry_cache(int device_id,
                                   int& threads)
 {
     if (cn_phase_geometry_retune_requested()) return false;
-    const auto path = cn_phase_geometry_cache_path<VariantIndex>(
+    const auto exact_path = cn_phase_geometry_cache_path<VariantIndex>(
         device_id, props, count, phase);
-    if (path.empty()) return false;
+    if (exact_path.empty()) return false;
 
-    std::ifstream in(path);
-    std::string magic, cached_phase;
-    int revision = 0, variant = -1, cached_threads = 0;
-    if (!(in >> magic >> revision >> variant >> cached_phase >> cached_threads) ||
-        magic != "YERBAS_CN_PHASE_GEOMETRY" ||
-        revision != kCnPhaseGeometryCacheRevision ||
-        variant != static_cast<int>(VariantIndex) ||
-        cached_phase != phase ||
-        cached_threads < 32 || cached_threads > 128 ||
-        (cached_threads % 32) != 0)
+    const auto read_candidate =
+        [&](const std::filesystem::path& path, int& parsed_threads) {
+            std::ifstream in(path);
+            if (!in) return false;
+
+            std::string magic, cached_phase;
+            int revision = 0, variant = -1, cached_threads = 0;
+            if (!(in >> magic >> revision >> variant >> cached_phase >> cached_threads) ||
+                magic != "YERBAS_CN_PHASE_GEOMETRY" ||
+                revision != kCnPhaseGeometryCacheRevision ||
+                variant != static_cast<int>(VariantIndex) ||
+                cached_phase != phase ||
+                cached_threads < 32 || cached_threads > 128 ||
+                (cached_threads % 32) != 0)
+                return false;
+
+            parsed_threads = cached_threads;
+            return true;
+        };
+
+    int exact_threads = 0;
+    if (read_candidate(exact_path, exact_threads)) {
+        threads = exact_threads;
+        const int effective_threads =
+            std::string(phase) == "setup"
+                ? cn_setup_launch_threads(device_id, VariantIndex)
+                : cn_final_launch_threads(device_id, VariantIndex);
+        std::cout << "[GPU " << device_id
+                  << "] CryptoNight phase geometry cache loaded | "
+                  << cryptonight::config_value(VariantIndex).name
+                  << " | phase=" << phase
+                  << " | batch=" << count
+                  << " | cached-threads=" << threads
+                  << " | effective-threads=" << effective_threads
+                  << " | source=exact-batch-cache"
+                  << " | startup-benchmark=off\n";
+        return true;
+    }
+
+    // Generic cross-batch reuse: if this exact hardware/driver/runtime/variant
+    // has already measured this phase at another batch, reuse the nearest
+    // measured batch rather than falling back to a hardware-name-specific rule.
+    // The filename key already includes device id/name, compute capability, SM
+    // count, warp size, driver, runtime and cache revision.
+    const std::string exact_name = exact_path.filename().string();
+    const std::size_t batch_pos = exact_name.find("-batch");
+    const std::size_t drv_pos =
+        batch_pos == std::string::npos
+            ? std::string::npos
+            : exact_name.find("-drv", batch_pos);
+    if (batch_pos == std::string::npos || drv_pos == std::string::npos)
         return false;
 
-    threads = cached_threads;
+    const std::string prefix = exact_name.substr(0, batch_pos + 6U);
+    const std::string suffix = exact_name.substr(drv_pos);
+
+    std::filesystem::path best_path;
+    std::size_t best_batch = 0U;
+    std::size_t best_distance = std::numeric_limits<std::size_t>::max();
+
+    std::error_code ec;
+    std::filesystem::directory_iterator it(exact_path.parent_path(), ec);
+    const std::filesystem::directory_iterator end;
+    while (!ec && it != end) {
+        const auto candidate_path = it->path();
+        const std::string name = candidate_path.filename().string();
+
+        const bool prefix_match =
+            name.size() >= prefix.size() &&
+            name.compare(0, prefix.size(), prefix) == 0;
+        const bool suffix_match =
+            name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+
+        if (prefix_match && suffix_match && candidate_path != exact_path) {
+            const std::size_t candidate_drv = name.rfind("-drv");
+            if (candidate_drv != std::string::npos &&
+                candidate_drv > prefix.size()) {
+                try {
+                    const std::size_t candidate_batch =
+                        static_cast<std::size_t>(
+                            std::stoull(
+                                name.substr(
+                                    prefix.size(),
+                                    candidate_drv - prefix.size())));
+                    const std::size_t distance =
+                        candidate_batch > count
+                            ? candidate_batch - count
+                            : count - candidate_batch;
+
+                    int candidate_threads = 0;
+                    if (distance < best_distance &&
+                        read_candidate(candidate_path, candidate_threads)) {
+                        best_distance = distance;
+                        best_batch = candidate_batch;
+                        best_path = candidate_path;
+                        threads = candidate_threads;
+                    }
+                } catch (...) {
+                }
+            }
+        }
+
+        it.increment(ec);
+    }
+
+    if (best_path.empty()) return false;
+
     const int effective_threads =
         std::string(phase) == "setup"
             ? cn_setup_launch_threads(device_id, VariantIndex)
@@ -321,8 +416,10 @@ bool load_cn_phase_geometry_cache(int device_id,
               << cryptonight::config_value(VariantIndex).name
               << " | phase=" << phase
               << " | batch=" << count
+              << " | cached-batch=" << best_batch
               << " | cached-threads=" << threads
               << " | effective-threads=" << effective_threads
+              << " | source=nearest-batch-cache"
               << " | startup-benchmark=off\n";
     return true;
 }
@@ -382,26 +479,16 @@ void ensure_cn_setup_geometry(cudaStream_t stream,
         return;
 
     if (!cn_phase_geometry_retune_requested()) {
-        const bool validated_1080ti =
-            props.major == 6 && props.minor == 1 &&
-            std::string(props.name).find("GeForce GTX 1080 Ti") != std::string::npos;
-
-        // The production phase campaign on both GTX 1080 Ti cards repeatedly
-        // selected setup=32 / final=128 across all six CN variants. Adaptive
-        // live batching changes the count, but not the device/phase behavior.
-        // Use that measured device-level setup fallback for uncached counts so
-        // 1792/2048/2560/... do not silently fall back to 128-thread setup.
-        selected = validated_1080ti ? 32 : 128;
-
+        // With no measured exact/nearby cache available, keep the universally
+        // legal conservative geometry. Hardware-specific choices belong in the
+        // measured cache, never in production source code.
+        selected = 128;
         std::cout << "[GPU " << device_id
                   << "] CryptoNight phase geometry safe default | "
                   << cryptonight::config_value(VariantIndex).name
                   << " | phase=setup | batch=" << count
                   << " | threads=" << selected
-                  << " | source="
-                  << (validated_1080ti
-                          ? "validated-1080ti-device"
-                          : "conservative")
+                  << " | source=conservative-unmeasured"
                   << " | startup-benchmark=off\n";
         return;
     }
