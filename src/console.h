@@ -422,7 +422,17 @@ inline std::string strip_ansi(const std::string& line)
 
 inline std::size_t visible_width(const std::string& line)
 {
-    return strip_ansi(line).size();
+    // Count UTF-8 code points rather than bytes. Windows' UTF-8 console and
+    // Linux terminals both render the box/Braille glyphs as one terminal cell;
+    // byte-counting made Windows padding drift because these glyphs are 3-byte
+    // UTF-8 sequences.
+    const std::string clean = strip_ansi(line);
+    std::size_t width = 0U;
+    for (unsigned char c : clean) {
+        if ((c & 0xc0U) != 0x80U)
+            ++width;
+    }
+    return width;
 }
 
 inline void pad_to_visible_column(std::string& line, std::size_t column)
