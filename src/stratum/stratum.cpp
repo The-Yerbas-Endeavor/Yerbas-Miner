@@ -15,6 +15,7 @@
 #include "ghostrider/ghostrider.h"
 #include "console.h"
 #include "console_file_log.h"
+#include "build_info.h"
 
 #include <nlohmann/json.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
@@ -3260,7 +3261,9 @@ void Client::report_stats(bool force)
         };
 
         const std::string top_left =
-            "─[ YERBAS MINER ]";
+            std::string("─[ YERBAS MINER  -  ") +
+            YERBAS_VERSION_STRING +
+            " ]";
         const std::size_t top_used =
             display_width(top_left);
 
