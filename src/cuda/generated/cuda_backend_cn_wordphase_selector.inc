@@ -407,6 +407,87 @@ bool load_cn_phase_geometry_cache(int device_id,
 
     if (best_path.empty()) return false;
 
+    // Score cross-batch reuse from nearby measurements instead of assuming one
+    // neighboring batch is always representative. Conflicting nearby geometry
+    // is treated as uncertainty and falls back to the conservative unmeasured
+    // path; agreeing neighbors increase confidence without any hardware-name
+    // special cases.
+    const std::size_t confidence_window =
+        std::max<std::size_t>(
+            512U,
+            best_distance <=
+                    std::numeric_limits<std::size_t>::max() / 2U
+                ? best_distance * 2U
+                : best_distance);
+    std::size_t nearby_total = 0U;
+    std::size_t nearby_agree = 0U;
+    std::size_t nearby_conflict = 0U;
+
+    ec.clear();
+    std::filesystem::directory_iterator confidence_it(
+        exact_path.parent_path(), ec);
+    while (!ec && confidence_it != end) {
+        const auto candidate_path = confidence_it->path();
+        const std::string name = candidate_path.filename().string();
+
+        const bool prefix_match =
+            name.size() >= prefix.size() &&
+            name.compare(0, prefix.size(), prefix) == 0;
+        const bool suffix_match =
+            name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+
+        if (prefix_match && suffix_match && candidate_path != exact_path) {
+            const std::size_t candidate_drv = name.rfind("-drv");
+            if (candidate_drv != std::string::npos &&
+                candidate_drv > prefix.size()) {
+                try {
+                    const std::size_t candidate_batch =
+                        static_cast<std::size_t>(
+                            std::stoull(
+                                name.substr(
+                                    prefix.size(),
+                                    candidate_drv - prefix.size())));
+                    const std::size_t distance =
+                        candidate_batch > count
+                            ? candidate_batch - count
+                            : count - candidate_batch;
+                    int candidate_threads = 0;
+                    if (distance <= confidence_window &&
+                        read_candidate(candidate_path, candidate_threads)) {
+                        ++nearby_total;
+                        if (candidate_threads == threads)
+                            ++nearby_agree;
+                        else
+                            ++nearby_conflict;
+                    }
+                } catch (...) {
+                }
+            }
+        }
+
+        confidence_it.increment(ec);
+    }
+
+    if (nearby_conflict != 0U) {
+        std::cout << "[GPU " << device_id
+                  << "] CryptoNight phase geometry cache conflict | "
+                  << cryptonight::config_value(VariantIndex).name
+                  << " | phase=" << phase
+                  << " | batch=" << count
+                  << " | nearest-batch=" << best_batch
+                  << " | nearest-threads=" << threads
+                  << " | nearby=" << nearby_total
+                  << " | agree=" << nearby_agree
+                  << " | conflict=" << nearby_conflict
+                  << " | action=conservative-unmeasured\n";
+        return false;
+    }
+
+    const char* confidence =
+        nearby_agree >= 2U ? "high" :
+        (nearby_agree == 1U ? "medium" : "low");
+
     const int effective_threads =
         std::string(phase) == "setup"
             ? cn_setup_launch_threads(device_id, VariantIndex)
@@ -420,6 +501,9 @@ bool load_cn_phase_geometry_cache(int device_id,
               << " | cached-threads=" << threads
               << " | effective-threads=" << effective_threads
               << " | source=nearest-batch-cache"
+              << " | confidence=" << confidence
+              << " | nearby=" << nearby_total
+              << " | agree=" << nearby_agree
               << " | startup-benchmark=off\n";
     return true;
 }
