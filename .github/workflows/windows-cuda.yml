@@ -2,7 +2,9 @@ name: Windows CUDA Release
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/console-ui-hashrate
     tags: ['v*']
   workflow_dispatch:
 
