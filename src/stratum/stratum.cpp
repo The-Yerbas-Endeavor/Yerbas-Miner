@@ -4079,18 +4079,6 @@ void Client::report_stats(bool force)
                     dim + repeat("·", 40U) + reset);
 
                 {
-                    std::ostringstream mode_line;
-                    mode_line
-                        << dim
-                        << "GLYPHS "
-                        << (use_braille_garden
-                                ? "BRAILLE"
-                                : "QUADRANT BLOCK")
-                        << reset;
-                    mascot_rows.push_back(mode_line.str());
-                }
-
-                {
                     std::ostringstream job_line;
                     job_line << "GROW TIME ";
                     if (active_job_received_at_.time_since_epoch().count() != 0) {
