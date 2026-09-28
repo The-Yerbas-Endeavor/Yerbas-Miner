@@ -207,6 +207,8 @@ int main(int argc, char** argv)
 #ifdef _WIN32
         std::cout
             << yerbas::console::detail::windows_console_status_line()
+            << '\n'
+            << yerbas::console::detail::windows_render_probe_line()
             << '\n';
 #endif
 
