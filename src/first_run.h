@@ -2,6 +2,7 @@
 
 #include "config.h"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -12,12 +13,28 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
 
 namespace yerbas {
 namespace first_run {
+
+#ifdef _WIN32
+inline std::filesystem::path executable_dir()
+{
+    std::array<char, 32768> buffer{};
+    const DWORD len = GetModuleFileNameA(
+        nullptr,
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()));
+    if (len == 0 || len >= buffer.size())
+        return std::filesystem::current_path();
+    return std::filesystem::path(
+        std::string(buffer.data(), len)).parent_path();
+}
+#endif
 
 inline std::filesystem::path cache_dir()
 {
@@ -44,17 +61,28 @@ inline std::vector<std::filesystem::path> cache_search_dirs()
         const auto legacy = std::filesystem::path(p) / "Yerbas-Miner";
         if (legacy != dirs.front()) dirs.push_back(legacy);
     }
-    // Portable Windows builds have historically been run from an extracted
-    // Yerbas-Miner folder with tuning files beside the executable.
-    const auto portable = std::filesystem::current_path();
+    // Portable Windows builds often keep tuning files beside the executable.
+    // Use the executable directory, not just the process working directory:
+    // shortcuts and shells may start the miner from somewhere else.
+    const auto exe_dir = executable_dir();
     bool seen = false;
     for (const auto& dir : dirs) {
-        if (dir == portable) {
+        if (dir == exe_dir) {
             seen = true;
             break;
         }
     }
-    if (!seen) dirs.push_back(portable);
+    if (!seen) dirs.push_back(exe_dir);
+
+    const auto cwd = std::filesystem::current_path();
+    seen = false;
+    for (const auto& dir : dirs) {
+        if (dir == cwd) {
+            seen = true;
+            break;
+        }
+    }
+    if (!seen) dirs.push_back(cwd);
 #endif
     return dirs;
 }
