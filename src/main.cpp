@@ -204,6 +204,12 @@ int main(int argc, char** argv)
         const bool terminal_capable =
             yerbas::console::detail::terminal_supports_color();
 
+#ifdef _WIN32
+        std::cout
+            << yerbas::console::detail::windows_console_status_line()
+            << '\n';
+#endif
+
         bool use_dashboard = false;
         if (config.logging.console_mode == "tui") {
             use_dashboard = terminal_capable && session_log.active();
