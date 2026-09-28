@@ -1,11 +1,10 @@
-name: Windows CUDA Release
+name: Windows CUDA Build
 
 on:
   push:
     branches:
       - main
       - feature/console-ui-hashrate
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
