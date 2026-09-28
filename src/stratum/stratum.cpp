@@ -2867,7 +2867,11 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto compact_graph = [&history_stats](
+        const auto tui_glyph_mode =
+            yerbas::console::detail::resolve_glyph_mode(
+                config_.logging.glyph_mode);
+
+        const auto compact_graph = [&history_stats, tui_glyph_mode](
             const std::vector<double>& history,
             std::size_t width,
             std::size_t sample_limit,
@@ -2876,6 +2880,18 @@ void Client::report_stats(bool force)
             static constexpr const char* levels[] = {
                 " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
             };
+
+            const auto level_glyph =
+                [tui_glyph_mode](int amount) -> const char* {
+                    if (amount <= 0) return " ";
+                    if (tui_glyph_mode ==
+                        yerbas::console::detail::GlyphMode::Ascii)
+                        return "#";
+                    if (tui_glyph_mode ==
+                        yerbas::console::detail::GlyphMode::Block)
+                        return amount <= 4 ? "▄" : "█";
+                    return levels[std::clamp(amount, 0, 8)];
+                };
 
             std::array<std::string, 3> rows{{"", "", ""}};
             if (width == 0U)
@@ -2950,9 +2966,9 @@ void Client::report_stats(bool force)
                 const int upper =
                     std::clamp(level - 16, 0, 8);
 
-                rows[0] += levels[upper];
-                rows[1] += levels[middle];
-                rows[2] += levels[lower];
+                rows[0] += level_glyph(upper);
+                rows[1] += level_glyph(middle);
+                rows[2] += level_glyph(lower);
             }
 
             return rows;
@@ -3416,7 +3432,15 @@ void Client::report_stats(bool force)
                     << graph[2]
                     << reset
                     << ' '
-                    << bold << color << "◆" << reset;
+                    << bold << color
+                    << (tui_glyph_mode ==
+                                yerbas::console::detail::GlyphMode::Braille
+                            ? "◆"
+                            : (tui_glyph_mode ==
+                                       yerbas::console::detail::GlyphMode::Block
+                                   ? "█"
+                                   : "*"))
+                    << reset;
                 hashrate_rows.push_back(graph_bottom.str());
             };
 
@@ -3816,49 +3840,58 @@ void Client::report_stats(bool force)
                     return cells;
                 }();
 
-                const bool use_braille_garden =
-                    yerbas::console::detail::block_garden_use_braille();
-
                 const auto display_garden_glyph =
-                    [use_braille_garden](char32_t glyph) {
-                        if (use_braille_garden ||
-                            glyph == U' ' ||
+                    [tui_glyph_mode](char32_t glyph) {
+                        if (glyph == U' ' ||
                             glyph < 0x2800U ||
                             glyph > 0x28ffU)
                             return glyph;
 
-                        // Approximate each 2x4 Braille cell with a 2x2 quadrant
-                        // block. Unlike the old density-only fallback, this
-                        // preserves LEFT/RIGHT and TOP/BOTTOM structure, which
-                        // keeps the leaf silhouette recognizable in Windows
-                        // console fonts that do not render Braille well.
+                        if (tui_glyph_mode ==
+                            yerbas::console::detail::GlyphMode::Braille)
+                            return glyph;
+
+                        if (tui_glyph_mode ==
+                            yerbas::console::detail::GlyphMode::Ascii)
+                            return U'#';
+
+                        // Native broad-coverage Windows renderer. Preserve the
+                        // traced leaf's directional weight using only the five
+                        // block characters that render consistently in classic
+                        // Windows console fonts. Do not use quadrant glyphs.
                         const unsigned int bits =
-                            static_cast<unsigned int>(glyph - 0x2800U);
+                            static_cast<unsigned int>(
+                                glyph - 0x2800U);
+                        const unsigned int upper =
+                            ((bits & 0x01U) != 0U) +
+                            ((bits & 0x02U) != 0U) +
+                            ((bits & 0x08U) != 0U) +
+                            ((bits & 0x10U) != 0U);
+                        const unsigned int lower =
+                            ((bits & 0x04U) != 0U) +
+                            ((bits & 0x40U) != 0U) +
+                            ((bits & 0x20U) != 0U) +
+                            ((bits & 0x80U) != 0U);
+                        const unsigned int left =
+                            ((bits & 0x01U) != 0U) +
+                            ((bits & 0x02U) != 0U) +
+                            ((bits & 0x04U) != 0U) +
+                            ((bits & 0x40U) != 0U);
+                        const unsigned int right =
+                            ((bits & 0x08U) != 0U) +
+                            ((bits & 0x10U) != 0U) +
+                            ((bits & 0x20U) != 0U) +
+                            ((bits & 0x80U) != 0U);
+                        const unsigned int density =
+                            upper + lower;
 
-                        unsigned int quadrants = 0U;
-                        if ((bits & (0x01U | 0x02U)) != 0U) quadrants |= 0x1U; // upper-left
-                        if ((bits & (0x08U | 0x10U)) != 0U) quadrants |= 0x2U; // upper-right
-                        if ((bits & (0x04U | 0x40U)) != 0U) quadrants |= 0x4U; // lower-left
-                        if ((bits & (0x20U | 0x80U)) != 0U) quadrants |= 0x8U; // lower-right
-
-                        switch (quadrants) {
-                            case 0x0U: return U' ';
-                            case 0x1U: return U'▘';
-                            case 0x2U: return U'▝';
-                            case 0x3U: return U'▀';
-                            case 0x4U: return U'▖';
-                            case 0x5U: return U'▌';
-                            case 0x6U: return U'▞';
-                            case 0x7U: return U'▛';
-                            case 0x8U: return U'▗';
-                            case 0x9U: return U'▚';
-                            case 0xaU: return U'▐';
-                            case 0xbU: return U'▜';
-                            case 0xcU: return U'▄';
-                            case 0xdU: return U'▙';
-                            case 0xeU: return U'▟';
-                            default:   return U'█';
-                        }
+                        if (density == 0U) return U' ';
+                        if (density >= 4U) return U'█';
+                        if (upper >= lower + 2U) return U'▀';
+                        if (lower >= upper + 2U) return U'▄';
+                        if (left >= right + 2U) return U'▌';
+                        if (right >= left + 2U) return U'▐';
+                        return density >= 2U ? U'█' : U'▄';
                     };
 
                 auto append_utf8 =
@@ -4068,7 +4101,14 @@ void Client::report_stats(bool force)
                 }
 
                 mascot_rows.push_back(
-                    dim + repeat("·", 40U) + reset);
+                    dim +
+                    repeat(
+                        tui_glyph_mode ==
+                                yerbas::console::detail::GlyphMode::Ascii
+                            ? "."
+                            : "·",
+                        40U) +
+                    reset);
 
                 {
                     std::ostringstream job_line;

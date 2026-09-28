@@ -51,6 +51,13 @@ struct LoggingConfig {
     //   plain = traditional scrolling console
     std::string console_mode{"auto"};
 
+    // Dashboard glyph rendering:
+    //   auto    = Braille on capable terminals, safe blocks on classic Windows
+    //   braille = force full-detail Braille artwork/graphs
+    //   block   = force broad-coverage block glyphs (no quadrant characters)
+    //   ascii   = emergency plain-ASCII compatibility mode
+    std::string glyph_mode{"auto"};
+
     // Optional rotation/performance CSV. Empty disables file logging.
     std::string perf_csv;
 };

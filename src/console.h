@@ -93,6 +93,46 @@ inline bool terminal_supports_color()
 #endif
 }
 
+enum class GlyphMode {
+    Braille,
+    Block,
+    Ascii
+};
+
+inline const char* glyph_mode_name(GlyphMode mode)
+{
+    switch (mode) {
+        case GlyphMode::Braille: return "braille";
+        case GlyphMode::Block: return "block-safe";
+        case GlyphMode::Ascii: return "ascii";
+    }
+    return "unknown";
+}
+
+inline GlyphMode resolve_glyph_mode(const std::string& requested)
+{
+    if (requested == "braille") return GlyphMode::Braille;
+    if (requested == "block") return GlyphMode::Block;
+    if (requested == "ascii") return GlyphMode::Ascii;
+
+#ifdef _WIN32
+    const char* wt_session = std::getenv("WT_SESSION");
+    const char* term_program = std::getenv("TERM_PROGRAM");
+    const bool modern_terminal =
+        (wt_session != nullptr && *wt_session != '\0') ||
+        (term_program != nullptr &&
+         std::string(term_program).find("Windows_Terminal") !=
+             std::string::npos);
+
+    // Windows Terminal normally has reliable Braille coverage. Classic
+    // Console Host varies by active font, so prefer the deliberately limited
+    // broad-coverage block renderer there.
+    return modern_terminal ? GlyphMode::Braille : GlyphMode::Block;
+#else
+    return GlyphMode::Braille;
+#endif
+}
+
 #ifdef _WIN32
 struct WindowsConsoleStatus {
     std::string host{"unknown"};
@@ -102,10 +142,11 @@ struct WindowsConsoleStatus {
     std::size_t columns{0U};
     std::size_t rows{0U};
     bool block_garden_side_by_side{false};
-    bool block_garden_braille{false};
+    GlyphMode glyph_mode{GlyphMode::Block};
 };
 
-inline WindowsConsoleStatus windows_console_status()
+inline WindowsConsoleStatus windows_console_status(
+    const std::string& requested_glyph_mode = "auto")
 {
     WindowsConsoleStatus status;
     status.interactive = _isatty(_fileno(stdout)) != 0;
@@ -118,16 +159,14 @@ inline WindowsConsoleStatus windows_console_status()
     const char* term_program = std::getenv("TERM_PROGRAM");
     if ((wt_session != nullptr && *wt_session != '\0') ||
         (term_program != nullptr &&
-         std::string(term_program).find("Windows_Terminal") != std::string::npos)) {
+         std::string(term_program).find("Windows_Terminal") !=
+             std::string::npos)) {
         status.host = "Windows Terminal";
-        status.block_garden_braille = true;
     } else {
         status.host = "Windows Console Host";
-        // Classic conhost's active font is not reliably queryable for Braille
-        // coverage. Prefer a shaded-block fallback there so the garden remains
-        // recognizable instead of depending on tofu/missing-glyph behavior.
-        status.block_garden_braille = false;
     }
+
+    status.glyph_mode = resolve_glyph_mode(requested_glyph_mode);
 
     HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
     if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
@@ -140,9 +179,11 @@ inline WindowsConsoleStatus windows_console_status()
     return status;
 }
 
-inline std::string windows_console_status_line()
+inline std::string windows_console_status_line(
+    const std::string& requested_glyph_mode = "auto")
 {
-    const auto status = windows_console_status();
+    const auto status =
+        windows_console_status(requested_glyph_mode);
     std::ostringstream out;
     out << "Console: " << status.host
         << " | UTF-8 " << (status.utf8_output ? "PASS" : "FAIL")
@@ -153,31 +194,22 @@ inline std::string windows_console_status_line()
                 ? "side-by-side"
                 : "stacked")
         << " | glyphs="
-        << (status.block_garden_braille
-                ? "braille"
-                : "quadrant-block");
+        << glyph_mode_name(status.glyph_mode);
     return out.str();
 }
 
-inline std::string windows_render_probe_line()
+inline std::string windows_render_probe_line(
+    const std::string& requested_glyph_mode = "auto")
 {
-    // These are the same rendering primitives used by the TUI: box-drawing,
-    // block levels, Braille, and the current-point diamond. If this line looks
-    // malformed, the problem is the active Windows terminal/font rather than
-    // BLOCK GARDEN's layout math.
+    const auto mode = resolve_glyph_mode(requested_glyph_mode);
+    if (mode == GlyphMode::Ascii)
+        return "Render test: ASCII +-|#*";
+    if (mode == GlyphMode::Block)
+        return "Render test: SAFE BLOCK â â â â â";
     return "Render test: BOX ╭─╮│╰─╯  BLOCK ▁▂▃▄▅▆▇█  BRAILLE ⠁⠄⠸⢸⣾  NOW ◆";
 }
-
-inline bool block_garden_use_braille()
-{
-    return windows_console_status().block_garden_braille;
-}
-#else
-inline bool block_garden_use_braille()
-{
-    return true;
-}
 #endif
+
 
 inline const char* color_for_line(const std::string& line)
 {

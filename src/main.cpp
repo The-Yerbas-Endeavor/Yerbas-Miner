@@ -252,9 +252,11 @@ int main(int argc, char** argv)
 
 #ifdef _WIN32
         std::cout
-            << yerbas::console::detail::windows_console_status_line()
+            << yerbas::console::detail::windows_console_status_line(
+                   config.logging.glyph_mode)
             << '\n'
-            << yerbas::console::detail::windows_render_probe_line()
+            << yerbas::console::detail::windows_render_probe_line(
+                   config.logging.glyph_mode)
             << '\n';
 #endif
 
