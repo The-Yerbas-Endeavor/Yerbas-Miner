@@ -12,6 +12,10 @@ check_ipo_supported(RESULT YERBAS_IPO_SUPPORTED OUTPUT YERBAS_IPO_ERROR)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Source files intentionally contain Unicode terminal artwork. Force UTF-8
+    # source/execution handling so MSVC does not interpret UTF-8 bytes using the
+    # runner's legacy active code page.
+    add_compile_options(/utf-8)
 endif()
 
 option(YERBAS_ENABLE_CUDA "Build the NVIDIA CUDA backend" ON)
