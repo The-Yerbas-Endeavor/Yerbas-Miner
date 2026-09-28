@@ -385,22 +385,23 @@ void ensure_cn_setup_geometry(cudaStream_t stream,
         const bool validated_1080ti =
             props.major == 6 && props.minor == 1 &&
             std::string(props.name).find("GeForce GTX 1080 Ti") != std::string::npos;
-        const bool validated_1080ti_3584 =
-            validated_1080ti && count == 3584U;
-        const bool validated_1080ti_7168 =
-            validated_1080ti && count == 7168U;
-        selected = (validated_1080ti_3584 || validated_1080ti_7168) ? 32 : 128;
+
+        // The production phase campaign on both GTX 1080 Ti cards repeatedly
+        // selected setup=32 / final=128 across all six CN variants. Adaptive
+        // live batching changes the count, but not the device/phase behavior.
+        // Use that measured device-level setup fallback for uncached counts so
+        // 1792/2048/2560/... do not silently fall back to 128-thread setup.
+        selected = validated_1080ti ? 32 : 128;
+
         std::cout << "[GPU " << device_id
                   << "] CryptoNight phase geometry safe default | "
                   << cryptonight::config_value(VariantIndex).name
                   << " | phase=setup | batch=" << count
                   << " | threads=" << selected
                   << " | source="
-                  << (validated_1080ti_3584
-                          ? "validated-1080ti-3584"
-                          : (validated_1080ti_7168
-                                 ? "validated-1080ti-7168"
-                                 : "conservative"))
+                  << (validated_1080ti
+                          ? "validated-1080ti-device"
+                          : "conservative")
                   << " | startup-benchmark=off\n";
         return;
     }
