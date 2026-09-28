@@ -131,10 +131,13 @@ inline void apply(AppConfig& cfg)
     }
 
     std::cout << "\n🌿 Yerbas Miner — First Run\n\n"
-              << "No saved hardware tuning profile was found for this machine.\n\n"
-              << "Hardware autotuning benchmarks your CPU and GPU and selects\n"
-              << "settings optimized for this system. Progress is shown while it runs.\n\n"
-              << "Run hardware autotuning now? [Y/n]: " << std::flush;
+              << "Missing tuning profile:"
+              << (!cpu_profile ? " CPU" : "")
+              << (!gpu_profile ? " GPU" : "")
+              << "\n\n"
+              << "Hardware autotuning benchmarks only the missing component(s) and\n"
+              << "keeps any valid saved tuning that is already present.\n\n"
+              << "Run missing hardware autotuning now? [Y/n]: " << std::flush;
 
     std::string answer;
     std::getline(std::cin, answer);
@@ -143,10 +146,23 @@ inline void apply(AppConfig& cfg)
 
     if (yes) {
         clear_decline_marker();
-        cfg.miner.autotune = cfg.miner.cpu_enabled;
-        cfg.gpu.autotune = cfg.gpu.enabled && cfg.gpu.gpu_tune == "auto";
-        if (cfg.miner.cpu_enabled) cfg.miner.cpu_tune = "default";
-        std::cout << "[First run] hardware autotuning selected\n\n";
+
+        // Tune only what is actually missing. A valid GPU cache must never be
+        // discarded just because the CPU profile is absent (or vice versa).
+        cfg.miner.autotune =
+            cfg.miner.cpu_enabled && !cpu_profile;
+        cfg.gpu.autotune =
+            cfg.gpu.enabled &&
+            cfg.gpu.gpu_tune == "auto" &&
+            !gpu_profile;
+
+        if (cfg.miner.autotune)
+            cfg.miner.cpu_tune = "default";
+
+        std::cout << "[First run] hardware autotuning selected"
+                  << " | CPU=" << (cfg.miner.autotune ? "tune" : "cached")
+                  << " | GPU=" << (cfg.gpu.autotune ? "tune" : "cached")
+                  << "\n\n";
     } else {
         remember_decline();
         if (!cpu_profile) cfg.miner.cpu_tune = "off";
