@@ -59,6 +59,24 @@ inline std::size_t terminal_columns()
     return 120U;
 }
 
+inline std::size_t terminal_rows()
+{
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    const HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle != INVALID_HANDLE_VALUE && handle != nullptr &&
+        GetConsoleScreenBufferInfo(handle, &info)) {
+        const int height = info.srWindow.Bottom - info.srWindow.Top + 1;
+        if (height > 0) return static_cast<std::size_t>(height);
+    }
+#else
+    struct winsize size {};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_row > 0)
+        return static_cast<std::size_t>(size.ws_row);
+#endif
+    return 45U;
+}
+
 inline bool terminal_supports_color()
 {
     if (std::getenv("NO_COLOR") != nullptr) return false;
@@ -82,6 +100,7 @@ struct WindowsConsoleStatus {
     bool utf8_output{false};
     bool vt_enabled{false};
     std::size_t columns{0U};
+    std::size_t rows{0U};
     bool block_garden_side_by_side{false};
     bool block_garden_braille{false};
 };
@@ -92,6 +111,7 @@ inline WindowsConsoleStatus windows_console_status()
     status.interactive = _isatty(_fileno(stdout)) != 0;
     status.utf8_output = GetConsoleOutputCP() == CP_UTF8;
     status.columns = terminal_columns();
+    status.rows = terminal_rows();
     status.block_garden_side_by_side = status.columns >= 145U;
 
     const char* wt_session = std::getenv("WT_SESSION");
@@ -127,7 +147,7 @@ inline std::string windows_console_status_line()
     out << "Console: " << status.host
         << " | UTF-8 " << (status.utf8_output ? "PASS" : "FAIL")
         << " | VT " << (status.vt_enabled ? "PASS" : "FAIL")
-        << " | width=" << status.columns
+        << " | size=" << status.columns << 'x' << status.rows
         << " | BLOCK GARDEN="
         << (status.block_garden_side_by_side
                 ? "side-by-side"
@@ -135,7 +155,7 @@ inline std::string windows_console_status_line()
         << " | glyphs="
         << (status.block_garden_braille
                 ? "braille"
-                : "shaded-block");
+                : "quadrant-block");
     return out.str();
 }
 
