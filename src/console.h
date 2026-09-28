@@ -75,6 +75,61 @@ inline bool terminal_supports_color()
 #endif
 }
 
+#ifdef _WIN32
+struct WindowsConsoleStatus {
+    std::string host{"unknown"};
+    bool interactive{false};
+    bool utf8_output{false};
+    bool vt_enabled{false};
+    std::size_t columns{0U};
+    bool block_garden_side_by_side{false};
+};
+
+inline WindowsConsoleStatus windows_console_status()
+{
+    WindowsConsoleStatus status;
+    status.interactive = _isatty(_fileno(stdout)) != 0;
+    status.utf8_output = GetConsoleOutputCP() == CP_UTF8;
+    status.columns = terminal_columns();
+    status.block_garden_side_by_side = status.columns >= 145U;
+
+    const char* wt_session = std::getenv("WT_SESSION");
+    const char* term_program = std::getenv("TERM_PROGRAM");
+    if ((wt_session != nullptr && *wt_session != '\0') ||
+        (term_program != nullptr &&
+         std::string(term_program).find("Windows_Terminal") != std::string::npos)) {
+        status.host = "Windows Terminal";
+    } else {
+        status.host = "Windows Console Host";
+    }
+
+    HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
+        DWORD mode = 0;
+        if (GetConsoleMode(handle, &mode))
+            status.vt_enabled =
+                (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+    }
+
+    return status;
+}
+
+inline std::string windows_console_status_line()
+{
+    const auto status = windows_console_status();
+    std::ostringstream out;
+    out << "Console: " << status.host
+        << " | UTF-8 " << (status.utf8_output ? "PASS" : "FAIL")
+        << " | VT " << (status.vt_enabled ? "PASS" : "FAIL")
+        << " | width=" << status.columns
+        << " | BLOCK GARDEN="
+        << (status.block_garden_side_by_side
+                ? "side-by-side"
+                : "stacked");
+    return out.str();
+}
+#endif
+
 inline const char* color_for_line(const std::string& line)
 {
     if (line.find("[share] ACCEPTED") != std::string::npos) return kGreen;
