@@ -21,13 +21,41 @@ namespace first_run {
 inline std::filesystem::path cache_dir()
 {
 #ifdef _WIN32
-    if (const char* p = std::getenv("LOCALAPPDATA")) return std::filesystem::path(p) / "Yerbas-Miner" / "cache";
-    if (const char* p = std::getenv("USERPROFILE")) return std::filesystem::path(p) / ".cache" / "yerbas-miner";
+    if (const char* p = std::getenv("LOCALAPPDATA"); p && *p)
+        return std::filesystem::path(p) / "Yerbas-Miner" / "cache";
+    if (const char* p = std::getenv("USERPROFILE"); p && *p)
+        return std::filesystem::path(p) / ".cache" / "yerbas-miner";
 #else
-    if (const char* p = std::getenv("XDG_CACHE_HOME")) return std::filesystem::path(p) / "yerbas-miner";
-    if (const char* p = std::getenv("HOME")) return std::filesystem::path(p) / ".cache" / "yerbas-miner";
+    if (const char* p = std::getenv("XDG_CACHE_HOME"); p && *p)
+        return std::filesystem::path(p) / "yerbas-miner";
+    if (const char* p = std::getenv("HOME"); p && *p)
+        return std::filesystem::path(p) / ".cache" / "yerbas-miner";
 #endif
     return std::filesystem::path(".") / ".yerbas-miner-cache";
+}
+
+inline std::vector<std::filesystem::path> cache_search_dirs()
+{
+    std::vector<std::filesystem::path> dirs;
+    dirs.push_back(cache_dir());
+#ifdef _WIN32
+    if (const char* p = std::getenv("LOCALAPPDATA"); p && *p) {
+        const auto legacy = std::filesystem::path(p) / "Yerbas-Miner";
+        if (legacy != dirs.front()) dirs.push_back(legacy);
+    }
+    // Portable Windows builds have historically been run from an extracted
+    // Yerbas-Miner folder with tuning files beside the executable.
+    const auto portable = std::filesystem::current_path();
+    bool seen = false;
+    for (const auto& dir : dirs) {
+        if (dir == portable) {
+            seen = true;
+            break;
+        }
+    }
+    if (!seen) dirs.push_back(portable);
+#endif
+    return dirs;
 }
 
 inline bool interactive_stdin()
@@ -41,14 +69,15 @@ inline bool interactive_stdin()
 
 inline bool cache_has_prefix(const std::string& prefix)
 {
-    std::error_code ec;
-    const auto dir = cache_dir();
-    if (!std::filesystem::exists(dir, ec)) return false;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-        const std::string name = entry.path().filename().string();
-        if (name.rfind(prefix, 0) == 0) return true;
+    for (const auto& dir : cache_search_dirs()) {
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string name = entry.path().filename().string();
+            if (name.rfind(prefix, 0) == 0) return true;
+        }
     }
     return false;
 }
