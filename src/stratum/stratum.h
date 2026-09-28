@@ -359,6 +359,7 @@ private:
             // mistaken for an exact-rotation learned result.
             std::size_t persisted_batch{0};
             RotationFingerprint persisted_rotation_fingerprint{};
+            bool persisted_provisional{false};
         };
 
         // Optional live latency-targeted production experiment. The base batch
