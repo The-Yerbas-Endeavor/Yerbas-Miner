@@ -32,6 +32,56 @@ struct GpuTunePolicy {
     bool from_cache{false};
 };
 
+class GpuAutotuneHeartbeat {
+public:
+    GpuAutotuneHeartbeat(int device_id,
+                         unsigned int progress,
+                         unsigned int total,
+                         std::string detail)
+        : device_id_(device_id),
+          progress_(progress),
+          total_(total),
+          detail_(std::move(detail)),
+          started_(std::chrono::steady_clock::now()),
+          thread_([this]() {
+              unsigned int elapsed_seconds = 0U;
+              while (!done_.load()) {
+                  std::this_thread::sleep_for(std::chrono::seconds(1));
+                  if (done_.load()) break;
+                  ++elapsed_seconds;
+                  if ((elapsed_seconds % 10U) != 0U) continue;
+
+                  std::cout << "[GPU " << device_id_
+                            << "] GPU autotune working"
+                            << " | " << progress_ << '/' << total_
+                            << " | " << detail_
+                            << " | elapsed=" << elapsed_seconds << "s"
+                            << " | status=still testing"
+                            << '\n' << std::flush;
+              }
+          })
+    {
+    }
+
+    GpuAutotuneHeartbeat(const GpuAutotuneHeartbeat&) = delete;
+    GpuAutotuneHeartbeat& operator=(const GpuAutotuneHeartbeat&) = delete;
+
+    ~GpuAutotuneHeartbeat()
+    {
+        done_.store(true);
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    int device_id_{-1};
+    unsigned int progress_{0U};
+    unsigned int total_{0U};
+    std::string detail_;
+    std::chrono::steady_clock::time_point started_{};
+    std::atomic_bool done_{false};
+    std::thread thread_;
+};
+
 template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant(cudaStream_t stream,
                                       std::uint8_t* states,
