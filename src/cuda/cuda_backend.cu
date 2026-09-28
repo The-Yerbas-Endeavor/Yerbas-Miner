@@ -1,6 +1,9 @@
 #include "miner.h"
 
+#include <atomic>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 // The CUDA backend remains one translation unit while the stable implementation
 // is being modularized. Production startup is intentionally non-blocking:
