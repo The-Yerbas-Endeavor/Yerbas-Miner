@@ -3192,11 +3192,14 @@ void Client::report_stats(bool force)
 
         {
             const std::size_t panel_gap = 2U;
+            const bool side_by_side_panels =
+                inner_width >= 145U;
             const std::size_t mascot_panel_width =
-                inner_width >= 155U ? 46U :
-                (inner_width >= 145U ? 42U : 0U);
+                side_by_side_panels
+                    ? (inner_width >= 155U ? 46U : 42U)
+                    : 42U;
             const std::size_t hashrate_panel_width =
-                mascot_panel_width > 0U
+                side_by_side_panels
                     ? inner_width - mascot_panel_width - panel_gap
                     : inner_width;
 
@@ -3960,38 +3963,45 @@ void Client::report_stats(bool force)
                                mascot_rows,
                                mascot_panel_width);
 
-                const std::size_t rows =
-                    std::max(hashrate_box.size(),
-                             mascot_box.size());
+                if (side_by_side_panels) {
+                    const std::size_t rows =
+                        std::max(hashrate_box.size(),
+                                 mascot_box.size());
 
-                for (std::size_t i = 0U; i < rows; ++i) {
-                    std::string left =
-                        i < hashrate_box.size()
-                            ? hashrate_box[i]
-                            : std::string(
-                                  hashrate_panel_width, ' ');
-                    std::string right =
-                        i < mascot_box.size()
-                            ? mascot_box[i]
-                            : std::string(
-                                  mascot_panel_width, ' ');
+                    for (std::size_t i = 0U; i < rows; ++i) {
+                        std::string left =
+                            i < hashrate_box.size()
+                                ? hashrate_box[i]
+                                : std::string(
+                                      hashrate_panel_width, ' ');
+                        std::string right =
+                            i < mascot_box.size()
+                                ? mascot_box[i]
+                                : std::string(
+                                      mascot_panel_width, ' ');
 
-                    const std::size_t left_width =
-                        display_width(left);
-                    if (left_width < hashrate_panel_width)
-                        left.append(
-                            hashrate_panel_width - left_width,
-                            ' ');
+                        const std::size_t left_width =
+                            display_width(left);
+                        if (left_width < hashrate_panel_width)
+                            left.append(
+                                hashrate_panel_width - left_width,
+                                ' ');
 
-                    frame
-                        << left
-                        << std::string(panel_gap, ' ')
-                        << right
-                        << '\n';
+                        frame
+                            << left
+                            << std::string(panel_gap, ' ')
+                            << right
+                            << '\n';
+                    }
+                } else {
+                    // Narrow terminals (common with Windows PowerShell/conhost)
+                    // keep the exact same 40-column garden artwork by stacking
+                    // it below the hashrate panel instead of suppressing it.
+                    for (const auto& row : hashrate_box)
+                        frame << row << '\n';
+                    for (const auto& row : mascot_box)
+                        frame << row << '\n';
                 }
-            } else {
-                for (const auto& row : hashrate_box)
-                    frame << row << '\n';
             }
         }
 
