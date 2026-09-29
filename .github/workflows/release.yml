@@ -10,6 +10,11 @@ on:
         description: 'Release version to create (e.g. 1.0.0.5)'
         required: true
         type: string
+      source_ref:
+        description: 'Branch/ref to release'
+        required: true
+        default: 'feature/console-ui-hashrate'
+        type: string
 
 permissions:
   contents: write
@@ -28,11 +33,15 @@ jobs:
     steps:
       - name: Checkout release source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
+          fetch-depth: 0
       - name: Prepare requested version
         id: version
         shell: bash
         env:
           MANUAL_VERSION: ${{ inputs.version }}
+          MANUAL_SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euxo pipefail
 
@@ -44,8 +53,17 @@ jobs:
 
           [[ "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
+          test -f VERSION
           source_version="$(tr -d '\r\n' < VERSION)"
-          release_sha="$GITHUB_SHA"
+          release_sha="$(git rev-parse HEAD)"
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            test -n "$MANUAL_SOURCE_REF"
+            if git show-ref --verify --quiet "refs/tags/$MANUAL_SOURCE_REF"; then
+              echo "ERROR: manual source_ref must be a branch, not a tag: $MANUAL_SOURCE_REF" >&2
+              exit 1
+            fi
+          fi
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$source_version" != "$requested_version" ]; then
             printf '%s\n' "$requested_version" > VERSION
@@ -53,7 +71,7 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add VERSION
             git commit -m "Set Yerbas Miner version $requested_version"
-            git push origin "HEAD:$GITHUB_REF_NAME"
+            git push origin "HEAD:$MANUAL_SOURCE_REF"
             release_sha="$(git rev-parse HEAD)"
           else
             test "$source_version" = "$requested_version"
@@ -160,10 +178,12 @@ jobs:
           mkdir -p "$out"
           cp build-cuda/yerbas-miner "$out/yerbas-miner"
           cp README.md config.example.json VERSION "$out/"
+          scheduler_revision="$(sed -n 's/^set(YERBAS_SCHEDULER_REVISION "\([^"]*\)")/\1/p' CMakeLists.txt | head -1)"
+          test -n "$scheduler_revision"
           {
             echo "Yerbas Miner $RELEASE_VERSION"
             echo "Commit: $RELEASE_SHA"
-            echo "Scheduler: remaining-time-v1"
+            echo "Scheduler: $scheduler_revision"
             echo "Platform: Linux CUDA x86_64"
             echo "CUDA Toolkit: 12.8.1"
           } > "$out/BUILD-INFO.txt"
@@ -218,10 +238,12 @@ jobs:
           mkdir -p "$out"
           cp build-arm64/yerbas-miner "$out/yerbas-miner"
           cp README.md config.example.json VERSION "$out/"
+          scheduler_revision="$(sed -n 's/^set(YERBAS_SCHEDULER_REVISION "\([^"]*\)")/\1/p' CMakeLists.txt | head -1)"
+          test -n "$scheduler_revision"
           {
             echo "Yerbas Miner $RELEASE_VERSION"
             echo "Commit: $RELEASE_SHA"
-            echo "Scheduler: remaining-time-v1"
+            echo "Scheduler: $scheduler_revision"
             echo "Platform: Linux ARM64"
             echo "GPU backend: CPU-only build"
           } > "$out/BUILD-INFO.txt"
@@ -303,7 +325,10 @@ jobs:
           Copy-Item README.md "$out/README.md"
           Copy-Item config.example.json "$out/config.example.json"
           Copy-Item VERSION "$out/VERSION"
-          @("Yerbas Miner $env:RELEASE_VERSION","Commit: $env:RELEASE_SHA","Scheduler: remaining-time-v1","Platform: Windows CUDA x86_64","CUDA Toolkit: 12.8.1") | Set-Content "$out/BUILD-INFO.txt"
+          $cmake = Get-Content CMakeLists.txt -Raw
+          if ($cmake -notmatch 'set\(YERBAS_SCHEDULER_REVISION "([^"]+)"\)') { throw 'Could not resolve scheduler revision' }
+          $schedulerRevision = $Matches[1]
+          @("Yerbas Miner $env:RELEASE_VERSION","Commit: $env:RELEASE_SHA","Scheduler: $schedulerRevision","Platform: Windows CUDA x86_64","CUDA Toolkit: 12.8.1") | Set-Content "$out/BUILD-INFO.txt"
           Compress-Archive -Path "$out/*" -DestinationPath 'dist/yerbas-miner-windows-cuda-x86_64.zip'
       - name: Upload Windows release candidate
         uses: actions/upload-artifact@v4
@@ -331,6 +356,7 @@ jobs:
           test -f dist/yerbas-miner-linux-cuda-x86_64.zip
           test -f dist/yerbas-miner-windows-cuda-x86_64.zip
           test -f dist/yerbas-miner-linux-arm64.zip
+          test "$(find dist -maxdepth 1 -type f -name 'yerbas-miner-*.zip' | wc -l)" -eq 3
           sha256sum dist/*.zip | tee dist/SHA256SUMS.txt
       - name: Create tag and publish release after all builds succeed
         env:
