@@ -1442,6 +1442,8 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     if (memory.probe_pending &&
         result.hash_count == memory.probe_batch) {
         constexpr double kProbeMinGain = 0.0100;
+        constexpr double kProbeMarginalGain = 0.0050;
+        constexpr std::uint64_t kMarginalWinsRequired = 3U;
         constexpr double kProbeHighGain = 0.0200;
         constexpr double kProbeNormalLatencyFactor = 1.10;
         constexpr double kProbeHighGainLatencyFactor = 1.15;
@@ -1453,11 +1455,62 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             gain >= kProbeHighGain
                 ? kProbeHighGainLatencyFactor
                 : kProbeNormalLatencyFactor;
-        const bool keep =
-            gain >= kProbeMinGain &&
+        const bool latency_ok =
             result.scan_ms <= target_ms * allowed_latency_factor;
+        const bool strong_keep =
+            gain >= kProbeMinGain && latency_ok;
+        const bool marginal_win =
+            gain >= kProbeMarginalGain &&
+            gain < kProbeMinGain &&
+            latency_ok;
 
-        if (!keep) {
+        if (marginal_win) {
+            if (memory.marginal_probe_batch != memory.probe_batch) {
+                memory.marginal_probe_batch = memory.probe_batch;
+                memory.marginal_probe_wins = 0U;
+                memory.marginal_probe_gain_sum = 0.0;
+            }
+            ++memory.marginal_probe_wins;
+            memory.marginal_probe_gain_sum += gain;
+        } else if (!strong_keep) {
+            memory.marginal_probe_batch = 0U;
+            memory.marginal_probe_wins = 0U;
+            memory.marginal_probe_gain_sum = 0.0;
+        }
+
+        const bool marginal_keep =
+            marginal_win &&
+            memory.marginal_probe_wins >= kMarginalWinsRequired;
+        const bool keep = strong_keep || marginal_keep;
+
+        if (marginal_win && !marginal_keep) {
+            const std::size_t rollback =
+                std::clamp(memory.probe_from_batch, floor, base);
+            worker.engine->set_active_batch_size(rollback);
+            std::cout << "[throughput-probe] GPU " << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                      << std::dec
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " batch=" << memory.probe_batch
+                      << " result=marginal-confirm"
+                      << " confirmation=" << memory.marginal_probe_wins
+                      << "/" << kMarginalWinsRequired
+                      << " hps=" << std::fixed << std::setprecision(2)
+                      << scan_hps
+                      << " baseline=" << memory.probe_baseline_hps
+                      << " gain_pct=" << (gain * 100.0)
+                      << " avg_gain_pct="
+                      << ((memory.marginal_probe_gain_sum /
+                           static_cast<double>(memory.marginal_probe_wins)) *
+                          100.0)
+                      << " scan_ms=" << std::setprecision(1)
+                      << result.scan_ms
+                      << " allowed_ms=" << target_ms * allowed_latency_factor
+                      << " -> " << rollback
+                      << "\n";
+            memory.probe_cooldown = 2U;
+        } else if (!keep) {
             const std::size_t rollback =
                 std::clamp(memory.probe_from_batch, floor, base);
             worker.engine->set_active_batch_size(rollback);
@@ -1496,6 +1549,10 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                       << " CN=" << cn_mask_names(result.cn_mask)
                       << " batch=" << memory.probe_batch
                       << " result=keep"
+                      << " reason="
+                      << (marginal_keep ? "repeat-marginal" : "strong")
+                      << " confirmations="
+                      << (marginal_keep ? memory.marginal_probe_wins : 1U)
                       << " hps=" << std::fixed << std::setprecision(2)
                       << scan_hps
                       << " baseline=" << memory.probe_baseline_hps
@@ -1508,6 +1565,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.proven_batch = memory.probe_batch;
             memory.proven_hps = scan_hps;
             memory.proven_latency_overruns = 0U;
+            memory.marginal_probe_batch = 0U;
+            memory.marginal_probe_wins = 0U;
+            memory.marginal_probe_gain_sum = 0.0;
 
             // A kept live probe is the best production measurement we have for
             // this exact GPU + rotation. Persist it immediately so a restart or
