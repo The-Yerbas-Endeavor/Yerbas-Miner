@@ -347,6 +347,13 @@ private:
             double rejected_probe_baseline_hps{0.0};
             std::uint64_t rejected_probe_stable_samples{0};
 
+            // Marginal throughput gains are easy to confuse with scan noise.
+            // Track repeat wins for the exact GPU + rotation and only promote
+            // a 0.5-1.0% gain after it reproduces three times.
+            std::size_t marginal_probe_batch{0};
+            std::uint64_t marginal_probe_wins{0};
+            double marginal_probe_gain_sum{0.0};
+
             // A batch that demonstrated a meaningful live H/s gain. Give it
             // modest latency hysteresis so a single noisy scan does not erase
             // a real throughput improvement.
