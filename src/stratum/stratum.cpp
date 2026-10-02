@@ -1508,6 +1508,41 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.proven_batch = memory.probe_batch;
             memory.proven_hps = scan_hps;
             memory.proven_latency_overruns = 0U;
+
+            // A kept live probe is the best production measurement we have for
+            // this exact GPU + rotation. Persist it immediately so a restart or
+            // later rotation recall does not fall back to the older, smaller
+            // batch. Keep the entry provisional until normal baseline sampling
+            // confirms it; provisional recalls are still latency-guarded on
+            // their first production scan.
+            save_live_batch_cache(
+                worker.hardware_key,
+                result.cn_mask,
+                result.rotation_fingerprint,
+                memory.probe_batch,
+                scan_hps,
+                result.scan_ms,
+                true,
+                1U);
+            memory.persisted_batch = memory.probe_batch;
+            memory.persisted_rotation_fingerprint =
+                result.rotation_fingerprint;
+            memory.persisted_provisional = true;
+            std::cout << "[latency-cache] GPU " << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(
+                             result.rotation_fingerprint)
+                      << std::dec
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " saved_batch=" << memory.probe_batch
+                      << " confidence=provisional"
+                      << " source=throughput-probe"
+                      << " samples=1"
+                      << " hps=" << std::fixed << std::setprecision(2)
+                      << scan_hps
+                      << " scan_ms=" << std::setprecision(1)
+                      << result.scan_ms
+                      << "\n";
             if (memory.rejected_probe_batch != 0U &&
                 memory.probe_batch >= memory.rejected_probe_batch) {
                 memory.rejected_probe_batch = 0U;
