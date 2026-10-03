@@ -395,7 +395,14 @@ double gpu_latency_target_ms()
 {
     static const double target = []() {
         const char* value = std::getenv("YERBAS_GPU_LATENCY_TARGET_MS");
-        if (value == nullptr || *value == '\0') return 3500.0;
+        // Production defaults to the previously validated GTX 1080 Ti
+        // stale-aware batch policy.  The global 3.5 s latency controller was
+        // introduced as an experiment and can shrink ordinary 3584/5376/7168
+        // rotations that the validated production policy intentionally leaves
+        // alone.  Keep adaptive latency/probe learning opt-in so normal mining
+        // does not trade away raw H/s.  Experiments may still enable it with
+        // YERBAS_GPU_LATENCY_TARGET_MS=3500.
+        if (value == nullptr || *value == '\0') return 0.0;
         char* end = nullptr;
         const double parsed = std::strtod(value, &end);
         if (end == value || *end != '\0' || !(parsed >= 1000.0 && parsed <= 10000.0))
