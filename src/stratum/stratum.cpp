@@ -1621,11 +1621,25 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.baseline_batch = result.hash_count;
             memory.baseline_hps_ewma = scan_hps;
             memory.baseline_samples = 1U;
-        } else {
+        } else if (!marginal_win) {
+            // A hard losing probe invalidates the old comparison baseline and
+            // must rebuild it before another attempt.
             memory.baseline_batch =
                 std::clamp(memory.probe_from_batch, floor, base);
             memory.baseline_samples = 0U;
             memory.baseline_hps_ewma = 0.0;
+        } else {
+            // A marginal confirmation deliberately rolls back to the exact
+            // baseline batch for another clean comparison. Preserve the clean
+            // batch-local baseline that launched this probe. Resetting it to
+            // zero here causes the next EWMA samples to start from zero and
+            // makes the same probe appear to gain 10%+ even when throughput is
+            // unchanged.
+            memory.baseline_batch =
+                std::clamp(memory.probe_from_batch, floor, base);
+            memory.baseline_hps_ewma = memory.probe_baseline_hps;
+            memory.baseline_samples =
+                std::max<std::uint64_t>(memory.baseline_samples, 2U);
         }
 
         memory.probe_pending = false;
