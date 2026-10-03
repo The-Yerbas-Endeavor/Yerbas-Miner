@@ -1450,7 +1450,12 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         constexpr double kProbeMinGain = 0.0100;
         constexpr double kProbeMarginalGain = 0.0050;
         constexpr std::uint64_t kMarginalWinsRequired = 3U;
-        constexpr double kProbeHighGain = 0.0200;
+        // Once a probe has a real >=1% throughput win, allow the
+        // slightly wider 15% latency envelope. Production's remaining-time
+        // scheduler still shortens batches near likely job transitions, so
+        // this captures real H/s wins that land just above the normal 3.85s
+        // probe ceiling without relaxing the 0.5-1.0% marginal path.
+        constexpr double kProbeHighGain = 0.0100;
         constexpr double kProbeNormalLatencyFactor = 1.10;
         constexpr double kProbeHighGainLatencyFactor = 1.15;
         const double gain =
