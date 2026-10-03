@@ -1409,7 +1409,13 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         memory.probe_pending &&
         result.hash_count == memory.probe_batch;
     if (!is_probe_result) {
-        if (memory.baseline_batch != result.hash_count) {
+        if (memory.baseline_batch != result.hash_count ||
+            memory.baseline_samples == 0U ||
+            memory.baseline_hps_ewma <= 0.0) {
+            // A reset baseline must be re-seeded from the first clean scan.
+            // Keeping the same batch id with samples=0 and hps=0 must not run
+            // through the EWMA path, or the baseline starts at only 35% of
+            // real throughput and creates false multi-percent probe wins.
             memory.baseline_batch = result.hash_count;
             memory.baseline_hps_ewma = scan_hps;
             memory.baseline_samples = 1U;
