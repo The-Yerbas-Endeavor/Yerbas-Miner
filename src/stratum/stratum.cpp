@@ -604,6 +604,41 @@ void save_live_batch_cache(const std::string& hardware_key,
         {"samples", samples}
     };
 
+    // Keep a conservative CN-family seed in addition to the exact-rotation
+    // winner.  Exact fingerprints are still authoritative, but previously
+    // unseen rotations that use the same CryptoNight family should not have
+    // to start from the full class/variant ceiling and spend a 6-8 second
+    // first scan discovering that the production batch belongs near 3.5s.
+    // Blend only confirmed operating points so one provisional sample cannot
+    // drag the family seed around.
+    if (!provisional) {
+        constexpr std::size_t kBatchQuantum = 256U;
+        const auto family_key =
+            legacy_live_batch_cache_key(hardware_key, cn_mask);
+        std::size_t family_batch = batch;
+        auto family_it = cache.find(family_key);
+        if (family_it != cache.end() && family_it->is_object()) {
+            const auto old_batch =
+                static_cast<std::size_t>(
+                    family_it->value("batch", 0ULL));
+            if (old_batch >= kBatchQuantum) {
+                family_batch =
+                    (old_batch * 3U + batch) / 4U;
+                family_batch =
+                    (family_batch / kBatchQuantum) * kBatchQuantum;
+                family_batch =
+                    std::max(kBatchQuantum, family_batch);
+            }
+        }
+        cache[family_key] = {
+            {"batch", family_batch},
+            {"hps", hps},
+            {"scan_ms", scan_ms},
+            {"confidence", "confirmed-family-seed"},
+            {"samples", samples}
+        };
+    }
+
     std::ofstream out(
         live_batch_cache_path(),
         std::ios::out | std::ios::trunc);
