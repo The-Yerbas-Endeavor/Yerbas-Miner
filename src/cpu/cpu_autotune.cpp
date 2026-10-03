@@ -19,7 +19,12 @@
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuPolicyRevision = 6;
+// Rev 7 intentionally invalidates older production caches.  Rev 6 can
+// preserve an early all-scalar, physical-first policy (~406 H/s on the
+// reference 6-worker host) even though the later validated full search found
+// a materially faster unpinned mixed-width plan.  Retune once, then cache the
+// newly measured production winner normally.
+constexpr int kCpuPolicyRevision = 7;
 constexpr double kCnLocalRequiredGain = 1.03;
 constexpr double kWholePlanWidthRequiredGain = 1.005;
 constexpr double kAffinityRequiredGain = 1.02;
