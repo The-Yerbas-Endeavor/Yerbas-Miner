@@ -308,6 +308,12 @@ private:
         // learned batch once the job outlives that window.
         std::uint32_t transition_shape_zone{0};
 
+        // On each new Stratum job, one GPU launches a single shorter opening
+        // scan before returning to its learned production batch. This gives
+        // short-lived jobs a chance to complete useful GPU work without
+        // globally shrinking the validated sustained-production batches.
+        bool opening_scan_shape_pending{false};
+
         // Opt-in production-latency accounting. Updated only by the Stratum
         // scheduling thread so no atomics are needed.
         std::uint64_t telemetry_batches_launched{0};
