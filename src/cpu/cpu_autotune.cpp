@@ -19,11 +19,11 @@
 namespace yerbas::cpu {
 namespace {
 
-// Rev 8 invalidates the pre-confirmation production cache. Rev 7 could still
-// contain a winner selected from a single noisy first-pass measurement.  The
-// current tuner confirms the three strongest plans with repeated
-// whole-GhostRider measurements before promoting one to production.
-constexpr int kCpuPolicyRevision = 8;
+// Rev 9 invalidates short-sample CPU policies. Earlier revisions timed only
+// one tiny worker batch per representative header, so scheduler noise could
+// move a candidate by 100+ H/s and promote a false winner. Rev 9 measures each
+// header for a minimum wall-clock window before ranking or confirming plans.
+constexpr int kCpuPolicyRevision = 9;
 constexpr double kCnLocalRequiredGain = 1.03;
 constexpr double kWholePlanWidthRequiredGain = 1.005;
 constexpr double kAffinityRequiredGain = 1.02;
@@ -157,11 +157,34 @@ double benchmark_header(const Plan& plan,
 
     (void)pool.run(header, impossible_target, 0x51000000U,
                    std::min(4U, std::max(1U, plan.batch)));
+
+    // A single small batch is far too short for a reliable production ranking:
+    // OS scheduling and CPU-frequency transients can dominate the sample.
+    // Accumulate whole-GhostRider work for at least 300 ms per representative
+    // header, while keeping a finite guard for unexpectedly slow candidates.
+    constexpr double kMinimumMeasurementSeconds = 0.300;
+    constexpr unsigned int kMaximumMeasurementRuns = 128U;
     const auto begin = std::chrono::steady_clock::now();
-    (void)pool.run(header, impossible_target, 0x52000000U, plan.batch);
+    std::uint64_t measured_hashes = 0U;
+    unsigned int run = 0U;
+    for (; run < kMaximumMeasurementRuns; ++run) {
+        if (stopped(stop)) return 0.0;
+        const std::uint32_t nonce =
+            0x52000000U + static_cast<std::uint32_t>(
+                run * plan.workers * plan.batch);
+        (void)pool.run(header, impossible_target, nonce, plan.batch);
+        measured_hashes +=
+            static_cast<std::uint64_t>(plan.workers) * plan.batch;
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed =
+            std::chrono::duration<double>(now - begin).count();
+        if (elapsed >= kMinimumMeasurementSeconds) break;
+    }
     const auto end = std::chrono::steady_clock::now();
     const double seconds = std::chrono::duration<double>(end - begin).count();
-    return seconds > 0.0 ? static_cast<double>(plan.workers) * plan.batch / seconds : 0.0;
+    return seconds > 0.0
+        ? static_cast<double>(measured_hashes) / seconds
+        : 0.0;
 }
 
 double benchmark_plan(const Plan& plan,
