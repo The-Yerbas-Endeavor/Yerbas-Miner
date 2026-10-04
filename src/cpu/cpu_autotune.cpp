@@ -414,6 +414,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | metric=end-to-end H/s\n";
 
     TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, AffinityPolicy::Unpinned, 0.0, false, false};
+    std::vector<std::pair<Plan, double>> plan_scores;
+    plan_scores.reserve(plans.size());
     std::size_t plan_index = 0;
     for (const auto& plan : plans) {
         if (stopped(stop)) { best.interrupted = true; return best; }
@@ -422,6 +424,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
                   << " | workers=" << plan.workers << " | batch=" << plan.batch << " | testing..." << std::flush;
         set_runtime_affinity_policy(AffinityPolicy::Unpinned);
         const double hps = benchmark_plan(plan, scalar_widths, stop);
+        plan_scores.push_back({plan, hps});
         if (hps > best.throughput_hps) {
             best.threads = plan.workers;
             best.batch = plan.batch;
@@ -432,6 +435,37 @@ TuneResult production_autotune(unsigned int hardware_threads,
     }
 
     if (stopped(stop)) { best.interrupted = true; return best; }
+
+    // The one-pass search is intentionally broad, but a single noisy sample
+    // must not choose the production CPU plan.  Confirm the three strongest
+    // plans with repeated whole-GhostRider measurements and select by median.
+    // This prevents transient 400+ H/s spikes from promoting a plan that later
+    // validates near 300 H/s.
+    std::sort(plan_scores.begin(), plan_scores.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    const std::size_t confirm_count = std::min<std::size_t>(3U, plan_scores.size());
+    double confirmed_best_hps = 0.0;
+    Plan confirmed_best{best.threads, best.batch};
+    for (std::size_t i = 0; i < confirm_count; ++i) {
+        const auto& candidate = plan_scores[i].first;
+        set_runtime_affinity_policy(AffinityPolicy::Unpinned);
+        const double confirmed =
+            benchmark_plan_repeated(candidate, scalar_widths, 3U, stop);
+        std::cout << "[CPU tune] baseline confirm " << (i + 1U) << '/' << confirm_count
+                  << " | workers=" << candidate.workers
+                  << " | batch=" << candidate.batch
+                  << " | median=" << std::fixed << std::setprecision(2)
+                  << confirmed << " H/s" << std::defaultfloat << '\n';
+        if (confirmed > confirmed_best_hps) {
+            confirmed_best_hps = confirmed;
+            confirmed_best = candidate;
+        }
+    }
+    if (confirmed_best_hps > 0.0) {
+        best.threads = confirmed_best.workers;
+        best.batch = confirmed_best.batch;
+        best.throughput_hps = confirmed_best_hps;
+    }
 
     const Plan selected_plan{best.threads, best.batch};
     CnWidthPolicy widths = scalar_widths;
