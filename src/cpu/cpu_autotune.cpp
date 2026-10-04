@@ -19,12 +19,11 @@
 namespace yerbas::cpu {
 namespace {
 
-// Rev 7 intentionally invalidates older production caches.  Rev 6 can
-// preserve an early all-scalar, physical-first policy (~406 H/s on the
-// reference 6-worker host) even though the later validated full search found
-// a materially faster unpinned mixed-width plan.  Retune once, then cache the
-// newly measured production winner normally.
-constexpr int kCpuPolicyRevision = 7;
+// Rev 8 invalidates the pre-confirmation production cache. Rev 7 could still
+// contain a winner selected from a single noisy first-pass measurement.  The
+// current tuner confirms the three strongest plans with repeated
+// whole-GhostRider measurements before promoting one to production.
+constexpr int kCpuPolicyRevision = 8;
 constexpr double kCnLocalRequiredGain = 1.03;
 constexpr double kWholePlanWidthRequiredGain = 1.005;
 constexpr double kAffinityRequiredGain = 1.02;
@@ -565,7 +564,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | affinity=" << affinity_policy_name(best.affinity)
               << " | parity=" << (parity_ok ? "PASS" : "FAIL-scalar")
               << " | throughput=" << std::fixed << std::setprecision(2) << best.throughput_hps << " H/s"
-              << " | cache=cpu-policy-v6" << std::defaultfloat << '\n';
+              << " | cache=cpu-policy-v" << kCpuPolicyRevision << std::defaultfloat << '\n';
     return best;
 }
 
