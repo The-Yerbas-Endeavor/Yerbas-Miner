@@ -3,6 +3,7 @@
 #include "cpu/cpu_autotune.h"
 #include "cpu/cpu_features.h"
 #include "cpu/cpu_worker_pool.h"
+#include "console_file_log.h"
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
 
@@ -188,11 +189,16 @@ int Miner::run()
                       << " | lanes=1\n";
         } else {
             std::cout << "[AUTOTUNE] CPU phase starting\n";
-            const auto tune = cpu::production_autotune(hw_threads,
-                                                       config_.miner.threads,
-                                                       config_.miner.cpu_batch,
-                                                       config_.miner.cpu_tune,
-                                                       &g_mining_stop_requested);
+            const auto tune = cpu::production_autotune(
+                hw_threads,
+                config_.miner.threads,
+                config_.miner.cpu_batch,
+                config_.miner.cpu_tune,
+                &g_mining_stop_requested,
+                [](const cpu::TuneProgress& update) {
+                    console::render_startup_tuning_progress(
+                        update.phase, update.detail, update.current, update.total);
+                });
             if (tune.interrupted || stop_requested()) {
                 std::cout << "[CPU tune] interrupted by user\n";
                 return 130;
