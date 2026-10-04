@@ -390,7 +390,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
                                unsigned int configured_threads,
                                unsigned int configured_batch,
                                const std::string& mode,
-                               const std::atomic_bool* stop)
+                               const std::atomic_bool* stop,
+                               const TuneProgressCallback& progress)
 {
     hardware_threads = std::max(1U, hardware_threads);
     const unsigned int ceiling = configured_threads == 0U
@@ -407,6 +408,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
     const auto path = cache_path(hardware_threads, ceiling, mode);
     unsigned int source_ceiling = ceiling;
     if (load_compatible_cache(hardware_threads, ceiling, mode, cached, source_ceiling)) {
+        if (progress)
+            progress({"CPU tuning", "validated production cache loaded", 1U, 1U});
         set_runtime_cn_widths(cached.cn_widths);
         set_runtime_affinity_policy(cached.affinity);
         if (source_ceiling != ceiling) save_cache(path, cached);
@@ -424,6 +427,9 @@ TuneResult production_autotune(unsigned int hardware_threads,
 
     const auto topology = detect_cpu_topology();
     const auto plans = plans_for(ceiling, fallback_batch, mode);
+    if (progress)
+        progress({"CPU baseline search", "testing worker/batch production plans",
+                  0U, static_cast<unsigned int>(plans.size())});
     std::cout << "[CPU topology] logical=" << topology.logical_cpus
               << " | physical=" << topology.physical_cores
               << " | detected=" << (topology.available ? "yes" : "no") << '\n';
@@ -442,6 +448,13 @@ TuneResult production_autotune(unsigned int hardware_threads,
     for (const auto& plan : plans) {
         if (stopped(stop)) { best.interrupted = true; return best; }
         ++plan_index;
+        if (progress) {
+            std::ostringstream detail;
+            detail << "workers=" << plan.workers << " batch=" << plan.batch;
+            progress({"CPU baseline search", detail.str(),
+                      static_cast<unsigned int>(plan_index),
+                      static_cast<unsigned int>(plans.size())});
+        }
         std::cout << "[CPU tune] baseline " << plan_index << '/' << plans.size()
                   << " | workers=" << plan.workers << " | batch=" << plan.batch << " | testing..." << std::flush;
         set_runtime_affinity_policy(AffinityPolicy::Unpinned);
@@ -466,6 +479,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
     std::sort(plan_scores.begin(), plan_scores.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
     const std::size_t confirm_count = std::min<std::size_t>(3U, plan_scores.size());
+    if (progress)
+        progress({"CPU winner confirmation", "retesting strongest production plans", 0U, 0U});
     double confirmed_best_hps = 0.0;
     Plan confirmed_best{best.threads, best.batch};
     for (std::size_t i = 0; i < confirm_count; ++i) {
@@ -496,6 +511,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
     for (std::size_t variant = 0; variant < widths.size(); ++variant) {
         if (stopped(stop)) { best.interrupted = true; return best; }
         const char* name = ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant));
+        if (progress)
+            progress({"CPU CryptoNight qualification", name, 0U, 0U});
         const auto probe = probe_cn_widths(static_cast<std::uint8_t>(variant), stop);
         std::cout << "[CPU CN probe] " << name
                   << " | 1way=" << std::fixed << std::setprecision(2) << probe.scalar_hps
@@ -543,6 +560,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
 
 #if defined(__linux__)
     if (topology.available && selected_plan.workers <= topology.logical_cpus) {
+        if (progress)
+            progress({"CPU affinity validation", "unpinned vs physical-first", 0U, 0U});
         std::cout << "[CPU affinity] A/B unpinned vs physical-first x" << kAffinityProbePasses << "...\n";
         set_runtime_affinity_policy(AffinityPolicy::Unpinned);
         const double unpinned_hps = benchmark_plan_repeated(selected_plan, widths, kAffinityProbePasses, stop);
@@ -561,6 +580,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
 
     set_runtime_cn_widths(best.cn_widths);
     set_runtime_affinity_policy(best.affinity);
+    if (progress)
+        progress({"CPU final validation", "end-to-end throughput + parity", 0U, 0U});
     const bool parity_ok = parity_width_policy(best.cn_widths);
     std::cout << "[CPU tune] final validation | end-to-end + parity..." << std::flush;
     const double tuned_hps = benchmark_plan_repeated(selected_plan, best.cn_widths, 3U, stop);
