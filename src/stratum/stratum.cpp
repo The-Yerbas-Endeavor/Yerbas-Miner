@@ -2305,8 +2305,16 @@ void Client::upload_gpu_job()
                   << " adaptive_peers=" << (gpu_workers_.size() - 1U) << '\n';
     }
 
+    const std::size_t opening_shape_slot =
+        gpu_workers_.empty()
+            ? 0U
+            : static_cast<std::size_t>(
+                  MiningJob::generation() %
+                  static_cast<std::uint64_t>(gpu_workers_.size()));
+
     for (std::size_t i = 0; i < gpu_workers_.size(); ++i) {
         auto& worker = gpu_workers_[i];
+        worker.opening_scan_shape_pending = (i == opening_shape_slot);
         if (crossover_cap > 0U)
             worker.engine->set_stale_batch_cap(
                 i == crossover_slot ? crossover_cap : 0U,
@@ -2473,11 +2481,28 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
     auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
         const std::size_t learned_batch = worker.engine->batch_size();
         bool transition_shaped = false;
-        const std::size_t effective_batch =
+        std::size_t effective_batch =
             transition_batch_for_worker(
                 worker,
                 learned_batch,
                 transition_shaped);
+
+        if (worker.opening_scan_shape_pending && learned_batch >= 2048U) {
+            constexpr std::size_t kOpeningQuantum = 256U;
+            constexpr std::size_t kOpeningMinBatch = 1024U;
+            std::size_t opening_batch =
+                (learned_batch / 2U / kOpeningQuantum) * kOpeningQuantum;
+            opening_batch = std::max(kOpeningMinBatch, opening_batch);
+            effective_batch = std::min(effective_batch, opening_batch);
+            transition_shaped = effective_batch < learned_batch;
+            worker.opening_scan_shape_pending = false;
+            std::cout << "[opening-scan] GPU " << worker.device_id
+                      << " batch=" << learned_batch
+                      << " -> " << effective_batch
+                      << " | one-shot job-start hedge\n";
+        } else {
+            worker.opening_scan_shape_pending = false;
+        }
 
         const auto count =
             static_cast<std::uint64_t>(effective_batch);
@@ -2595,11 +2620,28 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
     auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
         const std::size_t learned_batch = worker.engine->batch_size();
         bool transition_shaped = false;
-        const std::size_t effective_batch =
+        std::size_t effective_batch =
             transition_batch_for_worker(
                 worker,
                 learned_batch,
                 transition_shaped);
+
+        if (worker.opening_scan_shape_pending && learned_batch >= 2048U) {
+            constexpr std::size_t kOpeningQuantum = 256U;
+            constexpr std::size_t kOpeningMinBatch = 1024U;
+            std::size_t opening_batch =
+                (learned_batch / 2U / kOpeningQuantum) * kOpeningQuantum;
+            opening_batch = std::max(kOpeningMinBatch, opening_batch);
+            effective_batch = std::min(effective_batch, opening_batch);
+            transition_shaped = effective_batch < learned_batch;
+            worker.opening_scan_shape_pending = false;
+            std::cout << "[opening-scan] GPU " << worker.device_id
+                      << " batch=" << learned_batch
+                      << " -> " << effective_batch
+                      << " | one-shot job-start hedge\n";
+        } else {
+            worker.opening_scan_shape_pending = false;
+        }
 
         const auto count =
             static_cast<std::uint64_t>(effective_batch);
