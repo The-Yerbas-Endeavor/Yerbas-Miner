@@ -4,6 +4,7 @@
 #include "cpu/cpu_worker_pool.h"
 
 #include <atomic>
+#include <functional>
 #include <string>
 
 namespace yerbas::cpu {
@@ -19,6 +20,15 @@ struct TuneResult {
     bool interrupted{false};
 };
 
+struct TuneProgress {
+    std::string phase;
+    std::string detail;
+    unsigned int current{0};
+    unsigned int total{0};
+};
+
+using TuneProgressCallback = std::function<void(const TuneProgress&)>;
+
 // Production CPU tuner. It selects worker/batch baseline, qualifies scalar vs
 // genuine 2-way execution independently for every CryptoNight variant using
 // repeated measurements + exact parity, then benchmarks Linux topology policy.
@@ -27,6 +37,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
                                unsigned int configured_threads,
                                unsigned int configured_batch,
                                const std::string& mode,
-                               const std::atomic_bool* stop_requested = nullptr);
+                               const std::atomic_bool* stop_requested = nullptr,
+                               const TuneProgressCallback& progress = {});
 
 } // namespace yerbas::cpu
