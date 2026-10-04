@@ -44,6 +44,12 @@ bool diagnostics_enabled()
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+bool runtime_learning_enabled()
+{
+    const char* value = std::getenv("YERBAS_CPU_RUNTIME_LEARN");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 void write_nonce(std::array<std::uint8_t, 80>& header, std::uint32_t nonce)
 {
     header[76] = static_cast<std::uint8_t>(nonce);
@@ -541,7 +547,7 @@ struct WorkerPool::Impl {
             }
             target_le = active_target;
 
-            if (!tuning_measurement_mode()) {
+            if (!tuning_measurement_mode() && runtime_learning_enabled()) {
                 if (rotation_plan_locked && locked_fingerprint == active_fingerprint) {
                     worker_choice = {locked_workers, false, locked_selected_hps, locked_full_hps};
                     worker_plan_locked = true;
@@ -561,7 +567,7 @@ struct WorkerPool::Impl {
             active_workers = std::max(1U, std::min(threads, worker_choice.workers));
 
             active_widths = base_cn_widths;
-            if (!tuning_measurement_mode() && worker_plan_locked) {
+            if (!tuning_measurement_mode() && runtime_learning_enabled() && worker_plan_locked) {
                 if (width_plan_locked && locked_fingerprint == active_fingerprint) {
                     width_choice = {locked_widths, false, locked_width_selected_hps, locked_width_baseline_hps};
                     active_widths = locked_widths;
@@ -633,7 +639,8 @@ struct WorkerPool::Impl {
         const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
 
-        if (!tuning_measurement_mode() && !(stop != nullptr && stop->load(std::memory_order_relaxed))) {
+        if (!tuning_measurement_mode() && runtime_learning_enabled() &&
+            !(stop != nullptr && stop->load(std::memory_order_relaxed))) {
             FingerprintRuntimeSummary fp{};
             if (active_widths == base_cn_widths) {
                 fp = record_fingerprint_runtime(active_fingerprint,
