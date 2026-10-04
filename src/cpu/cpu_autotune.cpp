@@ -357,6 +357,18 @@ bool load_compatible_cache(unsigned int hardware_threads,
     return true;
 }
 
+void print_autotune_progress(const char* stage, std::size_t completed, std::size_t total)
+{
+    constexpr std::size_t width = 32;
+    total = std::max<std::size_t>(1, total);
+    completed = std::min(completed, total);
+    const std::size_t filled = completed * width / total;
+    const unsigned int percent = static_cast<unsigned int>(completed * 100 / total);
+    std::cout << "[AUTO TUNING] [";
+    for (std::size_t i = 0; i < width; ++i) std::cout << (i < filled ? '#' : '-');
+    std::cout << "] " << std::setw(3) << percent << "% | " << stage << '\n';
+}
+
 } // namespace
 
 TuneResult production_autotune(unsigned int hardware_threads,
@@ -409,6 +421,12 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | metric=end-to-end H/s\n";
 
     TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, AffinityPolicy::Unpinned, 0.0, false, false};
+    const std::size_t progress_total = plans.size() + scalar_widths.size() + 2U;
+    std::size_t progress_done = 0;
+    std::cout << "\nYERBAS MINER — AUTO TUNING\n"
+              << "Optimizing CPU settings for this system. Mining will begin automatically.\n";
+    print_autotune_progress("baseline search", progress_done, progress_total);
+
     std::size_t plan_index = 0;
     for (const auto& plan : plans) {
         if (stopped(stop)) { best.interrupted = true; return best; }
@@ -424,6 +442,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
         }
         std::cout << " done | " << std::fixed << std::setprecision(2) << hps
                   << " H/s | best=" << best.throughput_hps << " H/s" << std::defaultfloat << '\n';
+        ++progress_done;
+        print_autotune_progress("baseline search", progress_done, progress_total);
     }
 
     if (stopped(stop)) { best.interrupted = true; return best; }
@@ -474,6 +494,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
                 break;
             }
         }
+        ++progress_done;
+        print_autotune_progress("CryptoNight optimization", progress_done, progress_total);
     }
 
     best.cn_widths = widths;
@@ -498,6 +520,9 @@ TuneResult production_autotune(unsigned int hardware_threads,
     }
 #endif
 
+    ++progress_done;
+    print_autotune_progress("affinity selection", progress_done, progress_total);
+
     set_runtime_cn_widths(best.cn_widths);
     set_runtime_affinity_policy(best.affinity);
     const bool parity_ok = parity_width_policy(best.cn_widths);
@@ -515,6 +540,10 @@ TuneResult production_autotune(unsigned int hardware_threads,
     } else if (tuned_hps > 0.0) {
         best.throughput_hps = tuned_hps;
     }
+
+    ++progress_done;
+    print_autotune_progress("final validation", progress_done, progress_total);
+    std::cout << "[AUTO TUNING] complete — starting miner\n\n";
 
     save_cache(path, best);
     std::cout << "[CPU tune] selected"
