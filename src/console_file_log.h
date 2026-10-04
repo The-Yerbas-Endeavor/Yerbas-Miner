@@ -81,7 +81,12 @@ public:
         configure_input();
         dashboard_active_flag() = true;
         terminal_stdout_enabled() = false;
-        terminal_write("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
+        terminal_write(
+            "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H"
+            "YERBAS MINER\n"
+            "Starting up...\n\n"
+            "Preparing CPU/GPU production tuning and loading caches.\n"
+            "The mining dashboard will appear automatically when startup completes.\n");
         active_ = true;
     }
 
