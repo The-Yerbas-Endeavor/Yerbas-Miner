@@ -1006,8 +1006,37 @@ void Client::update_rotation_epoch()
     const std::uint64_t fingerprint = ghostrider::schedule_fingerprint(schedule);
     if (rotation_started_.time_since_epoch().count() != 0 && fingerprint == active_rotation_fingerprint_) return;
 
+    const auto now = std::chrono::steady_clock::now();
+    if (rotation_started_.time_since_epoch().count() != 0) {
+        const double seconds =
+            std::chrono::duration<double>(now - rotation_started_).count();
+        if (seconds > 0.0) {
+            std::ostringstream line;
+            line << "[rotation perf] rotation=" << std::hex
+                 << static_cast<std::uint64_t>(active_rotation_fingerprint_)
+                 << std::dec
+                 << " seconds=" << std::fixed << std::setprecision(3) << seconds
+                 << " hashes=" << static_cast<std::uint64_t>(rotation_hashes_done_)
+                 << " hps="
+                 << static_cast<double>(static_cast<std::uint64_t>(rotation_hashes_done_)) / seconds
+                 << " cpu_hashes="
+                 << static_cast<std::uint64_t>(rotation_cpu_hashes_done_)
+                 << " cpu_hps="
+                 << static_cast<double>(static_cast<std::uint64_t>(rotation_cpu_hashes_done_)) / seconds;
+#ifdef YERBAS_HAS_CUDA
+            for (const auto& worker : gpu_workers_) {
+                line << " gpu" << worker.device_id << "_hashes="
+                     << worker.rotation_hashes_done
+                     << " gpu" << worker.device_id << "_hps="
+                     << static_cast<double>(worker.rotation_hashes_done) / seconds;
+            }
+#endif
+            console_file_log::write(line.str());
+        }
+    }
+
     active_rotation_fingerprint_ = fingerprint;
-    rotation_started_ = std::chrono::steady_clock::now();
+    rotation_started_ = now;
     rotation_hashes_done_ = 0;
     rotation_cpu_hashes_done_ = 0;
 
