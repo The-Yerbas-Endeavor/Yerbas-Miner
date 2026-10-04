@@ -74,6 +74,53 @@ inline void terminal_write(const std::string& value)
     out->pubsync();
 }
 
+inline void render_startup_tuning_progress(const std::string& phase,
+                                           const std::string& detail,
+                                           unsigned int current = 0U,
+                                           unsigned int total = 0U)
+{
+    if (!dashboard_active()) return;
+
+    static const auto started = std::chrono::steady_clock::now();
+    const auto elapsed_seconds = static_cast<unsigned long long>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - started).count());
+
+    std::ostringstream screen;
+    screen << "\x1b[H\x1b[2J"
+           << "YERBAS MINER — AUTO TUNING\n\n"
+           << "Optimizing CPU CryptoNight / GhostRider settings for this system.\n"
+           << "This happens before mining begins.\n\n"
+           << "CPU  ";
+
+    if (total > 0U) {
+        constexpr unsigned int kBarWidth = 32U;
+        const unsigned int bounded = std::min(current, total);
+        const unsigned int filled =
+            static_cast<unsigned int>((static_cast<unsigned long long>(bounded) * kBarWidth) / total);
+        screen << '[';
+        for (unsigned int i = 0; i < kBarWidth; ++i)
+            screen << (i < filled ? '#' : ' ');
+        const unsigned int percent =
+            static_cast<unsigned int>((static_cast<unsigned long long>(bounded) * 100U) / total);
+        screen << "]  " << std::setw(3) << percent << "%\n";
+    } else {
+        screen << "working...\n";
+    }
+
+    screen << "     " << phase;
+    if (!detail.empty()) screen << " — " << detail;
+    screen << "\n\n"
+           << "GPU  Waiting for CPU tuning...\n\n"
+           << "Elapsed: "
+           << std::setfill('0') << std::setw(2) << (elapsed_seconds / 60ULL)
+           << ':' << std::setw(2) << (elapsed_seconds % 60ULL)
+           << std::setfill(' ') << "\n\n"
+           << "AUTO TUNING — PLEASE WAIT\n";
+
+    terminal_write(screen.str());
+}
+
 class DashboardScreen final {
 public:
     DashboardScreen()
@@ -81,13 +128,11 @@ public:
         configure_input();
         dashboard_active_flag() = true;
         terminal_stdout_enabled() = false;
-        terminal_write(
-            "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H"
-            "YERBAS MINER\n"
-            "Starting up...\n\n"
-            "Preparing CPU/GPU production tuning and loading caches.\n"
-            "The mining dashboard will appear automatically when startup completes.\n");
+        terminal_write("\x1b[?1049h\x1b[?25l");
         active_ = true;
+        render_startup_tuning_progress(
+            "Preparing startup",
+            "loading cached production settings");
     }
 
     DashboardScreen(const DashboardScreen&) = delete;
