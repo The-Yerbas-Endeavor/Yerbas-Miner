@@ -2487,19 +2487,20 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
                 learned_batch,
                 transition_shaped);
 
-        if (worker.opening_scan_shape_pending && learned_batch >= 2048U) {
-            constexpr std::size_t kOpeningQuantum = 256U;
-            constexpr std::size_t kOpeningMinBatch = 1024U;
-            std::size_t opening_batch =
-                (learned_batch / 2U / kOpeningQuantum) * kOpeningQuantum;
-            opening_batch = std::max(kOpeningMinBatch, opening_batch);
-            effective_batch = std::min(effective_batch, opening_batch);
+        if (worker.opening_scan_shape_pending && learned_batch > 3584U) {
+            // Use the already-qualified 3584 production geometry as the only
+            // opening hedge. Novel half-batches (1792/2560) force backend and
+            // selector cache misses, which can cost more startup time than the
+            // shorter scan saves. Normal 3584 rotations therefore remain
+            // completely untouched.
+            constexpr std::size_t kOpeningCachedBatch = 3584U;
+            effective_batch = std::min(effective_batch, kOpeningCachedBatch);
             transition_shaped = effective_batch < learned_batch;
             worker.opening_scan_shape_pending = false;
             std::cout << "[opening-scan] GPU " << worker.device_id
                       << " batch=" << learned_batch
                       << " -> " << effective_batch
-                      << " | one-shot job-start hedge\n";
+                      << " | cached one-shot job-start hedge\n";
         } else {
             worker.opening_scan_shape_pending = false;
         }
@@ -2626,19 +2627,20 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
                 learned_batch,
                 transition_shaped);
 
-        if (worker.opening_scan_shape_pending && learned_batch >= 2048U) {
-            constexpr std::size_t kOpeningQuantum = 256U;
-            constexpr std::size_t kOpeningMinBatch = 1024U;
-            std::size_t opening_batch =
-                (learned_batch / 2U / kOpeningQuantum) * kOpeningQuantum;
-            opening_batch = std::max(kOpeningMinBatch, opening_batch);
-            effective_batch = std::min(effective_batch, opening_batch);
+        if (worker.opening_scan_shape_pending && learned_batch > 3584U) {
+            // Use the already-qualified 3584 production geometry as the only
+            // opening hedge. Novel half-batches (1792/2560) force backend and
+            // selector cache misses, which can cost more startup time than the
+            // shorter scan saves. Normal 3584 rotations therefore remain
+            // completely untouched.
+            constexpr std::size_t kOpeningCachedBatch = 3584U;
+            effective_batch = std::min(effective_batch, kOpeningCachedBatch);
             transition_shaped = effective_batch < learned_batch;
             worker.opening_scan_shape_pending = false;
             std::cout << "[opening-scan] GPU " << worker.device_id
                       << " batch=" << learned_batch
                       << " -> " << effective_batch
-                      << " | one-shot job-start hedge\n";
+                      << " | cached one-shot job-start hedge\n";
         } else {
             worker.opening_scan_shape_pending = false;
         }
