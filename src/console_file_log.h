@@ -66,6 +66,17 @@ inline bool dashboard_active() noexcept
     return dashboard_active_flag();
 }
 
+inline std::atomic_bool& startup_tuning_refresh_enabled()
+{
+    static std::atomic_bool value{false};
+    return value;
+}
+
+inline void finish_startup_tuning_progress() noexcept
+{
+    startup_tuning_refresh_enabled().store(false, std::memory_order_relaxed);
+}
+
 inline void terminal_write(const std::string& value)
 {
     std::lock_guard<std::mutex> lock(terminal_write_mutex());
@@ -92,6 +103,7 @@ inline StartupTuningState& startup_tuning_state()
 
 inline void reset_startup_tuning_progress()
 {
+    startup_tuning_refresh_enabled().store(true, std::memory_order_relaxed);
     auto& state = startup_tuning_state();
     std::lock_guard<std::mutex> lock(state.mutex);
     state.started = std::chrono::steady_clock::now();
@@ -106,7 +118,9 @@ inline void render_startup_tuning_progress(const std::string& phase,
                                            unsigned int current = 0U,
                                            unsigned int total = 0U)
 {
-    if (!dashboard_active()) return;
+    if (!dashboard_active() ||
+        !startup_tuning_refresh_enabled().load(std::memory_order_relaxed))
+        return;
 
     auto& state = startup_tuning_state();
     {
@@ -204,9 +218,12 @@ public:
             "loading cached production settings");
 
         refresh_thread_ = std::thread([this]() {
-            while (!stop_refresh_.load(std::memory_order_relaxed)) {
+            while (!stop_refresh_.load(std::memory_order_relaxed) &&
+                   startup_tuning_refresh_enabled().load(std::memory_order_relaxed)) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-                if (stop_refresh_.load(std::memory_order_relaxed)) break;
+                if (stop_refresh_.load(std::memory_order_relaxed) ||
+                    !startup_tuning_refresh_enabled().load(std::memory_order_relaxed))
+                    break;
                 render_startup_tuning_progress("", "");
             }
         });
