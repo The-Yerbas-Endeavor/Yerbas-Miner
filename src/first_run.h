@@ -12,9 +12,11 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <conio.h>
 #include <io.h>
 #include <windows.h>
 #else
+#include <sys/select.h>
 #include <unistd.h>
 #endif
 
@@ -96,6 +98,68 @@ inline bool interactive_stdin()
 #endif
 }
 
+inline bool prompt_autotune_with_timeout(unsigned int timeout_seconds)
+{
+    std::cout << "Run missing hardware autotuning now? [Y/n]\n"
+              << "Autotuning will start automatically in "
+              << timeout_seconds << " seconds if nothing is selected.\n"
+              << std::flush;
+
+#ifdef _WIN32
+    for (unsigned int remaining = timeout_seconds; remaining > 0U; --remaining) {
+        std::cout << "\rAuto-starting in " << remaining << "s... "
+                  << "(Y/Enter = tune, N = skip)   " << std::flush;
+
+        const DWORD slice_ms = 1000U;
+        const DWORD start = GetTickCount();
+        while (GetTickCount() - start < slice_ms) {
+            if (_kbhit()) {
+                const int ch = _getch();
+                if (ch == 'n' || ch == 'N') {
+                    std::cout << "\rAutotuning skipped by user.                              \n";
+                    return false;
+                }
+                if (ch == 'y' || ch == 'Y' || ch == '\r' || ch == '\n') {
+                    std::cout << "\rAutotuning selected.                                    \n";
+                    return true;
+                }
+            }
+            Sleep(25);
+        }
+    }
+#else
+    for (unsigned int remaining = timeout_seconds; remaining > 0U; --remaining) {
+        std::cout << "\rAuto-starting in " << remaining
+                  << "s... (press Enter for default, or type n + Enter to skip)   "
+                  << std::flush;
+
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+        timeval timeout{};
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+
+        const int ready = select(STDIN_FILENO + 1, &readfds, nullptr, nullptr, &timeout);
+        if (ready > 0 && FD_ISSET(STDIN_FILENO, &readfds)) {
+            std::string answer;
+            std::getline(std::cin, answer);
+            const bool yes = answer.empty() || answer == "y" || answer == "Y" ||
+                             answer == "yes" || answer == "YES" || answer == "Yes";
+            std::cout << '\r'
+                      << (yes ? "Autotuning selected."
+                              : "Autotuning skipped by user.")
+                      << "                                      \n";
+            return yes;
+        }
+        if (ready < 0) break;
+    }
+#endif
+
+    std::cout << "\rNo selection received — starting hardware autotuning now.           \n";
+    return true;
+}
+
 inline bool cache_has_prefix(const std::string& prefix)
 {
     for (const auto& dir : cache_search_dirs()) {
@@ -164,13 +228,9 @@ inline void apply(AppConfig& cfg)
               << (!gpu_profile ? " GPU" : "")
               << "\n\n"
               << "Hardware autotuning benchmarks only the missing component(s) and\n"
-              << "keeps any valid saved tuning that is already present.\n\n"
-              << "Run missing hardware autotuning now? [Y/n]: " << std::flush;
+              << "keeps any valid saved tuning that is already present.\n\n";
 
-    std::string answer;
-    std::getline(std::cin, answer);
-    const bool yes = answer.empty() || answer == "y" || answer == "Y" ||
-                     answer == "yes" || answer == "YES" || answer == "Yes";
+    const bool yes = prompt_autotune_with_timeout(30U);
 
     if (yes) {
         clear_decline_marker();
