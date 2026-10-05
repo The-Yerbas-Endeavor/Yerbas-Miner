@@ -150,6 +150,18 @@ bool cn_geometry_threads_valid_variant(int mode,
     } else if (mode == 445) {
         attr_rc = cudaFuncGetAttributes(
             &attrs, cryptonight_loop_stage_ttable4_coalesced<VariantIndex>);
+    } else if (mode == 446) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable4_mul4<VariantIndex>);
+    } else if (mode == 448) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable4_pairload<VariantIndex>);
+    } else if (mode == 449) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable2_coalesced<VariantIndex>);
+    } else if (mode == 450) {
+        attr_rc = cudaFuncGetAttributes(
+            &attrs, cryptonight_loop_stage_ttable4_readonly<VariantIndex>);
     } else if (mode == 444) {
         attr_rc = cudaFuncGetAttributes(
             &attrs, cryptonight_loop_stage_ttable4_cg<VariantIndex>);
