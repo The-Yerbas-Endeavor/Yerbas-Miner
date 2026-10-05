@@ -45,6 +45,18 @@ std::string normalize_tune_mode(std::string value)
     return value;
 }
 
+std::string normalize_glyph_mode(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value != "auto" && value != "braille" &&
+        value != "block" && value != "ascii")
+        throw std::runtime_error(
+            "Console glyph mode must be auto, braille, block, or ascii");
+    return value;
+}
+
 std::string normalize_gpu_tune_mode(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -91,6 +103,7 @@ void apply_json(AppConfig& cfg, const json& root)
         const auto& l = root.at("logging");
         if (l.contains("level")) cfg.logging.level = l.at("level").get<std::string>();
         if (l.contains("console")) cfg.logging.console_mode = l.at("console").get<std::string>();
+        if (l.contains("glyphs")) cfg.logging.glyph_mode = normalize_glyph_mode(l.at("glyphs").get<std::string>());
         if (l.contains("perf_csv")) cfg.logging.perf_csv = l.at("perf_csv").get<std::string>();
     }
 }
@@ -139,6 +152,7 @@ AppConfig load_config(int argc, char** argv)
         else if (arg == "--skip-validation") cfg.gpu.skip_validation = true;
         else if (arg == "--log-level") cfg.logging.level = require_value(argc, argv, i, "--log-level");
         else if (arg == "--console") cfg.logging.console_mode = require_value(argc, argv, i, "--console");
+        else if (arg == "--glyphs") cfg.logging.glyph_mode = normalize_glyph_mode(require_value(argc, argv, i, "--glyphs"));
         else if (arg == "--perf-log") cfg.logging.perf_csv = require_value(argc, argv, i, "--perf-log");
         else if (arg == "--help" || arg == "-h") {}
         else throw std::runtime_error("Unknown option: " + arg);
@@ -146,6 +160,7 @@ AppConfig load_config(int argc, char** argv)
 
     cfg.miner.cpu_tune = normalize_tune_mode(cfg.miner.cpu_tune);
     cfg.gpu.gpu_tune = normalize_gpu_tune_mode(cfg.gpu.gpu_tune);
+    cfg.logging.glyph_mode = normalize_glyph_mode(cfg.logging.glyph_mode);
 
     if (cfg.logging.console_mode != "auto" &&
         cfg.logging.console_mode != "tui" &&
@@ -182,6 +197,7 @@ void print_config_help(const char* program)
         << "  --skip-validation   Skip startup CUDA readiness probe\n"
         << "  --log-level LEVEL   debug, info, warn, error\n"
         << "  --console MODE      auto, tui, plain\n"
+        << "  --glyphs MODE       auto, braille, block, ascii\n"
         << "  --perf-log FILE     Append rotation performance records to CSV\n"
         << "  -h, --help          Show this help\n\n"
         << "Autotune:\n"

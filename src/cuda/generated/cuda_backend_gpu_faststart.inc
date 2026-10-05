@@ -32,6 +32,59 @@ struct GpuTunePolicy {
     bool from_cache{false};
 };
 
+class GpuAutotuneHeartbeat {
+public:
+    GpuAutotuneHeartbeat(int device_id,
+                         unsigned int progress,
+                         unsigned int total,
+                         std::string detail)
+        : device_id_(device_id),
+          progress_(progress),
+          total_(total),
+          detail_(std::move(detail)),
+          thread_([this]() {
+              unsigned int elapsed_seconds = 0U;
+              while (!done_.load()) {
+                  std::this_thread::sleep_for(std::chrono::seconds(1));
+                  if (done_.load()) break;
+                  ++elapsed_seconds;
+                  if ((elapsed_seconds % 10U) != 0U) continue;
+
+                  std::cout << "[GPU " << device_id_
+                            << "] GPU autotune working"
+                            << " | " << progress_ << '/' << total_
+                            << " | " << detail_
+                            << " | elapsed=" << elapsed_seconds << "s"
+                            << " | status=still testing"
+                            << '\n' << std::flush;
+              }
+          })
+    {
+    }
+
+    GpuAutotuneHeartbeat(const GpuAutotuneHeartbeat&) = delete;
+    GpuAutotuneHeartbeat& operator=(const GpuAutotuneHeartbeat&) = delete;
+
+    ~GpuAutotuneHeartbeat()
+    {
+        stop();
+    }
+
+    void stop()
+    {
+        done_.store(true);
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    int device_id_{-1};
+    unsigned int progress_{0U};
+    unsigned int total_{0U};
+    std::string detail_;
+    std::atomic_bool done_{false};
+    std::thread thread_;
+};
+
 template <std::uint8_t VariantIndex>
 void launch_split_cryptonight_variant(cudaStream_t stream,
                                       std::uint8_t* states,
@@ -513,9 +566,16 @@ GpuTunePolicy run_gpu_calibration(int device_id,
             std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
                       << " | class=" << kGpuBatchClassNames[cls]
                       << " | CN=" << gpu_calibration_cn_summary(jobs[cls])
-                      << " | batch=" << nominal << " | testing..." << std::flush;
+                      << " | batch=" << nominal << " | testing...\n" << std::flush;
+            GpuAutotuneHeartbeat heartbeat_nominal(
+                device_id,
+                progress,
+                total_measurements,
+                std::string("class=") + kGpuBatchClassNames[cls] +
+                    " batch=" + std::to_string(nominal));
             double best_hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                   scratchpads, contexts, jobs[cls], best);
+            heartbeat_nominal.stop();
             std::cout << std::fixed << std::setprecision(2)
                       << " done | " << best_hps << " H/s | best=" << best_hps << " H/s"
                       << std::defaultfloat << '\n';
@@ -530,9 +590,16 @@ GpuTunePolicy run_gpu_calibration(int device_id,
                 candidate.batch = reduced;
                 std::cout << "[GPU " << device_id << "] GPU autotune " << progress << '/' << total_measurements
                           << " | class=" << kGpuBatchClassNames[cls]
-                          << " | batch=" << reduced << " | testing..." << std::flush;
+                          << " | batch=" << reduced << " | testing...\n" << std::flush;
+                GpuAutotuneHeartbeat heartbeat_reduced(
+                    device_id,
+                    progress,
+                    total_measurements,
+                    std::string("class=") + kGpuBatchClassNames[cls] +
+                        " batch=" + std::to_string(reduced));
                 const double hps = gpu_calibration_hps(stream, d_job, d_nonces, states,
                                                        scratchpads, contexts, jobs[cls], candidate);
+                heartbeat_reduced.stop();
                 const double gain_pct = best_hps > 0.0 ? (hps / best_hps - 1.0) * 100.0 : 0.0;
                 const bool wins = hps > best_hps * kGpuCalibrationMinimumGain;
                 std::cout << std::fixed << std::setprecision(2)

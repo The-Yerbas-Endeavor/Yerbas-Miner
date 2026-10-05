@@ -15,6 +15,7 @@
 #include "ghostrider/ghostrider.h"
 #include "console.h"
 #include "console_file_log.h"
+#include "build_info.h"
 
 #include <nlohmann/json.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
@@ -394,7 +395,14 @@ double gpu_latency_target_ms()
 {
     static const double target = []() {
         const char* value = std::getenv("YERBAS_GPU_LATENCY_TARGET_MS");
-        if (value == nullptr || *value == '\0') return 3500.0;
+        // Production defaults to the previously validated GTX 1080 Ti
+        // stale-aware batch policy.  The global 3.5 s latency controller was
+        // introduced as an experiment and can shrink ordinary 3584/5376/7168
+        // rotations that the validated production policy intentionally leaves
+        // alone.  Keep adaptive latency/probe learning opt-in so normal mining
+        // does not trade away raw H/s.  Experiments may still enable it with
+        // YERBAS_GPU_LATENCY_TARGET_MS=3500.
+        if (value == nullptr || *value == '\0') return 0.0;
         char* end = nullptr;
         const double parsed = std::strtod(value, &end);
         if (end == value || *end != '\0' || !(parsed >= 1000.0 && parsed <= 10000.0))
@@ -521,7 +529,10 @@ std::string legacy_live_batch_cache_key(const std::string& hardware_key,
 std::size_t load_live_batch_cache(const std::string& hardware_key,
                                   std::uint32_t cn_mask,
                                   RotationFingerprint rotation_fingerprint,
-                                  bool* exact_rotation_match = nullptr)
+                                  bool* exact_rotation_match = nullptr,
+                                  bool* provisional_match = nullptr,
+                                  std::size_t* rejected_probe_batch = nullptr,
+                                  double* rejected_probe_baseline_hps = nullptr)
 {
     auto& cache = live_batch_cache();
     const auto key =
@@ -533,6 +544,17 @@ std::size_t load_live_batch_cache(const std::string& hardware_key,
     if (it != cache.end() && it->is_object()) {
         if (exact_rotation_match != nullptr)
             *exact_rotation_match = true;
+        if (provisional_match != nullptr)
+            *provisional_match =
+                it->value("confidence", std::string("confirmed")) ==
+                "provisional";
+        if (rejected_probe_batch != nullptr)
+            *rejected_probe_batch =
+                static_cast<std::size_t>(
+                    it->value("rejected_probe_batch", 0ULL));
+        if (rejected_probe_baseline_hps != nullptr)
+            *rejected_probe_baseline_hps =
+                it->value("rejected_probe_baseline_hps", 0.0);
         const auto value = it->value("batch", 0ULL);
         return static_cast<std::size_t>(value);
     }
@@ -544,11 +566,23 @@ std::size_t load_live_batch_cache(const std::string& hardware_key,
     if (it == cache.end() || !it->is_object()) {
         if (exact_rotation_match != nullptr)
             *exact_rotation_match = false;
+        if (provisional_match != nullptr)
+            *provisional_match = false;
+        if (rejected_probe_batch != nullptr)
+            *rejected_probe_batch = 0U;
+        if (rejected_probe_baseline_hps != nullptr)
+            *rejected_probe_baseline_hps = 0.0;
         return 0U;
     }
 
     if (exact_rotation_match != nullptr)
         *exact_rotation_match = false;
+    if (provisional_match != nullptr)
+        *provisional_match = false;
+    if (rejected_probe_batch != nullptr)
+        *rejected_probe_batch = 0U;
+    if (rejected_probe_baseline_hps != nullptr)
+        *rejected_probe_baseline_hps = 0.0;
     const auto value = it->value("batch", 0ULL);
     return static_cast<std::size_t>(value);
 }
@@ -558,7 +592,9 @@ void save_live_batch_cache(const std::string& hardware_key,
                            RotationFingerprint rotation_fingerprint,
                            std::size_t batch,
                            double hps,
-                           double scan_ms)
+                           double scan_ms,
+                           bool provisional,
+                           std::uint64_t samples)
 {
     auto& cache = live_batch_cache();
     const auto key =
@@ -570,8 +606,76 @@ void save_live_batch_cache(const std::string& hardware_key,
         {"batch", batch},
         {"hps", hps},
         {"scan_ms", scan_ms},
-        {"rotation", static_cast<std::uint64_t>(rotation_fingerprint)}
+        {"rotation", static_cast<std::uint64_t>(rotation_fingerprint)},
+        {"confidence", provisional ? "provisional" : "confirmed"},
+        {"samples", samples}
     };
+
+    // Keep a conservative CN-family seed in addition to the exact-rotation
+    // winner.  Exact fingerprints are still authoritative, but previously
+    // unseen rotations that use the same CryptoNight family should not have
+    // to start from the full class/variant ceiling and spend a 6-8 second
+    // first scan discovering that the production batch belongs near 3.5s.
+    // Blend only confirmed operating points so one provisional sample cannot
+    // drag the family seed around.
+    if (!provisional) {
+        constexpr std::size_t kBatchQuantum = 256U;
+        const auto family_key =
+            legacy_live_batch_cache_key(hardware_key, cn_mask);
+        std::size_t family_batch = batch;
+        auto family_it = cache.find(family_key);
+        if (family_it != cache.end() && family_it->is_object()) {
+            const auto old_batch =
+                static_cast<std::size_t>(
+                    family_it->value("batch", 0ULL));
+            if (old_batch >= kBatchQuantum) {
+                family_batch =
+                    (old_batch * 3U + batch) / 4U;
+                family_batch =
+                    (family_batch / kBatchQuantum) * kBatchQuantum;
+                family_batch =
+                    std::max(kBatchQuantum, family_batch);
+            }
+        }
+        cache[family_key] = {
+            {"batch", family_batch},
+            {"hps", hps},
+            {"scan_ms", scan_ms},
+            {"confidence", "confirmed-family-seed"},
+            {"samples", samples}
+        };
+    }
+
+    std::ofstream out(
+        live_batch_cache_path(),
+        std::ios::out | std::ios::trunc);
+    if (out)
+        out << cache.dump(2) << '\n';
+}
+
+void save_live_probe_rejection(const std::string& hardware_key,
+                               std::uint32_t cn_mask,
+                               RotationFingerprint rotation_fingerprint,
+                               std::size_t rejected_batch,
+                               double baseline_hps)
+{
+    auto& cache = live_batch_cache();
+    const auto key =
+        live_batch_cache_key(
+            hardware_key,
+            cn_mask,
+            rotation_fingerprint);
+    auto it = cache.find(key);
+    if (it == cache.end() || !it->is_object())
+        return;
+
+    if (rejected_batch == 0U) {
+        it->erase("rejected_probe_batch");
+        it->erase("rejected_probe_baseline_hps");
+    } else {
+        (*it)["rejected_probe_batch"] = rejected_batch;
+        (*it)["rejected_probe_baseline_hps"] = baseline_hps;
+    }
 
     std::ofstream out(
         live_batch_cache_path(),
@@ -1006,37 +1110,8 @@ void Client::update_rotation_epoch()
     const std::uint64_t fingerprint = ghostrider::schedule_fingerprint(schedule);
     if (rotation_started_.time_since_epoch().count() != 0 && fingerprint == active_rotation_fingerprint_) return;
 
-    const auto now = std::chrono::steady_clock::now();
-    if (rotation_started_.time_since_epoch().count() != 0) {
-        const double seconds =
-            std::chrono::duration<double>(now - rotation_started_).count();
-        if (seconds > 0.0) {
-            std::ostringstream line;
-            line << "[rotation perf] rotation=" << std::hex
-                 << static_cast<std::uint64_t>(active_rotation_fingerprint_)
-                 << std::dec
-                 << " seconds=" << std::fixed << std::setprecision(3) << seconds
-                 << " hashes=" << static_cast<std::uint64_t>(rotation_hashes_done_)
-                 << " hps="
-                 << static_cast<double>(static_cast<std::uint64_t>(rotation_hashes_done_)) / seconds
-                 << " cpu_hashes="
-                 << static_cast<std::uint64_t>(rotation_cpu_hashes_done_)
-                 << " cpu_hps="
-                 << static_cast<double>(static_cast<std::uint64_t>(rotation_cpu_hashes_done_)) / seconds;
-#ifdef YERBAS_HAS_CUDA
-            for (const auto& worker : gpu_workers_) {
-                line << " gpu" << worker.device_id << "_hashes="
-                     << worker.rotation_hashes_done
-                     << " gpu" << worker.device_id << "_hps="
-                     << static_cast<double>(worker.rotation_hashes_done) / seconds;
-            }
-#endif
-            console_file_log::write(line.str());
-        }
-    }
-
     active_rotation_fingerprint_ = fingerprint;
-    rotation_started_ = now;
+    rotation_started_ = std::chrono::steady_clock::now();
     rotation_hashes_done_ = 0;
     rotation_cpu_hashes_done_ = 0;
 
@@ -1376,7 +1451,13 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         memory.probe_pending &&
         result.hash_count == memory.probe_batch;
     if (!is_probe_result) {
-        if (memory.baseline_batch != result.hash_count) {
+        if (memory.baseline_batch != result.hash_count ||
+            memory.baseline_samples == 0U ||
+            memory.baseline_hps_ewma <= 0.0) {
+            // A reset baseline must be re-seeded from the first clean scan.
+            // Keeping the same batch id with samples=0 and hps=0 must not run
+            // through the EWMA path, or the baseline starts at only 35% of
+            // real throughput and creates false multi-percent probe wins.
             memory.baseline_batch = result.hash_count;
             memory.baseline_hps_ewma = scan_hps;
             memory.baseline_samples = 1U;
@@ -1409,16 +1490,80 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     if (memory.probe_pending &&
         result.hash_count == memory.probe_batch) {
         constexpr double kProbeMinGain = 0.0100;
-        constexpr double kProbeMaxLatencyFactor = 1.10;
+        constexpr double kProbeMarginalGain = 0.0050;
+        constexpr std::uint64_t kMarginalWinsRequired = 3U;
+        // Once a probe has a real >=1% throughput win, allow the
+        // slightly wider 15% latency envelope. Production's remaining-time
+        // scheduler still shortens batches near likely job transitions, so
+        // this captures real H/s wins that land just above the normal 3.85s
+        // probe ceiling without relaxing the 0.5-1.0% marginal path.
+        constexpr double kProbeHighGain = 0.0100;
+        constexpr double kProbeNormalLatencyFactor = 1.10;
+        constexpr double kProbeHighGainLatencyFactor = 1.15;
         const double gain =
             memory.probe_baseline_hps > 0.0
                 ? scan_hps / memory.probe_baseline_hps - 1.0
                 : 0.0;
-        const bool keep =
-            gain >= kProbeMinGain &&
-            result.scan_ms <= target_ms * kProbeMaxLatencyFactor;
+        const double allowed_latency_factor =
+            gain >= kProbeHighGain
+                ? kProbeHighGainLatencyFactor
+                : kProbeNormalLatencyFactor;
+        const bool latency_ok =
+            result.scan_ms <= target_ms * allowed_latency_factor;
+        const bool strong_keep =
+            gain >= kProbeMinGain && latency_ok;
+        const bool marginal_win =
+            gain >= kProbeMarginalGain &&
+            gain < kProbeMinGain &&
+            latency_ok;
 
-        if (!keep) {
+        if (marginal_win) {
+            if (memory.marginal_probe_batch != memory.probe_batch) {
+                memory.marginal_probe_batch = memory.probe_batch;
+                memory.marginal_probe_wins = 0U;
+                memory.marginal_probe_gain_sum = 0.0;
+            }
+            ++memory.marginal_probe_wins;
+            memory.marginal_probe_gain_sum += gain;
+        } else if (!strong_keep) {
+            memory.marginal_probe_batch = 0U;
+            memory.marginal_probe_wins = 0U;
+            memory.marginal_probe_gain_sum = 0.0;
+        }
+
+        const bool marginal_keep =
+            marginal_win &&
+            memory.marginal_probe_wins >= kMarginalWinsRequired;
+        const bool keep = strong_keep || marginal_keep;
+
+        if (marginal_win && !marginal_keep) {
+            const std::size_t rollback =
+                std::clamp(memory.probe_from_batch, floor, base);
+            worker.engine->set_active_batch_size(rollback);
+            std::cout << "[throughput-probe] GPU " << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(result.rotation_fingerprint)
+                      << std::dec
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " batch=" << memory.probe_batch
+                      << " result=marginal-confirm"
+                      << " confirmation=" << memory.marginal_probe_wins
+                      << "/" << kMarginalWinsRequired
+                      << " hps=" << std::fixed << std::setprecision(2)
+                      << scan_hps
+                      << " baseline=" << memory.probe_baseline_hps
+                      << " gain_pct=" << (gain * 100.0)
+                      << " avg_gain_pct="
+                      << ((memory.marginal_probe_gain_sum /
+                           static_cast<double>(memory.marginal_probe_wins)) *
+                          100.0)
+                      << " scan_ms=" << std::setprecision(1)
+                      << result.scan_ms
+                      << " allowed_ms=" << target_ms * allowed_latency_factor
+                      << " -> " << rollback
+                      << "\n";
+            memory.probe_cooldown = 2U;
+        } else if (!keep) {
             const std::size_t rollback =
                 std::clamp(memory.probe_from_batch, floor, base);
             worker.engine->set_active_batch_size(rollback);
@@ -1435,6 +1580,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                       << " gain_pct=" << (gain * 100.0)
                       << " scan_ms=" << std::setprecision(1)
                       << result.scan_ms
+                      << " allowed_ms=" << target_ms * allowed_latency_factor
                       << " -> " << rollback
                       << "\n";
             memory.probe_cooldown = 4U;
@@ -1442,6 +1588,12 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.rejected_probe_baseline_hps =
                 memory.probe_baseline_hps;
             memory.rejected_probe_stable_samples = 0U;
+            save_live_probe_rejection(
+                worker.hardware_key,
+                result.cn_mask,
+                result.rotation_fingerprint,
+                memory.rejected_probe_batch,
+                memory.rejected_probe_baseline_hps);
         } else {
             std::cout << "[throughput-probe] GPU " << worker.device_id
                       << " rotation=" << std::hex
@@ -1450,22 +1602,71 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                       << " CN=" << cn_mask_names(result.cn_mask)
                       << " batch=" << memory.probe_batch
                       << " result=keep"
+                      << " reason="
+                      << (marginal_keep ? "repeat-marginal" : "strong")
+                      << " confirmations="
+                      << (marginal_keep ? memory.marginal_probe_wins : 1U)
                       << " hps=" << std::fixed << std::setprecision(2)
                       << scan_hps
                       << " baseline=" << memory.probe_baseline_hps
                       << " gain_pct=" << (gain * 100.0)
                       << " scan_ms=" << std::setprecision(1)
                       << result.scan_ms
+                      << " allowed_ms=" << target_ms * allowed_latency_factor
                       << "\n";
             memory.probe_cooldown = 2U;
             memory.proven_batch = memory.probe_batch;
             memory.proven_hps = scan_hps;
             memory.proven_latency_overruns = 0U;
+            memory.marginal_probe_batch = 0U;
+            memory.marginal_probe_wins = 0U;
+            memory.marginal_probe_gain_sum = 0.0;
+
+            // A kept live probe is the best production measurement we have for
+            // this exact GPU + rotation. Persist it immediately so a restart or
+            // later rotation recall does not fall back to the older, smaller
+            // batch. Keep the entry provisional until normal baseline sampling
+            // confirms it; provisional recalls are still latency-guarded on
+            // their first production scan.
+            save_live_batch_cache(
+                worker.hardware_key,
+                result.cn_mask,
+                result.rotation_fingerprint,
+                memory.probe_batch,
+                scan_hps,
+                result.scan_ms,
+                true,
+                1U);
+            memory.persisted_batch = memory.probe_batch;
+            memory.persisted_rotation_fingerprint =
+                result.rotation_fingerprint;
+            memory.persisted_provisional = true;
+            std::cout << "[latency-cache] GPU " << worker.device_id
+                      << " rotation=" << std::hex
+                      << static_cast<std::uint64_t>(
+                             result.rotation_fingerprint)
+                      << std::dec
+                      << " CN=" << cn_mask_names(result.cn_mask)
+                      << " saved_batch=" << memory.probe_batch
+                      << " confidence=provisional"
+                      << " source=throughput-probe"
+                      << " samples=1"
+                      << " hps=" << std::fixed << std::setprecision(2)
+                      << scan_hps
+                      << " scan_ms=" << std::setprecision(1)
+                      << result.scan_ms
+                      << "\n";
             if (memory.rejected_probe_batch != 0U &&
                 memory.probe_batch >= memory.rejected_probe_batch) {
                 memory.rejected_probe_batch = 0U;
                 memory.rejected_probe_baseline_hps = 0.0;
                 memory.rejected_probe_stable_samples = 0U;
+                save_live_probe_rejection(
+                    worker.hardware_key,
+                    result.cn_mask,
+                    result.rotation_fingerprint,
+                    0U,
+                    0.0);
             }
         }
 
@@ -1473,11 +1674,25 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
             memory.baseline_batch = result.hash_count;
             memory.baseline_hps_ewma = scan_hps;
             memory.baseline_samples = 1U;
-        } else {
+        } else if (!marginal_win) {
+            // A hard losing probe invalidates the old comparison baseline and
+            // must rebuild it before another attempt.
             memory.baseline_batch =
                 std::clamp(memory.probe_from_batch, floor, base);
             memory.baseline_samples = 0U;
             memory.baseline_hps_ewma = 0.0;
+        } else {
+            // A marginal confirmation deliberately rolls back to the exact
+            // baseline batch for another clean comparison. Preserve the clean
+            // batch-local baseline that launched this probe. Resetting it to
+            // zero here causes the next EWMA samples to start from zero and
+            // makes the same probe appear to gain 10%+ even when throughput is
+            // unchanged.
+            memory.baseline_batch =
+                std::clamp(memory.probe_from_batch, floor, base);
+            memory.baseline_hps_ewma = memory.probe_baseline_hps;
+            memory.baseline_samples =
+                std::max<std::uint64_t>(memory.baseline_samples, 2U);
         }
 
         memory.probe_pending = false;
@@ -1504,6 +1719,7 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
     constexpr std::size_t kBatchQuantum = 256U;
     const bool trusted_persistent_batch =
         memory.persisted_batch != 0U &&
+        !memory.persisted_provisional &&
         static_cast<std::uint64_t>(
             memory.persisted_rotation_fingerprint) ==
             static_cast<std::uint64_t>(
@@ -1550,22 +1766,33 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
         memory.ms_per_hash_ewma <= 0.0)
         return;
 
-    if (!memory.probe_pending &&
+    const bool stable_cache_candidate =
+        !memory.probe_pending &&
         memory.baseline_batch == current &&
-        memory.baseline_samples >= 4U &&
         current < base &&
-        memory.persisted_batch != current &&
-        result.scan_ms <= target_ms * 1.10) {
+        result.scan_ms <= target_ms * 1.10;
+
+    if (stable_cache_candidate &&
+        memory.baseline_samples >= 2U &&
+        memory.baseline_samples < 4U &&
+        (memory.persisted_batch != current ||
+         static_cast<std::uint64_t>(
+             memory.persisted_rotation_fingerprint) !=
+             static_cast<std::uint64_t>(
+                 result.rotation_fingerprint))) {
         save_live_batch_cache(
             worker.hardware_key,
             result.cn_mask,
             result.rotation_fingerprint,
             current,
             memory.baseline_hps_ewma,
-            result.scan_ms);
+            result.scan_ms,
+            true,
+            memory.baseline_samples);
         memory.persisted_batch = current;
         memory.persisted_rotation_fingerprint =
             result.rotation_fingerprint;
+        memory.persisted_provisional = true;
         std::cout << "[latency-cache] GPU " << worker.device_id
                   << " rotation=" << std::hex
                   << static_cast<std::uint64_t>(
@@ -1573,6 +1800,45 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                   << std::dec
                   << " CN=" << cn_mask_names(result.cn_mask)
                   << " saved_batch=" << current
+                  << " confidence=provisional"
+                  << " samples=" << memory.baseline_samples
+                  << " hps=" << std::fixed << std::setprecision(2)
+                  << memory.baseline_hps_ewma
+                  << " scan_ms=" << std::setprecision(1)
+                  << result.scan_ms
+                  << "\n";
+    }
+
+    if (stable_cache_candidate &&
+        memory.baseline_samples >= 4U &&
+        (memory.persisted_batch != current ||
+         memory.persisted_provisional ||
+         static_cast<std::uint64_t>(
+             memory.persisted_rotation_fingerprint) !=
+             static_cast<std::uint64_t>(
+                 result.rotation_fingerprint))) {
+        save_live_batch_cache(
+            worker.hardware_key,
+            result.cn_mask,
+            result.rotation_fingerprint,
+            current,
+            memory.baseline_hps_ewma,
+            result.scan_ms,
+            false,
+            memory.baseline_samples);
+        memory.persisted_batch = current;
+        memory.persisted_rotation_fingerprint =
+            result.rotation_fingerprint;
+        memory.persisted_provisional = false;
+        std::cout << "[latency-cache] GPU " << worker.device_id
+                  << " rotation=" << std::hex
+                  << static_cast<std::uint64_t>(
+                         result.rotation_fingerprint)
+                  << std::dec
+                  << " CN=" << cn_mask_names(result.cn_mask)
+                  << " saved_batch=" << current
+                  << " confidence=confirmed"
+                  << " samples=" << memory.baseline_samples
                   << " hps=" << std::fixed << std::setprecision(2)
                   << memory.baseline_hps_ewma
                   << " scan_ms=" << std::setprecision(1)
@@ -1630,17 +1896,26 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
 
                 if (memory.rejected_probe_batch != 0U &&
                     probe_batch >= memory.rejected_probe_batch) {
+                    // A rejected upper step is authoritative for this exact
+                    // rotation until the CURRENT batch-local baseline has
+                    // changed materially and has enough samples to prove that
+                    // the operating point is genuinely different. Do not use
+                    // the all-batch EWMA here: it can be shifted by old probes
+                    // and create false reopenings.
                     const double baseline_shift =
-                        memory.rejected_probe_baseline_hps > 0.0
+                        memory.rejected_probe_baseline_hps > 0.0 &&
+                        memory.baseline_hps_ewma > 0.0
                             ? std::abs(
-                                  memory.hps_ewma /
+                                  memory.baseline_hps_ewma /
                                       memory.rejected_probe_baseline_hps -
                                   1.0)
                             : 0.0;
                     ++memory.rejected_probe_stable_samples;
 
-                    constexpr double kReopenBaselineShift = 0.025;
+                    constexpr double kReopenBaselineShift = 0.050;
+                    constexpr std::uint64_t kReopenBaselineSamples = 6U;
                     const bool reopen =
+                        memory.baseline_samples >= kReopenBaselineSamples &&
                         baseline_shift >= kReopenBaselineShift;
 
                     if (!reopen) {
@@ -1648,6 +1923,9 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                         return;
                     }
 
+                    // Keep the rejection metadata until a new probe actually
+                    // wins. If the reopened probe is interrupted or loses, the
+                    // previous negative knowledge remains intact.
                     std::cout << "[throughput-probe] GPU "
                               << worker.device_id
                               << " rotation=" << std::hex
@@ -1660,12 +1938,11 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                               << " baseline_shift_pct="
                               << std::fixed << std::setprecision(2)
                               << (baseline_shift * 100.0)
-                              << " stable_samples="
+                              << " baseline_samples="
+                              << memory.baseline_samples
+                              << " rejected_stable_samples="
                               << memory.rejected_probe_stable_samples
                               << "\n";
-                    memory.rejected_probe_batch = 0U;
-                    memory.rejected_probe_baseline_hps = 0.0;
-                    memory.rejected_probe_stable_samples = 0U;
                 }
 
                 if (memory.baseline_batch != current ||
@@ -1782,12 +2059,18 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
     const std::size_t floor = gpu_latency_floor_for_base(base);
 
     bool exact_rotation_match = false;
+    bool provisional_match = false;
+    std::size_t persisted_rejected_probe_batch = 0U;
+    double persisted_rejected_probe_baseline_hps = 0.0;
     const std::size_t cached =
         load_live_batch_cache(
             worker.hardware_key,
             cn_mask,
             active_rotation_fingerprint_,
-            &exact_rotation_match);
+            &exact_rotation_match,
+            &provisional_match,
+            &persisted_rejected_probe_batch,
+            &persisted_rejected_probe_baseline_hps);
     constexpr std::size_t kBatchQuantum = 256U;
     if (cached >= floor && cached <= base &&
         (cached % kBatchQuantum) == 0U) {
@@ -1797,6 +2080,15 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
             exact_rotation_match
                 ? active_rotation_fingerprint_
                 : RotationFingerprint{};
+        memory.persisted_provisional =
+            exact_rotation_match && provisional_match;
+        if (exact_rotation_match) {
+            memory.rejected_probe_batch =
+                persisted_rejected_probe_batch;
+            memory.rejected_probe_baseline_hps =
+                persisted_rejected_probe_baseline_hps;
+            memory.rejected_probe_stable_samples = 0U;
+        }
         std::cout << "[latency-cache] GPU " << worker.device_id
                   << " rotation=" << std::hex
                   << static_cast<std::uint64_t>(
@@ -1806,9 +2098,16 @@ void Client::seed_gpu_batch_from_live_memory(GpuWorker& worker,
                   << " batch=" << base << " -> " << cached
                   << " source="
                   << (exact_rotation_match
-                          ? "persistent-rotation"
-                          : "legacy-cn-fallback")
-                  << "\n";
+                          ? (provisional_match
+                                 ? "persistent-rotation-provisional"
+                                 : "persistent-rotation")
+                          : "legacy-cn-fallback");
+        if (exact_rotation_match &&
+            persisted_rejected_probe_batch != 0U) {
+            std::cout << " rejected-probe="
+                      << persisted_rejected_probe_batch;
+        }
+        std::cout << "\n";
         return;
     }
 
@@ -2006,8 +2305,16 @@ void Client::upload_gpu_job()
                   << " adaptive_peers=" << (gpu_workers_.size() - 1U) << '\n';
     }
 
+    const std::size_t opening_shape_slot =
+        gpu_workers_.empty()
+            ? 0U
+            : static_cast<std::size_t>(
+                  MiningJob::generation() %
+                  static_cast<std::uint64_t>(gpu_workers_.size()));
+
     for (std::size_t i = 0; i < gpu_workers_.size(); ++i) {
         auto& worker = gpu_workers_[i];
+        worker.opening_scan_shape_pending = (i == opening_shape_slot);
         if (crossover_cap > 0U)
             worker.engine->set_stale_batch_cap(
                 i == crossover_slot ? crossover_cap : 0U,
@@ -2023,6 +2330,133 @@ void Client::upload_gpu_job()
     }
     nonce_ = kHybridCpuStart; gpu_job_loaded_ = true;
     std::cout << "[hybrid] Job partitioned: " << gpu_workers_.size() << " GPU region(s) + CPU upper nonce region\n";
+}
+
+std::size_t Client::transition_batch_for_worker(
+    GpuWorker& worker,
+    std::size_t learned_batch,
+    bool& transition_shaped)
+{
+    transition_shaped = false;
+    std::size_t effective_batch = learned_batch;
+
+    if (job_lifetime_samples_ < 3U ||
+        job_lifetime_ms_ewma_ < 20000.0 ||
+        active_job_received_at_.time_since_epoch().count() == 0 ||
+        learned_batch == 0U)
+        return effective_batch;
+
+    const double age_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() -
+            active_job_received_at_).count();
+    const double remaining_ms =
+        job_lifetime_ms_ewma_ - age_ms;
+
+    constexpr std::size_t kTransitionQuantum = 256U;
+    constexpr std::size_t kTransitionMinBatch = 1024U;
+    constexpr double kTransitionSafetyFraction = 0.65;
+    constexpr double kTransitionTriggerFactor = 1.35;
+    constexpr double kTransitionMinBudgetMs = 750.0;
+    constexpr double kTransitionOverdueBudgetMs = 1250.0;
+
+    double ms_per_hash = 0.0;
+    const auto memory_it =
+        worker.rotation_latency_memory.find(
+            static_cast<std::uint64_t>(
+                active_rotation_fingerprint_));
+    if (memory_it != worker.rotation_latency_memory.end() &&
+        memory_it->second.ms_per_hash_ewma > 0.0) {
+        ms_per_hash =
+            memory_it->second.ms_per_hash_ewma;
+    } else if (worker.latency_scan_ms_ewma > 0.0) {
+        ms_per_hash =
+            worker.latency_scan_ms_ewma /
+            static_cast<double>(learned_batch);
+    }
+
+    std::uint32_t transition_zone = 0U;
+    double predicted_scan_ms = 0.0;
+    double scan_budget_ms = 0.0;
+
+    if (ms_per_hash > 0.0) {
+        predicted_scan_ms =
+            ms_per_hash *
+            static_cast<double>(learned_batch);
+
+        if (remaining_ms <= 0.0) {
+            transition_zone = 2U;
+            scan_budget_ms =
+                std::min(
+                    predicted_scan_ms,
+                    kTransitionOverdueBudgetMs);
+        } else if (remaining_ms <=
+                   predicted_scan_ms *
+                       kTransitionTriggerFactor) {
+            transition_zone = 1U;
+            scan_budget_ms =
+                std::clamp(
+                    remaining_ms *
+                        kTransitionSafetyFraction,
+                    kTransitionMinBudgetMs,
+                    predicted_scan_ms);
+        }
+
+        if (transition_zone != 0U &&
+            scan_budget_ms < predicted_scan_ms) {
+            std::size_t reduced =
+                static_cast<std::size_t>(
+                    scan_budget_ms /
+                    ms_per_hash);
+            reduced =
+                (reduced /
+                 kTransitionQuantum) *
+                kTransitionQuantum;
+            effective_batch =
+                std::min(
+                    learned_batch,
+                    std::max(
+                        kTransitionMinBatch,
+                        reduced));
+            transition_shaped =
+                effective_batch < learned_batch;
+        }
+    }
+
+    if (transition_zone != worker.transition_shape_zone) {
+        worker.transition_shape_zone = transition_zone;
+
+        const char* zone_name =
+            transition_zone == 1U
+                ? "remaining-time"
+                : (transition_zone == 2U
+                       ? "overdue-short"
+                       : "normal");
+
+        std::cout
+            << "[transition-batch] GPU "
+            << worker.device_id
+            << " zone="
+            << zone_name
+            << " job_age_ms="
+            << std::fixed << std::setprecision(1)
+            << age_ms
+            << " lifetime_ewma_ms="
+            << job_lifetime_ms_ewma_
+            << " remaining_ms="
+            << remaining_ms
+            << " predicted_scan_ms="
+            << predicted_scan_ms
+            << " budget_ms="
+            << scan_budget_ms
+            << " batch="
+            << learned_batch
+            << " -> "
+            << effective_batch
+            << "\n";
+    }
+
+    return effective_batch;
 }
 
 bool Client::mine_gpu_batch(std::intptr_t socket_value)
@@ -2046,80 +2480,29 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
 
     auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
         const std::size_t learned_batch = worker.engine->batch_size();
-        std::size_t effective_batch = learned_batch;
         bool transition_shaped = false;
+        std::size_t effective_batch =
+            transition_batch_for_worker(
+                worker,
+                learned_batch,
+                transition_shaped);
 
-        if (job_lifetime_samples_ >= 3U &&
-            job_lifetime_ms_ewma_ >= 20000.0 &&
-            active_job_received_at_.time_since_epoch().count() != 0) {
-            const double age_ms =
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() -
-                    active_job_received_at_).count();
-            const double age_ratio =
-                age_ms / job_lifetime_ms_ewma_;
-
-            constexpr std::size_t kTransitionQuantum = 256U;
-            constexpr std::size_t kTransitionMinBatch = 1024U;
-
-            std::uint32_t transition_zone = 0U;
-            double batch_fraction = 1.0;
-
-            if (age_ratio >= 0.80 && age_ratio < 1.00) {
-                transition_zone = 1U;
-                batch_fraction = 0.50;
-            } else if (age_ratio >= 1.00 && age_ratio < 1.25) {
-                transition_zone = 2U;
-                batch_fraction = 0.75;
-            } else if (age_ratio >= 1.25) {
-                transition_zone = 3U;
-            }
-
-            if (transition_zone == 1U ||
-                transition_zone == 2U) {
-                std::size_t reduced =
-                    static_cast<std::size_t>(
-                        static_cast<double>(learned_batch) *
-                        batch_fraction);
-                reduced =
-                    (reduced / kTransitionQuantum) *
-                    kTransitionQuantum;
-                effective_batch =
-                    std::min(
-                        learned_batch,
-                        std::max(kTransitionMinBatch, reduced));
-                transition_shaped =
-                    effective_batch < learned_batch;
-            }
-
-            if (transition_zone != worker.transition_shape_zone) {
-                worker.transition_shape_zone = transition_zone;
-
-                const char* zone_name =
-                    transition_zone == 1U
-                        ? "late-50pct"
-                        : (transition_zone == 2U
-                               ? "overdue-75pct"
-                               : (transition_zone == 3U
-                                      ? "expired-normal"
-                                      : "normal"));
-
-                std::cout
-                    << "[transition-batch] GPU "
-                    << worker.device_id
-                    << " zone="
-                    << zone_name
-                    << " job_age_ms="
-                    << std::fixed << std::setprecision(1)
-                    << age_ms
-                    << " lifetime_ewma_ms="
-                    << job_lifetime_ms_ewma_
-                    << " batch="
-                    << learned_batch
-                    << " -> "
-                    << effective_batch
-                    << "\n";
-            }
+        if (worker.opening_scan_shape_pending && learned_batch > 3584U) {
+            // Use the already-qualified 3584 production geometry as the only
+            // opening hedge. Novel half-batches (1792/2560) force backend and
+            // selector cache misses, which can cost more startup time than the
+            // shorter scan saves. Normal 3584 rotations therefore remain
+            // completely untouched.
+            constexpr std::size_t kOpeningCachedBatch = 3584U;
+            effective_batch = std::min(effective_batch, kOpeningCachedBatch);
+            transition_shaped = effective_batch < learned_batch;
+            worker.opening_scan_shape_pending = false;
+            std::cout << "[opening-scan] GPU " << worker.device_id
+                      << " batch=" << learned_batch
+                      << " -> " << effective_batch
+                      << " | cached one-shot job-start hedge\n";
+        } else {
+            worker.opening_scan_shape_pending = false;
         }
 
         const auto count =
@@ -2237,80 +2620,29 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
 
     auto launch_next_scan = [this](GpuWorker& worker) -> std::uint64_t {
         const std::size_t learned_batch = worker.engine->batch_size();
-        std::size_t effective_batch = learned_batch;
         bool transition_shaped = false;
+        std::size_t effective_batch =
+            transition_batch_for_worker(
+                worker,
+                learned_batch,
+                transition_shaped);
 
-        if (job_lifetime_samples_ >= 3U &&
-            job_lifetime_ms_ewma_ >= 20000.0 &&
-            active_job_received_at_.time_since_epoch().count() != 0) {
-            const double age_ms =
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() -
-                    active_job_received_at_).count();
-            const double age_ratio =
-                age_ms / job_lifetime_ms_ewma_;
-
-            constexpr std::size_t kTransitionQuantum = 256U;
-            constexpr std::size_t kTransitionMinBatch = 1024U;
-
-            std::uint32_t transition_zone = 0U;
-            double batch_fraction = 1.0;
-
-            if (age_ratio >= 0.80 && age_ratio < 1.00) {
-                transition_zone = 1U;
-                batch_fraction = 0.50;
-            } else if (age_ratio >= 1.00 && age_ratio < 1.25) {
-                transition_zone = 2U;
-                batch_fraction = 0.75;
-            } else if (age_ratio >= 1.25) {
-                transition_zone = 3U;
-            }
-
-            if (transition_zone == 1U ||
-                transition_zone == 2U) {
-                std::size_t reduced =
-                    static_cast<std::size_t>(
-                        static_cast<double>(learned_batch) *
-                        batch_fraction);
-                reduced =
-                    (reduced / kTransitionQuantum) *
-                    kTransitionQuantum;
-                effective_batch =
-                    std::min(
-                        learned_batch,
-                        std::max(kTransitionMinBatch, reduced));
-                transition_shaped =
-                    effective_batch < learned_batch;
-            }
-
-            if (transition_zone != worker.transition_shape_zone) {
-                worker.transition_shape_zone = transition_zone;
-
-                const char* zone_name =
-                    transition_zone == 1U
-                        ? "late-50pct"
-                        : (transition_zone == 2U
-                               ? "overdue-75pct"
-                               : (transition_zone == 3U
-                                      ? "expired-normal"
-                                      : "normal"));
-
-                std::cout
-                    << "[transition-batch] GPU "
-                    << worker.device_id
-                    << " zone="
-                    << zone_name
-                    << " job_age_ms="
-                    << std::fixed << std::setprecision(1)
-                    << age_ms
-                    << " lifetime_ewma_ms="
-                    << job_lifetime_ms_ewma_
-                    << " batch="
-                    << learned_batch
-                    << " -> "
-                    << effective_batch
-                    << "\n";
-            }
+        if (worker.opening_scan_shape_pending && learned_batch > 3584U) {
+            // Use the already-qualified 3584 production geometry as the only
+            // opening hedge. Novel half-batches (1792/2560) force backend and
+            // selector cache misses, which can cost more startup time than the
+            // shorter scan saves. Normal 3584 rotations therefore remain
+            // completely untouched.
+            constexpr std::size_t kOpeningCachedBatch = 3584U;
+            effective_batch = std::min(effective_batch, kOpeningCachedBatch);
+            transition_shaped = effective_batch < learned_batch;
+            worker.opening_scan_shape_pending = false;
+            std::cout << "[opening-scan] GPU " << worker.device_id
+                      << " batch=" << learned_batch
+                      << " -> " << effective_batch
+                      << " | cached one-shot job-start hedge\n";
+        } else {
+            worker.opening_scan_shape_pending = false;
         }
 
         const auto count =
@@ -2741,7 +3073,11 @@ void Client::report_stats(bool force)
             return graph;
         };
 
-        const auto compact_graph = [&history_stats](
+        const auto tui_glyph_mode =
+            yerbas::console::detail::resolve_glyph_mode(
+                config_.logging.glyph_mode);
+
+        const auto compact_graph = [&history_stats, tui_glyph_mode](
             const std::vector<double>& history,
             std::size_t width,
             std::size_t sample_limit,
@@ -2750,6 +3086,18 @@ void Client::report_stats(bool force)
             static constexpr const char* levels[] = {
                 " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
             };
+
+            const auto level_glyph =
+                [tui_glyph_mode](int amount) -> const char* {
+                    if (amount <= 0) return " ";
+                    if (tui_glyph_mode ==
+                        yerbas::console::detail::GlyphMode::Ascii)
+                        return "#";
+                    if (tui_glyph_mode ==
+                        yerbas::console::detail::GlyphMode::Block)
+                        return amount <= 4 ? "▄" : "█";
+                    return levels[std::clamp(amount, 0, 8)];
+                };
 
             std::array<std::string, 3> rows{{"", "", ""}};
             if (width == 0U)
@@ -2824,9 +3172,9 @@ void Client::report_stats(bool force)
                 const int upper =
                     std::clamp(level - 16, 0, 8);
 
-                rows[0] += levels[upper];
-                rows[1] += levels[middle];
-                rows[2] += levels[lower];
+                rows[0] += level_glyph(upper);
+                rows[1] += level_glyph(middle);
+                rows[2] += level_glyph(lower);
             }
 
             return rows;
@@ -3082,7 +3430,9 @@ void Client::report_stats(bool force)
         };
 
         const std::string top_left =
-            "─[ YERBAS MINER ]";
+            std::string("─[ YERBAS MINER  -  ") +
+            YERBAS_VERSION_STRING +
+            " ]";
         const std::size_t top_used =
             display_width(top_left);
 
@@ -3143,11 +3493,14 @@ void Client::report_stats(bool force)
 
         {
             const std::size_t panel_gap = 2U;
+            const bool side_by_side_panels =
+                inner_width >= 145U;
             const std::size_t mascot_panel_width =
-                inner_width >= 155U ? 46U :
-                (inner_width >= 145U ? 42U : 0U);
+                side_by_side_panels
+                    ? (inner_width >= 155U ? 46U : 42U)
+                    : 42U;
             const std::size_t hashrate_panel_width =
-                mascot_panel_width > 0U
+                side_by_side_panels
                     ? inner_width - mascot_panel_width - panel_gap
                     : inner_width;
 
@@ -3255,11 +3608,15 @@ void Client::report_stats(bool force)
                     << fit(format_rate(stats.high), 10);
                 hashrate_rows.push_back(header.str());
 
+                // Layer the same filled silhouette with three visual
+                // intensities. The crest is brightest, the middle is normal,
+                // and the base is subdued so the graph reads as one coherent
+                // shape instead of three equally-heavy terminal rows.
                 std::ostringstream graph_top;
                 graph_top
                     << std::string(8U, ' ')
-                    << dim << "│ " << reset
-                    << color
+                    << dim << "╷ " << reset
+                    << bold << color
                     << graph[0]
                     << reset;
                 hashrate_rows.push_back(graph_top.str());
@@ -3276,12 +3633,20 @@ void Client::report_stats(bool force)
                 std::ostringstream graph_bottom;
                 graph_bottom
                     << std::string(8U, ' ')
-                    << dim << "└ " << reset
-                    << color
+                    << dim << "╰ " << reset
+                    << dim << color
                     << graph[2]
                     << reset
                     << ' '
-                    << color << "●" << reset;
+                    << bold << color
+                    << (tui_glyph_mode ==
+                                yerbas::console::detail::GlyphMode::Braille
+                            ? "◆"
+                            : (tui_glyph_mode ==
+                                       yerbas::console::detail::GlyphMode::Block
+                                   ? "█"
+                                   : "*"))
+                    << reset;
                 hashrate_rows.push_back(graph_bottom.str());
             };
 
@@ -3295,12 +3660,12 @@ void Client::report_stats(bool force)
 
             hashrate_rows.push_back(
                 dim + repeat(
-                    "·",
+                    "─",
                     total_graph_width > 18U
                         ? total_graph_width - 18U
                         : 24U) + reset);
             hashrate_rows.push_back(
-                dim + std::string("WORKERS") + reset);
+                dim + std::string("WORKER DETAIL") + reset);
 
             append_source_trend(
                 "CPU",
@@ -3681,6 +4046,60 @@ void Client::report_stats(bool force)
                     return cells;
                 }();
 
+                const auto display_garden_glyph =
+                    [tui_glyph_mode](char32_t glyph) {
+                        if (glyph == U' ' ||
+                            glyph < 0x2800U ||
+                            glyph > 0x28ffU)
+                            return glyph;
+
+                        if (tui_glyph_mode ==
+                            yerbas::console::detail::GlyphMode::Braille)
+                            return glyph;
+
+                        if (tui_glyph_mode ==
+                            yerbas::console::detail::GlyphMode::Ascii)
+                            return U'#';
+
+                        // Native broad-coverage Windows renderer. Preserve the
+                        // traced leaf's directional weight using only the five
+                        // block characters that render consistently in classic
+                        // Windows console fonts. Do not use quadrant glyphs.
+                        const unsigned int bits =
+                            static_cast<unsigned int>(
+                                glyph - 0x2800U);
+                        const unsigned int upper =
+                            ((bits & 0x01U) != 0U) +
+                            ((bits & 0x02U) != 0U) +
+                            ((bits & 0x08U) != 0U) +
+                            ((bits & 0x10U) != 0U);
+                        const unsigned int lower =
+                            ((bits & 0x04U) != 0U) +
+                            ((bits & 0x40U) != 0U) +
+                            ((bits & 0x20U) != 0U) +
+                            ((bits & 0x80U) != 0U);
+                        const unsigned int left =
+                            ((bits & 0x01U) != 0U) +
+                            ((bits & 0x02U) != 0U) +
+                            ((bits & 0x04U) != 0U) +
+                            ((bits & 0x40U) != 0U);
+                        const unsigned int right =
+                            ((bits & 0x08U) != 0U) +
+                            ((bits & 0x10U) != 0U) +
+                            ((bits & 0x20U) != 0U) +
+                            ((bits & 0x80U) != 0U);
+                        const unsigned int density =
+                            upper + lower;
+
+                        if (density == 0U) return U' ';
+                        if (density >= 4U) return U'█';
+                        if (upper >= lower + 2U) return U'▀';
+                        if (lower >= upper + 2U) return U'▄';
+                        if (left >= right + 2U) return U'▌';
+                        if (right >= left + 2U) return U'▐';
+                        return density >= 2U ? U'█' : U'▄';
+                    };
+
                 auto append_utf8 =
                     [](std::string& out, char32_t cp) {
                         if (cp <= 0x7fU) {
@@ -3875,7 +4294,9 @@ void Client::report_stats(bool force)
                     std::string utf8_row;
                     utf8_row.reserve(plant_cols * 3U);
                     for (const char32_t glyph : row)
-                        append_utf8(utf8_row, glyph);
+                        append_utf8(
+                            utf8_row,
+                            display_garden_glyph(glyph));
 
                     std::ostringstream art_line;
                     art_line
@@ -3886,7 +4307,14 @@ void Client::report_stats(bool force)
                 }
 
                 mascot_rows.push_back(
-                    dim + repeat("·", 40U) + reset);
+                    dim +
+                    repeat(
+                        tui_glyph_mode ==
+                                yerbas::console::detail::GlyphMode::Ascii
+                            ? "."
+                            : "·",
+                        40U) +
+                    reset);
 
                 {
                     std::ostringstream job_line;
@@ -3907,38 +4335,45 @@ void Client::report_stats(bool force)
                                mascot_rows,
                                mascot_panel_width);
 
-                const std::size_t rows =
-                    std::max(hashrate_box.size(),
-                             mascot_box.size());
+                if (side_by_side_panels) {
+                    const std::size_t rows =
+                        std::max(hashrate_box.size(),
+                                 mascot_box.size());
 
-                for (std::size_t i = 0U; i < rows; ++i) {
-                    std::string left =
-                        i < hashrate_box.size()
-                            ? hashrate_box[i]
-                            : std::string(
-                                  hashrate_panel_width, ' ');
-                    std::string right =
-                        i < mascot_box.size()
-                            ? mascot_box[i]
-                            : std::string(
-                                  mascot_panel_width, ' ');
+                    for (std::size_t i = 0U; i < rows; ++i) {
+                        std::string left =
+                            i < hashrate_box.size()
+                                ? hashrate_box[i]
+                                : std::string(
+                                      hashrate_panel_width, ' ');
+                        std::string right =
+                            i < mascot_box.size()
+                                ? mascot_box[i]
+                                : std::string(
+                                      mascot_panel_width, ' ');
 
-                    const std::size_t left_width =
-                        display_width(left);
-                    if (left_width < hashrate_panel_width)
-                        left.append(
-                            hashrate_panel_width - left_width,
-                            ' ');
+                        const std::size_t left_width =
+                            display_width(left);
+                        if (left_width < hashrate_panel_width)
+                            left.append(
+                                hashrate_panel_width - left_width,
+                                ' ');
 
-                    frame
-                        << left
-                        << std::string(panel_gap, ' ')
-                        << right
-                        << '\n';
+                        frame
+                            << left
+                            << std::string(panel_gap, ' ')
+                            << right
+                            << '\n';
+                    }
+                } else {
+                    // Narrow terminals (common with Windows PowerShell/conhost)
+                    // keep the exact same 40-column garden artwork by stacking
+                    // it below the hashrate panel instead of suppressing it.
+                    for (const auto& row : hashrate_box)
+                        frame << row << '\n';
+                    for (const auto& row : mascot_box)
+                        frame << row << '\n';
                 }
-            } else {
-                for (const auto& row : hashrate_box)
-                    frame << row << '\n';
             }
         }
 
@@ -4089,8 +4524,27 @@ void Client::report_stats(bool force)
 
         const bool activity_dev_fee_active =
             dev_fee_active(mining_started_);
+
+        // Keep the top of the dashboard visible on shorter terminals. The full
+        // layout uses ten activity rows when height allows; on smaller Windows
+        // viewports the activity feed contracts before the YERBAS MINER banner
+        // can be pushed off-screen.
+        const std::size_t terminal_height =
+            yerbas::console::detail::terminal_rows();
+        const std::size_t activity_total_rows =
+            terminal_height >= 45U
+                ? 10U
+                : std::max<std::size_t>(
+                      1U,
+                      terminal_height > 35U
+                          ? terminal_height - 35U
+                          : 1U);
         const std::size_t activity_event_rows =
-            activity_dev_fee_active ? 9U : 10U;
+            activity_dev_fee_active
+                ? (activity_total_rows > 1U
+                       ? activity_total_rows - 1U
+                       : 1U)
+                : activity_total_rows;
 
         if (activity_dev_fee_active) {
             frame << line(

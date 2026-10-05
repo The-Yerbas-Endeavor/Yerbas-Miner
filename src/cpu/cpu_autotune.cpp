@@ -13,13 +13,18 @@
 #include <iomanip>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 namespace yerbas::cpu {
 namespace {
 
-constexpr int kCpuPolicyRevision = 6;
+// Rev 9 invalidates short-sample CPU policies. Earlier revisions timed only
+// one tiny worker batch per representative header, so scheduler noise could
+// move a candidate by 100+ H/s and promote a false winner. Rev 9 measures each
+// header for a minimum wall-clock window before ranking or confirming plans.
+constexpr int kCpuPolicyRevision = 9;
 constexpr double kCnLocalRequiredGain = 1.03;
 constexpr double kWholePlanWidthRequiredGain = 1.005;
 constexpr double kAffinityRequiredGain = 1.02;
@@ -153,11 +158,34 @@ double benchmark_header(const Plan& plan,
 
     (void)pool.run(header, impossible_target, 0x51000000U,
                    std::min(4U, std::max(1U, plan.batch)));
+
+    // A single small batch is far too short for a reliable production ranking:
+    // OS scheduling and CPU-frequency transients can dominate the sample.
+    // Accumulate whole-GhostRider work for at least 300 ms per representative
+    // header, while keeping a finite guard for unexpectedly slow candidates.
+    constexpr double kMinimumMeasurementSeconds = 0.300;
+    constexpr unsigned int kMaximumMeasurementRuns = 128U;
     const auto begin = std::chrono::steady_clock::now();
-    (void)pool.run(header, impossible_target, 0x52000000U, plan.batch);
+    std::uint64_t measured_hashes = 0U;
+    unsigned int run = 0U;
+    for (; run < kMaximumMeasurementRuns; ++run) {
+        if (stopped(stop)) return 0.0;
+        const std::uint32_t nonce =
+            0x52000000U + static_cast<std::uint32_t>(
+                run * plan.workers * plan.batch);
+        (void)pool.run(header, impossible_target, nonce, plan.batch);
+        measured_hashes +=
+            static_cast<std::uint64_t>(plan.workers) * plan.batch;
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed =
+            std::chrono::duration<double>(now - begin).count();
+        if (elapsed >= kMinimumMeasurementSeconds) break;
+    }
     const auto end = std::chrono::steady_clock::now();
     const double seconds = std::chrono::duration<double>(end - begin).count();
-    return seconds > 0.0 ? static_cast<double>(plan.workers) * plan.batch / seconds : 0.0;
+    return seconds > 0.0
+        ? static_cast<double>(measured_hashes) / seconds
+        : 0.0;
 }
 
 double benchmark_plan(const Plan& plan,
@@ -357,25 +385,14 @@ bool load_compatible_cache(unsigned int hardware_threads,
     return true;
 }
 
-void print_autotune_progress(const char* stage, std::size_t completed, std::size_t total)
-{
-    constexpr std::size_t width = 32;
-    total = std::max<std::size_t>(1, total);
-    completed = std::min(completed, total);
-    const std::size_t filled = completed * width / total;
-    const unsigned int percent = static_cast<unsigned int>(completed * 100 / total);
-    std::cout << "[AUTO TUNING] [";
-    for (std::size_t i = 0; i < width; ++i) std::cout << (i < filled ? '#' : '-');
-    std::cout << "] " << std::setw(3) << percent << "% | " << stage << '\n';
-}
-
 } // namespace
 
 TuneResult production_autotune(unsigned int hardware_threads,
                                unsigned int configured_threads,
                                unsigned int configured_batch,
                                const std::string& mode,
-                               const std::atomic_bool* stop)
+                               const std::atomic_bool* stop,
+                               const TuneProgressCallback& progress)
 {
     hardware_threads = std::max(1U, hardware_threads);
     const unsigned int ceiling = configured_threads == 0U
@@ -392,6 +409,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
     const auto path = cache_path(hardware_threads, ceiling, mode);
     unsigned int source_ceiling = ceiling;
     if (load_compatible_cache(hardware_threads, ceiling, mode, cached, source_ceiling)) {
+        if (progress)
+            progress({"CPU tuning", "validated production cache loaded", 1U, 1U});
         set_runtime_cn_widths(cached.cn_widths);
         set_runtime_affinity_policy(cached.affinity);
         if (source_ceiling != ceiling) save_cache(path, cached);
@@ -409,6 +428,9 @@ TuneResult production_autotune(unsigned int hardware_threads,
 
     const auto topology = detect_cpu_topology();
     const auto plans = plans_for(ceiling, fallback_batch, mode);
+    if (progress)
+        progress({"CPU baseline search", "testing worker/batch production plans",
+                  0U, static_cast<unsigned int>(plans.size())});
     std::cout << "[CPU topology] logical=" << topology.logical_cpus
               << " | physical=" << topology.physical_cores
               << " | detected=" << (topology.available ? "yes" : "no") << '\n';
@@ -421,20 +443,24 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | metric=end-to-end H/s\n";
 
     TuneResult best{ceiling, 1U, fallback_batch, scalar_widths, AffinityPolicy::Unpinned, 0.0, false, false};
-    const std::size_t progress_total = plans.size() + scalar_widths.size() + 2U;
-    std::size_t progress_done = 0;
-    std::cout << "\nYERBAS MINER — AUTO TUNING\n"
-              << "Optimizing CPU settings for this system. Mining will begin automatically.\n";
-    print_autotune_progress("baseline search", progress_done, progress_total);
-
+    std::vector<std::pair<Plan, double>> plan_scores;
+    plan_scores.reserve(plans.size());
     std::size_t plan_index = 0;
     for (const auto& plan : plans) {
         if (stopped(stop)) { best.interrupted = true; return best; }
         ++plan_index;
+        if (progress) {
+            std::ostringstream detail;
+            detail << "workers=" << plan.workers << " batch=" << plan.batch;
+            progress({"CPU baseline search", detail.str(),
+                      static_cast<unsigned int>(plan_index),
+                      static_cast<unsigned int>(plans.size())});
+        }
         std::cout << "[CPU tune] baseline " << plan_index << '/' << plans.size()
                   << " | workers=" << plan.workers << " | batch=" << plan.batch << " | testing..." << std::flush;
         set_runtime_affinity_policy(AffinityPolicy::Unpinned);
         const double hps = benchmark_plan(plan, scalar_widths, stop);
+        plan_scores.push_back({plan, hps});
         if (hps > best.throughput_hps) {
             best.threads = plan.workers;
             best.batch = plan.batch;
@@ -442,11 +468,42 @@ TuneResult production_autotune(unsigned int hardware_threads,
         }
         std::cout << " done | " << std::fixed << std::setprecision(2) << hps
                   << " H/s | best=" << best.throughput_hps << " H/s" << std::defaultfloat << '\n';
-        ++progress_done;
-        print_autotune_progress("baseline search", progress_done, progress_total);
     }
 
     if (stopped(stop)) { best.interrupted = true; return best; }
+
+    // The one-pass search is intentionally broad, but a single noisy sample
+    // must not choose the production CPU plan.  Confirm the three strongest
+    // plans with repeated whole-GhostRider measurements and select by median.
+    // This prevents transient 400+ H/s spikes from promoting a plan that later
+    // validates near 300 H/s.
+    std::sort(plan_scores.begin(), plan_scores.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    const std::size_t confirm_count = std::min<std::size_t>(3U, plan_scores.size());
+    if (progress)
+        progress({"CPU winner confirmation", "retesting strongest production plans", 0U, 0U});
+    double confirmed_best_hps = 0.0;
+    Plan confirmed_best{best.threads, best.batch};
+    for (std::size_t i = 0; i < confirm_count; ++i) {
+        const auto& candidate = plan_scores[i].first;
+        set_runtime_affinity_policy(AffinityPolicy::Unpinned);
+        const double confirmed =
+            benchmark_plan_repeated(candidate, scalar_widths, 3U, stop);
+        std::cout << "[CPU tune] baseline confirm " << (i + 1U) << '/' << confirm_count
+                  << " | workers=" << candidate.workers
+                  << " | batch=" << candidate.batch
+                  << " | median=" << std::fixed << std::setprecision(2)
+                  << confirmed << " H/s" << std::defaultfloat << '\n';
+        if (confirmed > confirmed_best_hps) {
+            confirmed_best_hps = confirmed;
+            confirmed_best = candidate;
+        }
+    }
+    if (confirmed_best_hps > 0.0) {
+        best.threads = confirmed_best.workers;
+        best.batch = confirmed_best.batch;
+        best.throughput_hps = confirmed_best_hps;
+    }
 
     const Plan selected_plan{best.threads, best.batch};
     CnWidthPolicy widths = scalar_widths;
@@ -455,6 +512,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
     for (std::size_t variant = 0; variant < widths.size(); ++variant) {
         if (stopped(stop)) { best.interrupted = true; return best; }
         const char* name = ghostrider::cryptonight_name(static_cast<std::uint8_t>(variant));
+        if (progress)
+            progress({"CPU CryptoNight qualification", name, 0U, 0U});
         const auto probe = probe_cn_widths(static_cast<std::uint8_t>(variant), stop);
         std::cout << "[CPU CN probe] " << name
                   << " | 1way=" << std::fixed << std::setprecision(2) << probe.scalar_hps
@@ -494,8 +553,6 @@ TuneResult production_autotune(unsigned int hardware_threads,
                 break;
             }
         }
-        ++progress_done;
-        print_autotune_progress("CryptoNight optimization", progress_done, progress_total);
     }
 
     best.cn_widths = widths;
@@ -504,6 +561,8 @@ TuneResult production_autotune(unsigned int hardware_threads,
 
 #if defined(__linux__)
     if (topology.available && selected_plan.workers <= topology.logical_cpus) {
+        if (progress)
+            progress({"CPU affinity validation", "unpinned vs physical-first", 0U, 0U});
         std::cout << "[CPU affinity] A/B unpinned vs physical-first x" << kAffinityProbePasses << "...\n";
         set_runtime_affinity_policy(AffinityPolicy::Unpinned);
         const double unpinned_hps = benchmark_plan_repeated(selected_plan, widths, kAffinityProbePasses, stop);
@@ -520,11 +579,10 @@ TuneResult production_autotune(unsigned int hardware_threads,
     }
 #endif
 
-    ++progress_done;
-    print_autotune_progress("affinity selection", progress_done, progress_total);
-
     set_runtime_cn_widths(best.cn_widths);
     set_runtime_affinity_policy(best.affinity);
+    if (progress)
+        progress({"CPU final validation", "end-to-end throughput + parity", 0U, 0U});
     const bool parity_ok = parity_width_policy(best.cn_widths);
     std::cout << "[CPU tune] final validation | end-to-end + parity..." << std::flush;
     const double tuned_hps = benchmark_plan_repeated(selected_plan, best.cn_widths, 3U, stop);
@@ -541,10 +599,6 @@ TuneResult production_autotune(unsigned int hardware_threads,
         best.throughput_hps = tuned_hps;
     }
 
-    ++progress_done;
-    print_autotune_progress("final validation", progress_done, progress_total);
-    std::cout << "[AUTO TUNING] complete — starting miner\n\n";
-
     save_cache(path, best);
     std::cout << "[CPU tune] selected"
               << " | workers=" << best.threads
@@ -555,7 +609,7 @@ TuneResult production_autotune(unsigned int hardware_threads,
               << " | affinity=" << affinity_policy_name(best.affinity)
               << " | parity=" << (parity_ok ? "PASS" : "FAIL-scalar")
               << " | throughput=" << std::fixed << std::setprecision(2) << best.throughput_hps << " H/s"
-              << " | cache=cpu-policy-v6" << std::defaultfloat << '\n';
+              << " | cache=cpu-policy-v" << kCpuPolicyRevision << std::defaultfloat << '\n';
     return best;
 }
 

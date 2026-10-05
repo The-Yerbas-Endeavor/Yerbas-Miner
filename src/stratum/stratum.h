@@ -308,6 +308,12 @@ private:
         // learned batch once the job outlives that window.
         std::uint32_t transition_shape_zone{0};
 
+        // On each new Stratum job, one GPU launches a single shorter opening
+        // scan before returning to its learned production batch. This gives
+        // short-lived jobs a chance to complete useful GPU work without
+        // globally shrinking the validated sustained-production batches.
+        bool opening_scan_shape_pending{false};
+
         // Opt-in production-latency accounting. Updated only by the Stratum
         // scheduling thread so no atomics are needed.
         std::uint64_t telemetry_batches_launched{0};
@@ -347,6 +353,13 @@ private:
             double rejected_probe_baseline_hps{0.0};
             std::uint64_t rejected_probe_stable_samples{0};
 
+            // Marginal throughput gains are easy to confuse with scan noise.
+            // Track repeat wins for the exact GPU + rotation and only promote
+            // a 0.5-1.0% gain after it reproduces three times.
+            std::size_t marginal_probe_batch{0};
+            std::uint64_t marginal_probe_wins{0};
+            double marginal_probe_gain_sum{0.0};
+
             // A batch that demonstrated a meaningful live H/s gain. Give it
             // modest latency hysteresis so a single noisy scan does not erase
             // a real throughput improvement.
@@ -359,6 +372,7 @@ private:
             // mistaken for an exact-rotation learned result.
             std::size_t persisted_batch{0};
             RotationFingerprint persisted_rotation_fingerprint{};
+            bool persisted_provisional{false};
         };
 
         // Optional live latency-targeted production experiment. The base batch
@@ -397,6 +411,10 @@ private:
     void seed_gpu_batch_from_live_memory(GpuWorker& worker,
                                          std::uint32_t cn_mask);
     void drain_gpu_scans() noexcept;
+    std::size_t transition_batch_for_worker(
+        GpuWorker& worker,
+        std::size_t learned_batch,
+        bool& transition_shaped);
 
     std::vector<GpuWorker> gpu_workers_;
     JobLoadedFlag gpu_job_loaded_{};

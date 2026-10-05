@@ -124,10 +124,17 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                       << " | CN=" << gpu_calibration_cn_summary(jobs[cls])
                       << " | actual-scratchpad=" << (actual_page / 1024U) << " KiB/hash"
                       << " | safe-max=" << max_safe_batch
-                      << " | batch=" << nominal << " | testing..." << std::flush;
+                      << " | batch=" << nominal << " | testing...\n" << std::flush;
+            GpuAutotuneHeartbeat heartbeat_nominal(
+                device_id,
+                progress,
+                total_measurements,
+                std::string("class=") + kGpuBatchClassNames[cls] +
+                    " batch=" + std::to_string(nominal));
             double best_hps = gpu_calibration_hps(
                 stream, d_job, d_nonces, states, scratchpads, contexts,
                 jobs[cls], best);
+            heartbeat_nominal.stop();
             std::cout << std::fixed << std::setprecision(2)
                       << " done | " << best_hps << " H/s | best="
                       << best_hps << " H/s" << std::defaultfloat << '\n';
@@ -147,10 +154,18 @@ GpuTunePolicy run_gpu_calibration_safe(int device_id,
                           << progress << '/' << total_measurements
                           << " | class=" << kGpuBatchClassNames[cls]
                           << " | candidate=" << label
-                          << " | batch=" << candidate_batch << " | testing..." << std::flush;
+                          << " | batch=" << candidate_batch << " | testing...\n" << std::flush;
+                GpuAutotuneHeartbeat heartbeat_candidate(
+                    device_id,
+                    progress,
+                    total_measurements,
+                    std::string("class=") + kGpuBatchClassNames[cls] +
+                        " candidate=" + label +
+                        " batch=" + std::to_string(candidate_batch));
                 const double hps = gpu_calibration_hps(
                     stream, d_job, d_nonces, states, scratchpads, contexts,
                     jobs[cls], candidate);
+                heartbeat_candidate.stop();
                 const double gain_pct = best_hps > 0.0
                     ? (hps / best_hps - 1.0) * 100.0 : 0.0;
                 const bool wins = hps > best_hps * kGpuCalibrationMinimumGain;

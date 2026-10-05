@@ -76,6 +76,45 @@ struct StreamBufferRestore {
 };
 
 #ifdef _WIN32
+void enlarge_windows_console_viewport()
+{
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (output == INVALID_HANDLE_VALUE || output == nullptr)
+        return;
+
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(output, &info))
+        return;
+
+    constexpr SHORT kDesiredColumns = 160;
+    constexpr SHORT kDesiredRows = 54;
+
+    const COORD largest = GetLargestConsoleWindowSize(output);
+    const SHORT desired_columns =
+        static_cast<SHORT>(
+            std::max<int>(
+                info.srWindow.Right - info.srWindow.Left + 1,
+                std::min<int>(kDesiredColumns, largest.X)));
+    const SHORT desired_rows =
+        static_cast<SHORT>(
+            std::max<int>(
+                info.srWindow.Bottom - info.srWindow.Top + 1,
+                std::min<int>(kDesiredRows, largest.Y)));
+
+    // A console window cannot be larger than its backing screen buffer.
+    COORD buffer = info.dwSize;
+    buffer.X = std::max(buffer.X, desired_columns);
+    buffer.Y = std::max(buffer.Y, desired_rows);
+    (void)SetConsoleScreenBufferSize(output, buffer);
+
+    SMALL_RECT window = info.srWindow;
+    window.Left = 0;
+    window.Top = 0;
+    window.Right = static_cast<SHORT>(desired_columns - 1);
+    window.Bottom = static_cast<SHORT>(desired_rows - 1);
+    (void)SetConsoleWindowInfo(output, TRUE, &window);
+}
+
 void enable_windows_console_rendering()
 {
     // The miner writes UTF-8 glyphs and ANSI/VT escape sequences directly to
@@ -113,6 +152,13 @@ void enable_windows_console_rendering()
             SetConsoleMode(input, mode);
         }
     }
+
+    // The dashboard is roughly forty-plus rows tall with the graph, garden,
+    // share/work section and activity feed. Give native Windows consoles enough
+    // initial room that the top YERBAS MINER banner is not scrolled away.
+    // Windows Terminal/ConPTY may ignore legacy resize requests; the dashboard
+    // also adapts its activity rows to the actual viewport size.
+    enlarge_windows_console_viewport();
 }
 
 const char* windows_access_kind(ULONG_PTR kind)
@@ -203,6 +249,16 @@ int main(int argc, char** argv)
 
         const bool terminal_capable =
             yerbas::console::detail::terminal_supports_color();
+
+#ifdef _WIN32
+        std::cout
+            << yerbas::console::detail::windows_console_status_line(
+                   config.logging.glyph_mode)
+            << '\n'
+            << yerbas::console::detail::windows_render_probe_line(
+                   config.logging.glyph_mode)
+            << '\n';
+#endif
 
         bool use_dashboard = false;
         if (config.logging.console_mode == "tui") {

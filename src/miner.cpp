@@ -1,7 +1,9 @@
 #include "miner.h"
+#include "build_info.h"
 #include "cpu/cpu_autotune.h"
 #include "cpu/cpu_features.h"
 #include "cpu/cpu_worker_pool.h"
+#include "console_file_log.h"
 #include "ghostrider/ghostrider.h"
 #include "stratum/stratum.h"
 
@@ -187,11 +189,16 @@ int Miner::run()
                       << " | lanes=1\n";
         } else {
             std::cout << "[AUTOTUNE] CPU phase starting\n";
-            const auto tune = cpu::production_autotune(hw_threads,
-                                                       config_.miner.threads,
-                                                       config_.miner.cpu_batch,
-                                                       config_.miner.cpu_tune,
-                                                       &g_mining_stop_requested);
+            const auto tune = cpu::production_autotune(
+                hw_threads,
+                config_.miner.threads,
+                config_.miner.cpu_batch,
+                config_.miner.cpu_tune,
+                &g_mining_stop_requested,
+                [](const cpu::TuneProgress& update) {
+                    console::render_startup_tuning_progress(
+                        update.phase, update.detail, update.current, update.total);
+                });
             if (tune.interrupted || stop_requested()) {
                 std::cout << "[CPU tune] interrupted by user\n";
                 return 130;
@@ -214,7 +221,10 @@ int Miner::run()
     cpu::set_runtime_lane_width(config_.miner.cpu_lanes);
     configure_gpu_tuning_environment(config_.gpu);
 
-    std::cout << "Yerbas Miner 0.5.2\n";
+    std::cout << "Yerbas Miner " << YERBAS_VERSION_STRING
+              << " | commit " << YERBAS_GIT_COMMIT
+              << " | scheduler " << YERBAS_SCHEDULER_REVISION
+              << "\n";
     std::cout << "🌿 Proof of Grass | GhostRider mining engine\n";
     std::cout << "------------------------------------------------------------\n";
     std::cout << "Config: " << config_.config_path << "\n";

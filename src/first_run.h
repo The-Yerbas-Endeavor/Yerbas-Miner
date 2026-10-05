@@ -2,15 +2,18 @@
 
 #include "config.h"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -18,16 +21,70 @@
 namespace yerbas {
 namespace first_run {
 
+#ifdef _WIN32
+inline std::filesystem::path executable_dir()
+{
+    std::array<char, 32768> buffer{};
+    const DWORD len = GetModuleFileNameA(
+        nullptr,
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()));
+    if (len == 0 || len >= buffer.size())
+        return std::filesystem::current_path();
+    return std::filesystem::path(
+        std::string(buffer.data(), len)).parent_path();
+}
+#endif
+
 inline std::filesystem::path cache_dir()
 {
 #ifdef _WIN32
-    if (const char* p = std::getenv("LOCALAPPDATA")) return std::filesystem::path(p) / "Yerbas-Miner" / "cache";
-    if (const char* p = std::getenv("USERPROFILE")) return std::filesystem::path(p) / ".cache" / "yerbas-miner";
+    if (const char* p = std::getenv("LOCALAPPDATA"); p && *p)
+        return std::filesystem::path(p) / "Yerbas-Miner" / "cache";
+    if (const char* p = std::getenv("USERPROFILE"); p && *p)
+        return std::filesystem::path(p) / ".cache" / "yerbas-miner";
 #else
-    if (const char* p = std::getenv("XDG_CACHE_HOME")) return std::filesystem::path(p) / "yerbas-miner";
-    if (const char* p = std::getenv("HOME")) return std::filesystem::path(p) / ".cache" / "yerbas-miner";
+    if (const char* p = std::getenv("XDG_CACHE_HOME"); p && *p)
+        return std::filesystem::path(p) / "yerbas-miner";
+    if (const char* p = std::getenv("HOME"); p && *p)
+        return std::filesystem::path(p) / ".cache" / "yerbas-miner";
 #endif
     return std::filesystem::path(".") / ".yerbas-miner-cache";
+}
+
+inline std::vector<std::filesystem::path> cache_search_dirs()
+{
+    std::vector<std::filesystem::path> dirs;
+    dirs.push_back(cache_dir());
+#ifdef _WIN32
+    if (const char* p = std::getenv("LOCALAPPDATA"); p && *p) {
+        const auto legacy = std::filesystem::path(p) / "Yerbas-Miner";
+        if (legacy != dirs.front()) dirs.push_back(legacy);
+    }
+    // Portable Windows builds often keep tuning files beside the executable.
+    // Use the executable directory, not just the process working directory:
+    // shortcuts and shells may start the miner from somewhere else.
+    const auto exe_dir = executable_dir();
+    bool seen = false;
+    for (const auto& dir : dirs) {
+        if (dir == exe_dir) {
+            seen = true;
+            break;
+        }
+    }
+    if (!seen) dirs.push_back(exe_dir);
+
+    const auto cwd = std::filesystem::current_path();
+    seen = false;
+    for (const auto& dir : dirs) {
+        if (dir == cwd) {
+            seen = true;
+            break;
+        }
+    }
+    if (!seen) dirs.push_back(cwd);
+#endif
+    return dirs;
 }
 
 inline bool interactive_stdin()
@@ -41,14 +98,15 @@ inline bool interactive_stdin()
 
 inline bool cache_has_prefix(const std::string& prefix)
 {
-    std::error_code ec;
-    const auto dir = cache_dir();
-    if (!std::filesystem::exists(dir, ec)) return false;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-        const std::string name = entry.path().filename().string();
-        if (name.rfind(prefix, 0) == 0) return true;
+    for (const auto& dir : cache_search_dirs()) {
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string name = entry.path().filename().string();
+            if (name.rfind(prefix, 0) == 0) return true;
+        }
     }
     return false;
 }
@@ -101,10 +159,13 @@ inline void apply(AppConfig& cfg)
     }
 
     std::cout << "\n🌿 Yerbas Miner — First Run\n\n"
-              << "No saved hardware tuning profile was found for this machine.\n\n"
-              << "Hardware autotuning benchmarks your CPU and GPU and selects\n"
-              << "settings optimized for this system. Progress is shown while it runs.\n\n"
-              << "Run hardware autotuning now? [Y/n]: " << std::flush;
+              << "Missing tuning profile:"
+              << (!cpu_profile ? " CPU" : "")
+              << (!gpu_profile ? " GPU" : "")
+              << "\n\n"
+              << "Hardware autotuning benchmarks only the missing component(s) and\n"
+              << "keeps any valid saved tuning that is already present.\n\n"
+              << "Run missing hardware autotuning now? [Y/n]: " << std::flush;
 
     std::string answer;
     std::getline(std::cin, answer);
@@ -113,10 +174,23 @@ inline void apply(AppConfig& cfg)
 
     if (yes) {
         clear_decline_marker();
-        cfg.miner.autotune = cfg.miner.cpu_enabled;
-        cfg.gpu.autotune = cfg.gpu.enabled && cfg.gpu.gpu_tune == "auto";
-        if (cfg.miner.cpu_enabled) cfg.miner.cpu_tune = "default";
-        std::cout << "[First run] hardware autotuning selected\n\n";
+
+        // Tune only what is actually missing. A valid GPU cache must never be
+        // discarded just because the CPU profile is absent (or vice versa).
+        cfg.miner.autotune =
+            cfg.miner.cpu_enabled && !cpu_profile;
+        cfg.gpu.autotune =
+            cfg.gpu.enabled &&
+            cfg.gpu.gpu_tune == "auto" &&
+            !gpu_profile;
+
+        if (cfg.miner.autotune)
+            cfg.miner.cpu_tune = "default";
+
+        std::cout << "[First run] hardware autotuning selected"
+                  << " | CPU=" << (cfg.miner.autotune ? "tune" : "cached")
+                  << " | GPU=" << (cfg.gpu.autotune ? "tune" : "cached")
+                  << "\n\n";
     } else {
         remember_decline();
         if (!cpu_profile) cfg.miner.cpu_tune = "off";

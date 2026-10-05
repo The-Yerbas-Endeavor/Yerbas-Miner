@@ -59,6 +59,24 @@ inline std::size_t terminal_columns()
     return 120U;
 }
 
+inline std::size_t terminal_rows()
+{
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    const HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle != INVALID_HANDLE_VALUE && handle != nullptr &&
+        GetConsoleScreenBufferInfo(handle, &info)) {
+        const int height = info.srWindow.Bottom - info.srWindow.Top + 1;
+        if (height > 0) return static_cast<std::size_t>(height);
+    }
+#else
+    struct winsize size {};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_row > 0)
+        return static_cast<std::size_t>(size.ws_row);
+#endif
+    return 45U;
+}
+
 inline bool terminal_supports_color()
 {
     if (std::getenv("NO_COLOR") != nullptr) return false;
@@ -74,6 +92,124 @@ inline bool terminal_supports_color()
     return isatty(STDOUT_FILENO) != 0;
 #endif
 }
+
+enum class GlyphMode {
+    Braille,
+    Block,
+    Ascii
+};
+
+inline const char* glyph_mode_name(GlyphMode mode)
+{
+    switch (mode) {
+        case GlyphMode::Braille: return "braille";
+        case GlyphMode::Block: return "block-safe";
+        case GlyphMode::Ascii: return "ascii";
+    }
+    return "unknown";
+}
+
+inline GlyphMode resolve_glyph_mode(const std::string& requested)
+{
+    if (requested == "braille") return GlyphMode::Braille;
+    if (requested == "block") return GlyphMode::Block;
+    if (requested == "ascii") return GlyphMode::Ascii;
+
+#ifdef _WIN32
+    const char* wt_session = std::getenv("WT_SESSION");
+    const char* term_program = std::getenv("TERM_PROGRAM");
+    const bool modern_terminal =
+        (wt_session != nullptr && *wt_session != '\0') ||
+        (term_program != nullptr &&
+         std::string(term_program).find("Windows_Terminal") !=
+             std::string::npos);
+
+    // Windows Terminal normally has reliable Braille coverage. Classic
+    // Console Host varies by active font, so prefer the deliberately limited
+    // broad-coverage block renderer there.
+    return modern_terminal ? GlyphMode::Braille : GlyphMode::Block;
+#else
+    return GlyphMode::Braille;
+#endif
+}
+
+#ifdef _WIN32
+struct WindowsConsoleStatus {
+    std::string host{"unknown"};
+    bool interactive{false};
+    bool utf8_output{false};
+    bool vt_enabled{false};
+    std::size_t columns{0U};
+    std::size_t rows{0U};
+    bool block_garden_side_by_side{false};
+    GlyphMode glyph_mode{GlyphMode::Block};
+};
+
+inline WindowsConsoleStatus windows_console_status(
+    const std::string& requested_glyph_mode = "auto")
+{
+    WindowsConsoleStatus status;
+    status.interactive = _isatty(_fileno(stdout)) != 0;
+    status.utf8_output = GetConsoleOutputCP() == CP_UTF8;
+    status.columns = terminal_columns();
+    status.rows = terminal_rows();
+    status.block_garden_side_by_side = status.columns >= 145U;
+
+    const char* wt_session = std::getenv("WT_SESSION");
+    const char* term_program = std::getenv("TERM_PROGRAM");
+    if ((wt_session != nullptr && *wt_session != '\0') ||
+        (term_program != nullptr &&
+         std::string(term_program).find("Windows_Terminal") !=
+             std::string::npos)) {
+        status.host = "Windows Terminal";
+    } else {
+        status.host = "Windows Console Host";
+    }
+
+    status.glyph_mode = resolve_glyph_mode(requested_glyph_mode);
+
+    HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
+        DWORD mode = 0;
+        if (GetConsoleMode(handle, &mode))
+            status.vt_enabled =
+                (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+    }
+
+    return status;
+}
+
+inline std::string windows_console_status_line(
+    const std::string& requested_glyph_mode = "auto")
+{
+    const auto status =
+        windows_console_status(requested_glyph_mode);
+    std::ostringstream out;
+    out << "Console: " << status.host
+        << " | UTF-8 " << (status.utf8_output ? "PASS" : "FAIL")
+        << " | VT " << (status.vt_enabled ? "PASS" : "FAIL")
+        << " | size=" << status.columns << 'x' << status.rows
+        << " | BLOCK GARDEN="
+        << (status.block_garden_side_by_side
+                ? "side-by-side"
+                : "stacked")
+        << " | glyphs="
+        << glyph_mode_name(status.glyph_mode);
+    return out.str();
+}
+
+inline std::string windows_render_probe_line(
+    const std::string& requested_glyph_mode = "auto")
+{
+    const auto mode = resolve_glyph_mode(requested_glyph_mode);
+    if (mode == GlyphMode::Ascii)
+        return "Render test: ASCII +-|#*";
+    if (mode == GlyphMode::Block)
+        return "Render test: SAFE BLOCK ▀ ▄ ▌ ▐ █";
+    return "Render test: BOX ╭─╮│╰─╯  BLOCK ▁▂▃▄▅▆▇█  BRAILLE ⠁⠄⠸⢸⣾  NOW ◆";
+}
+#endif
+
 
 inline const char* color_for_line(const std::string& line)
 {
@@ -422,7 +558,17 @@ inline std::string strip_ansi(const std::string& line)
 
 inline std::size_t visible_width(const std::string& line)
 {
-    return strip_ansi(line).size();
+    // Count UTF-8 code points rather than bytes. Windows' UTF-8 console and
+    // Linux terminals both render the box/Braille glyphs as one terminal cell;
+    // byte-counting made Windows padding drift because these glyphs are 3-byte
+    // UTF-8 sequences.
+    const std::string clean = strip_ansi(line);
+    std::size_t width = 0U;
+    for (unsigned char c : clean) {
+        if ((c & 0xc0U) != 0x80U)
+            ++width;
+    }
+    return width;
 }
 
 inline void pad_to_visible_column(std::string& line, std::size_t column)
