@@ -48,9 +48,12 @@ std::filesystem::path cn_hardened_cache_path(int device_id,
         return {};
     }
     const std::string key = cn_cache_key(device_id, props, batch_size, driver_version, runtime_version);
+    const char* fast_lite_suffix =
+        (VariantIndex == 2U || VariantIndex == 3U) ? "-fastlite2" : "";
     return cn_cache_directory() /
         ("cn-phase2-hardened-rev" + std::to_string(kCnHardenedSelectorRevision) +
-         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) + '-' + key + ".txt");
+         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) +
+         fast_lite_suffix + '-' + key + ".txt");
 }
 
 template <std::uint8_t VariantIndex>
@@ -75,7 +78,8 @@ bool load_cn_hardened_cache(int device_id,
     if (!(in >> magic >> revision >> variant >> mode >> threads) ||
         magic != "YERBAS_CN_PHASE2_HARDENED" || revision != kCnHardenedSelectorRevision ||
         variant != static_cast<unsigned int>(VariantIndex) ||
-        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) ||
+        (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
+         mode != 446 && mode != 448 && mode != 449 && mode != 450) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0) {
         return false;
     }
@@ -110,7 +114,8 @@ void save_cn_hardened_cache(int device_id,
     if (device_id < 0 || device_id >= kCn2LaneMaxDevices) return;
     const int mode = g_cn_hardened_mode[device_id][VariantIndex];
     const int threads = g_cn_hardened_threads[device_id][VariantIndex];
-    if ((mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445) || threads <= 0) return;
+    if ((mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
+         mode != 446 && mode != 448 && mode != 449 && mode != 450) || threads <= 0) return;
 
     try {
         const auto path = cn_hardened_cache_path<VariantIndex>(device_id, props, batch_size);
@@ -188,6 +193,18 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     const int threads_dualhash = cn_occupancy_block_size(
         cryptonight_loop_stage_ttable4_dualhash<VariantIndex>,
         warp, props.maxThreadsPerBlock);
+    const int threads_mul4 = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_mul4<VariantIndex>,
+        warp, props.maxThreadsPerBlock);
+    const int threads_pairload = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_pairload<VariantIndex>,
+        warp, props.maxThreadsPerBlock);
+    const int threads_2lane = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable2_coalesced<VariantIndex>,
+        warp, props.maxThreadsPerBlock);
+    const int threads_readonly = cn_occupancy_block_size(
+        cryptonight_loop_stage_ttable4_readonly<VariantIndex>,
+        warp, props.maxThreadsPerBlock);
     const int threads_tile = cn_tile64_block_size<VariantIndex>(props);
 
     const bool parity_t4 = cn_validate_pair<VariantIndex>(
@@ -209,6 +226,20 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     const bool parity_dualhash = cn_dualhash_experiment_requested() &&
         cn_validate_pair<VariantIndex>(
             stream, 44, 32, 445, 32, scratchpads, contexts);
+    constexpr bool kFastLiteVariant =
+        VariantIndex == 2U || VariantIndex == 3U;
+    const bool parity_mul4 = kFastLiteVariant &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 446, 32, scratchpads, contexts);
+    const bool parity_pairload = kFastLiteVariant &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 448, 32, scratchpads, contexts);
+    const bool parity_2lane = kFastLiteVariant &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 449, 32, scratchpads, contexts);
+    const bool parity_readonly = kFastLiteVariant &&
+        cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 450, 32, scratchpads, contexts);
 
     std::size_t free_bytes = 0, total_bytes = 0;
     check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo hardened CN selector failed");
@@ -245,15 +276,27 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     if (parity_tile) (void)timed(222, threads_tile);
     if (parity_cg) (void)timed(444, threads_cg);
     if (parity_dualhash) (void)timed(445, threads_dualhash);
+    if (parity_mul4) (void)timed(446, threads_mul4);
+    if (parity_pairload) (void)timed(448, threads_pairload);
+    if (parity_2lane) (void)timed(449, threads_2lane);
+    if (parity_readonly) (void)timed(450, threads_readonly);
 
     std::array<float, kCnHardenedPasses> ref_times{};
     std::array<float, kCnHardenedPasses> baseline_times{};
     std::array<float, kCnHardenedPasses> tile_times{};
     std::array<float, kCnHardenedPasses> cg_times{};
     std::array<float, kCnHardenedPasses> dualhash_times{};
+    std::array<float, kCnHardenedPasses> mul4_times{};
+    std::array<float, kCnHardenedPasses> pairload_times{};
+    std::array<float, kCnHardenedPasses> lane2_times{};
+    std::array<float, kCnHardenedPasses> readonly_times{};
     tile_times.fill(-1.0F);
     cg_times.fill(-1.0F);
     dualhash_times.fill(-1.0F);
+    mul4_times.fill(-1.0F);
+    pairload_times.fill(-1.0F);
+    lane2_times.fill(-1.0F);
+    readonly_times.fill(-1.0F);
 
     // Rotate ordering to reduce temperature/clock/order bias. Every timing starts
     // from an identical clone of the real post-setup scratchpad/context.
@@ -264,7 +307,15 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
             if (parity_tile) tile_times[pass] = timed(222, threads_tile);
             if (parity_cg) cg_times[pass] = timed(444, threads_cg);
             if (parity_dualhash) dualhash_times[pass] = timed(445, threads_dualhash);
+            if (parity_mul4) mul4_times[pass] = timed(446, threads_mul4);
+            if (parity_pairload) pairload_times[pass] = timed(448, threads_pairload);
+            if (parity_2lane) lane2_times[pass] = timed(449, threads_2lane);
+            if (parity_readonly) readonly_times[pass] = timed(450, threads_readonly);
         } else {
+            if (parity_readonly) readonly_times[pass] = timed(450, threads_readonly);
+            if (parity_2lane) lane2_times[pass] = timed(449, threads_2lane);
+            if (parity_pairload) pairload_times[pass] = timed(448, threads_pairload);
+            if (parity_mul4) mul4_times[pass] = timed(446, threads_mul4);
             if (parity_dualhash) dualhash_times[pass] = timed(445, threads_dualhash);
             if (parity_cg) cg_times[pass] = timed(444, threads_cg);
             if (parity_tile) tile_times[pass] = timed(222, threads_tile);
@@ -278,6 +329,10 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
     const float tile_ms = parity_tile ? cn_hardened_median(tile_times) : -1.0F;
     const float cg_ms = parity_cg ? cn_hardened_median(cg_times) : -1.0F;
     const float dualhash_ms = parity_dualhash ? cn_hardened_median(dualhash_times) : -1.0F;
+    const float mul4_ms = parity_mul4 ? cn_hardened_median(mul4_times) : -1.0F;
+    const float pairload_ms = parity_pairload ? cn_hardened_median(pairload_times) : -1.0F;
+    const float lane2_ms = parity_2lane ? cn_hardened_median(lane2_times) : -1.0F;
+    const float readonly_ms = parity_readonly ? cn_hardened_median(readonly_times) : -1.0F;
 
     int best_mode = 44;
     int best_threads = threads_t4;
@@ -302,6 +357,26 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
         best_threads = threads_dualhash;
         best_ms = dualhash_ms;
     }
+    if (parity_mul4 && mul4_ms < baseline_ms * promotion_ratio && mul4_ms < best_ms) {
+        best_mode = 446;
+        best_threads = threads_mul4;
+        best_ms = mul4_ms;
+    }
+    if (parity_pairload && pairload_ms < baseline_ms * promotion_ratio && pairload_ms < best_ms) {
+        best_mode = 448;
+        best_threads = threads_pairload;
+        best_ms = pairload_ms;
+    }
+    if (parity_2lane && lane2_ms < baseline_ms * promotion_ratio && lane2_ms < best_ms) {
+        best_mode = 449;
+        best_threads = threads_2lane;
+        best_ms = lane2_ms;
+    }
+    if (parity_readonly && readonly_ms < baseline_ms * promotion_ratio && readonly_ms < best_ms) {
+        best_mode = 450;
+        best_threads = threads_readonly;
+        best_ms = readonly_ms;
+    }
 
     cudaFree(clone_ctx);
     cudaFree(clone);
@@ -325,8 +400,18 @@ void cn_hardened_autoselect_once(cudaStream_t stream,
               << " | prefetch-median=" << cg_ms << " ms@" << threads_cg
               << " parity=" << (parity_cg ? "PASS" : "FAIL")
               << " | dualhash-median=" << dualhash_ms << " ms@" << threads_dualhash
-              << " parity=" << (parity_dualhash ? "PASS" : "FAIL")
-              << " | production=" << cn_residency_mode_name(best_mode)
+              << " parity=" << (parity_dualhash ? "PASS" : "FAIL");
+    if constexpr (kFastLiteVariant) {
+        std::cout << " | mul4-median=" << mul4_ms << " ms@" << threads_mul4
+                  << " parity=" << (parity_mul4 ? "PASS" : "FAIL")
+                  << " | pairload-median=" << pairload_ms << " ms@" << threads_pairload
+                  << " parity=" << (parity_pairload ? "PASS" : "FAIL")
+                  << " | 2lane-median=" << lane2_ms << " ms@" << threads_2lane
+                  << " parity=" << (parity_2lane ? "PASS" : "FAIL")
+                  << " | readonly-median=" << readonly_ms << " ms@" << threads_readonly
+                  << " parity=" << (parity_readonly ? "PASS" : "FAIL");
+    }
+    std::cout << " | production=" << cn_residency_mode_name(best_mode)
               << " | selected-ms=" << best_ms
               << std::defaultfloat << '\n';
 }
