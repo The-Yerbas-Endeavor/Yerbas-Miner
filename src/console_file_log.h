@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -74,6 +75,32 @@ inline void terminal_write(const std::string& value)
     out->pubsync();
 }
 
+struct StartupTuningState {
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+    std::string phase{"Preparing startup"};
+    std::string detail{"loading cached production settings"};
+    unsigned int current{0U};
+    unsigned int total{0U};
+};
+
+inline StartupTuningState& startup_tuning_state()
+{
+    static StartupTuningState state;
+    return state;
+}
+
+inline void reset_startup_tuning_progress()
+{
+    auto& state = startup_tuning_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.started = std::chrono::steady_clock::now();
+    state.phase = "Preparing startup";
+    state.detail = "loading cached production settings";
+    state.current = 0U;
+    state.total = 0U;
+}
+
 inline void render_startup_tuning_progress(const std::string& phase,
                                            const std::string& detail,
                                            unsigned int current = 0U,
@@ -81,11 +108,34 @@ inline void render_startup_tuning_progress(const std::string& phase,
 {
     if (!dashboard_active()) return;
 
-    static const auto started = std::chrono::steady_clock::now();
+    auto& state = startup_tuning_state();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!phase.empty()) state.phase = phase;
+        if (!detail.empty()) state.detail = detail;
+        state.current = current;
+        state.total = total;
+    }
+
+    std::string display_phase;
+    std::string display_detail;
+    unsigned int display_current = 0U;
+    unsigned int display_total = 0U;
+    std::chrono::steady_clock::time_point started;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        display_phase = state.phase;
+        display_detail = state.detail;
+        display_current = state.current;
+        display_total = state.total;
+        started = state.started;
+    }
+
     const auto elapsed_seconds = static_cast<unsigned long long>(
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - started).count());
 
+    constexpr unsigned int kBarWidth = 36U;
     std::ostringstream screen;
     screen << "\x1b[H\x1b[2J"
            << "YERBAS MINER — AUTO TUNING\n\n"
@@ -93,25 +143,42 @@ inline void render_startup_tuning_progress(const std::string& phase,
            << "This happens before mining begins.\n\n"
            << "CPU  ";
 
-    if (total > 0U) {
-        constexpr unsigned int kBarWidth = 32U;
-        const unsigned int bounded = std::min(current, total);
+    if (display_total > 0U) {
+        const unsigned int bounded = std::min(display_current, display_total);
         const unsigned int filled =
-            static_cast<unsigned int>((static_cast<unsigned long long>(bounded) * kBarWidth) / total);
+            static_cast<unsigned int>(
+                (static_cast<unsigned long long>(bounded) * kBarWidth) /
+                display_total);
         screen << '[';
         for (unsigned int i = 0; i < kBarWidth; ++i)
             screen << (i < filled ? '#' : ' ');
         const unsigned int percent =
-            static_cast<unsigned int>((static_cast<unsigned long long>(bounded) * 100U) / total);
-        screen << "]  " << std::setw(3) << percent << "%\n";
+            static_cast<unsigned int>(
+                (static_cast<unsigned long long>(bounded) * 100U) /
+                display_total);
+        screen << "]  " << std::setw(3) << percent << "%  "
+               << bounded << '/' << display_total << "\n";
     } else {
-        screen << "working...\n";
+        // Unknown-duration phases use a moving activity bar rather than a fake
+        // percentage. The refresh thread advances this once per second.
+        const unsigned int span = kBarWidth - 5U;
+        const unsigned int head =
+            static_cast<unsigned int>(elapsed_seconds % (span * 2U));
+        const unsigned int pos = head < span ? head : (span * 2U - head);
+        screen << '[';
+        for (unsigned int i = 0; i < kBarWidth; ++i)
+            screen << (i >= pos && i < pos + 5U ? '#' : ' ');
+        screen << "]  working\n";
     }
 
-    screen << "     " << phase;
-    if (!detail.empty()) screen << " — " << detail;
+    screen << "     " << display_phase;
+    if (!display_detail.empty()) screen << " — " << display_detail;
+
     screen << "\n\n"
-           << "GPU  Waiting for CPU tuning...\n\n"
+           << "PROGRESS\n"
+           << "  CPU setup   " << (display_phase.find("CPU") != std::string::npos ? "ACTIVE" : "PENDING") << "\n"
+           << "  GPU setup   Waiting for CPU tuning\n"
+           << "  Mining      Waiting for tuning completion\n\n"
            << "Elapsed: "
            << std::setfill('0') << std::setw(2) << (elapsed_seconds / 60ULL)
            << ':' << std::setw(2) << (elapsed_seconds % 60ULL)
@@ -130,9 +197,19 @@ public:
         terminal_stdout_enabled() = false;
         terminal_write("\x1b[?1049h\x1b[?25l");
         active_ = true;
+
+        reset_startup_tuning_progress();
         render_startup_tuning_progress(
             "Preparing startup",
             "loading cached production settings");
+
+        refresh_thread_ = std::thread([this]() {
+            while (!stop_refresh_.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (stop_refresh_.load(std::memory_order_relaxed)) break;
+                render_startup_tuning_progress("", "");
+            }
+        });
     }
 
     DashboardScreen(const DashboardScreen&) = delete;
@@ -140,6 +217,11 @@ public:
 
     ~DashboardScreen() noexcept
     {
+        stop_refresh_.store(true, std::memory_order_relaxed);
+        if (refresh_thread_.joinable()) {
+            try { refresh_thread_.join(); } catch (...) {}
+        }
+
         if (!active_) return;
         try {
             terminal_write("\x1b[0m\x1b[?25h\x1b[?1049l");
@@ -206,6 +288,8 @@ private:
     }
 
     bool active_{false};
+    std::atomic_bool stop_refresh_{false};
+    std::thread refresh_thread_;
 
 #ifdef _WIN32
     HANDLE input_handle_{INVALID_HANDLE_VALUE};
