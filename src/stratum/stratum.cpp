@@ -4613,6 +4613,11 @@ void Client::report_stats(bool force)
                 << "\x1b[J";
         }
 
+        // The normal mining dashboard owns the alternate screen from this
+        // point onward. Stop the independent startup/autotune refresher before
+        // writing the first full frame so the two renderers cannot fight and
+        // flash between screens.
+        yerbas::console::finish_startup_tuning_progress();
         yerbas::console::terminal_write(
             frame.str());
 
