@@ -159,9 +159,15 @@ std::filesystem::path cn_production_selector_cache_path(int device_id,
         return {};
     }
     const std::string key = cn_cache_key(device_id, props, batch_size, driver_version, runtime_version);
+    // Fast/Lite use a separate namespace because their normal-production
+    // selector now evaluates additional parity-tested loop kernels. Do not
+    // invalidate the proven caches for the other four CN variants.
+    const char* fast_lite_suffix =
+        (VariantIndex == 2U || VariantIndex == 3U) ? "-fastlite2" : "";
     return cn_cache_directory() /
         ("cn-production-rev" + std::to_string(kCnProductionSelectorRevision) +
-         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) + '-' + key + ".txt");
+         "-v" + std::to_string(static_cast<unsigned int>(VariantIndex)) +
+         fast_lite_suffix + '-' + key + ".txt");
 }
 
 template <std::uint8_t VariantIndex>
@@ -180,6 +186,7 @@ bool load_cn_production_selector_cache(int device_id,
         magic != "YERBAS_CN_PRODUCTION" || revision != kCnProductionSelectorRevision ||
         variant != static_cast<int>(VariantIndex) ||
         (mode != 4 && mode != 44 && mode != 222 && mode != 444 && mode != 445 &&
+         mode != 446 && mode != 448 && mode != 449 && mode != 450 &&
          mode != 451 && mode != 452 && mode != 453) ||
         threads < warp || threads > props.maxThreadsPerBlock || (threads % warp) != 0)
         return false;
@@ -298,6 +305,169 @@ void initialize_cn_production_selector(cudaStream_t stream,
                   << " | " << cryptonight::config_value(VariantIndex).name
                   << " | batch=" << count
                   << " | baseline-parity=FAIL | production=4-lane-ref\n";
+        return;
+    }
+
+    // CN-Fast and CN-Lite are the repeatable long-rotation bottleneck on
+    // the validated GTX 1080 Ti production logs. Their ordinary 3584 batch is
+    // therefore allowed one bounded, cacheable selector pass in auto mode.
+    // Other variants retain the zero-benchmark fast-start path below.
+    constexpr bool kFastLiteVariant =
+        VariantIndex == 2U || VariantIndex == 3U;
+    if (!cn_production_retune_requested() &&
+        kFastLiteVariant && count == 3584U) {
+        const int threads_mul4 = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_mul4<VariantIndex>,
+            warp, props.maxThreadsPerBlock);
+        const int threads_pairload = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_pairload<VariantIndex>,
+            warp, props.maxThreadsPerBlock);
+        const int threads_2lane = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable2_coalesced<VariantIndex>,
+            warp, props.maxThreadsPerBlock);
+        const int threads_readonly = cn_occupancy_block_size(
+            cryptonight_loop_stage_ttable4_readonly<VariantIndex>,
+            warp, props.maxThreadsPerBlock);
+
+        init_cn_aes_ttables_readonly<<<1, 256, 0, stream>>>();
+        check_cuda(cudaGetLastError(),
+                   "CryptoNight Fast/Lite readonly T-table init failed");
+
+        const bool parity_mul4 = cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 446, 32, scratchpads, contexts);
+        const bool parity_pairload = cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 448, 32, scratchpads, contexts);
+        const bool parity_2lane = cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 449, 32, scratchpads, contexts);
+        const bool parity_readonly = cn_validate_pair<VariantIndex>(
+            stream, 44, 32, 450, 32, scratchpads, contexts);
+
+        constexpr auto cfg = cryptonight::config_value(VariantIndex);
+        std::size_t free_bytes = 0U, total_bytes = 0U;
+        check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes),
+                   "cudaMemGetInfo Fast/Lite selector failed");
+        (void)total_bytes;
+        const std::size_t bytes_per_hash =
+            cfg.page_size + sizeof(cryptonight::SplitContext);
+        const std::size_t memory_sample =
+            bytes_per_hash != 0U ? (free_bytes / 10U) / bytes_per_hash : 0U;
+        const std::size_t sample_count = std::max<std::size_t>(
+            32U, std::min<std::size_t>(
+                count, std::min<std::size_t>(256U, memory_sample)));
+
+        std::uint8_t* clone = nullptr;
+        cryptonight::SplitContext* clone_ctx = nullptr;
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&clone),
+                              sample_count * cfg.page_size),
+                   "cudaMalloc Fast/Lite selector scratch failed");
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&clone_ctx),
+                              sample_count * sizeof(cryptonight::SplitContext)),
+                   "cudaMalloc Fast/Lite selector ctx failed");
+
+        auto reset = [&]() {
+            check_cuda(cudaMemcpyAsync(
+                           clone, scratchpads,
+                           sample_count * cfg.page_size,
+                           cudaMemcpyDeviceToDevice, stream),
+                       "cudaMemcpy Fast/Lite selector scratch failed");
+            check_cuda(cudaMemcpyAsync(
+                           clone_ctx, contexts,
+                           sample_count * sizeof(cryptonight::SplitContext),
+                           cudaMemcpyDeviceToDevice, stream),
+                       "cudaMemcpy Fast/Lite selector ctx failed");
+        };
+        auto timed = [&](int mode, int threads) {
+            reset();
+            return cn_time_mode<VariantIndex>(
+                stream, mode, threads, sample_count, clone, clone_ctx);
+        };
+
+        // Warm every parity-approved path before alternating samples.
+        (void)timed(44, state.threads_t4);
+        if (parity_mul4) (void)timed(446, threads_mul4);
+        if (parity_pairload) (void)timed(448, threads_pairload);
+        if (parity_2lane) (void)timed(449, threads_2lane);
+        if (parity_readonly) (void)timed(450, threads_readonly);
+
+        std::array<float, kCnProductionSelectorPasses> baseline_times{};
+        std::array<float, kCnProductionSelectorPasses> mul4_times{};
+        std::array<float, kCnProductionSelectorPasses> pairload_times{};
+        std::array<float, kCnProductionSelectorPasses> lane2_times{};
+        std::array<float, kCnProductionSelectorPasses> readonly_times{};
+        mul4_times.fill(-1.0F);
+        pairload_times.fill(-1.0F);
+        lane2_times.fill(-1.0F);
+        readonly_times.fill(-1.0F);
+
+        for (int pass = 0; pass < kCnProductionSelectorPasses; ++pass) {
+            if ((pass & 1) == 0) {
+                baseline_times[pass] = timed(44, state.threads_t4);
+                if (parity_mul4) mul4_times[pass] = timed(446, threads_mul4);
+                if (parity_pairload) pairload_times[pass] = timed(448, threads_pairload);
+                if (parity_2lane) lane2_times[pass] = timed(449, threads_2lane);
+                if (parity_readonly) readonly_times[pass] = timed(450, threads_readonly);
+            } else {
+                if (parity_readonly) readonly_times[pass] = timed(450, threads_readonly);
+                if (parity_2lane) lane2_times[pass] = timed(449, threads_2lane);
+                if (parity_pairload) pairload_times[pass] = timed(448, threads_pairload);
+                if (parity_mul4) mul4_times[pass] = timed(446, threads_mul4);
+                baseline_times[pass] = timed(44, state.threads_t4);
+            }
+        }
+
+        const float baseline = cn_hardened_median(baseline_times);
+        const float mul4 = parity_mul4 ? cn_hardened_median(mul4_times) : -1.0F;
+        const float pairload = parity_pairload ? cn_hardened_median(pairload_times) : -1.0F;
+        const float lane2 = parity_2lane ? cn_hardened_median(lane2_times) : -1.0F;
+        const float readonly = parity_readonly ? cn_hardened_median(readonly_times) : -1.0F;
+
+        int best_mode = 44;
+        int best_threads = state.threads_t4;
+        float best_ms = baseline;
+        constexpr float kFastLitePromotionRatio = 0.98F;
+        auto consider = [&](bool parity, float ms, int mode, int threads) {
+            if (parity && ms > 0.0F &&
+                ms < baseline * kFastLitePromotionRatio &&
+                ms < best_ms) {
+                best_mode = mode;
+                best_threads = threads;
+                best_ms = ms;
+            }
+        };
+        consider(parity_mul4, mul4, 446, threads_mul4);
+        consider(parity_pairload, pairload, 448, threads_pairload);
+        consider(parity_2lane, lane2, 449, threads_2lane);
+        consider(parity_readonly, readonly, 450, threads_readonly);
+
+        cudaFree(clone_ctx);
+        cudaFree(clone);
+
+        state.initialized = true;
+        state.selected = true;
+        g_cn_hardened_mode[device_id][VariantIndex] = best_mode;
+        g_cn_hardened_threads[device_id][VariantIndex] = best_threads;
+        save_cn_production_selector_cache<VariantIndex>(
+            device_id, props, count, best_mode, best_threads);
+
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[CUDA CN FastLite selector] GPU " << device_id
+                  << " | " << cryptonight::config_value(VariantIndex).name
+                  << " | batch=" << count
+                  << " | sample=" << sample_count
+                  << " | passes=" << kCnProductionSelectorPasses
+                  << " | baseline=" << baseline << " ms@" << state.threads_t4
+                  << " | mul4=" << mul4 << " ms@" << threads_mul4
+                  << " parity=" << (parity_mul4 ? "PASS" : "FAIL")
+                  << " | pairload=" << pairload << " ms@" << threads_pairload
+                  << " parity=" << (parity_pairload ? "PASS" : "FAIL")
+                  << " | 2lane=" << lane2 << " ms@" << threads_2lane
+                  << " parity=" << (parity_2lane ? "PASS" : "FAIL")
+                  << " | readonly=" << readonly << " ms@" << threads_readonly
+                  << " parity=" << (parity_readonly ? "PASS" : "FAIL")
+                  << " | threshold=2%"
+                  << " | production=" << cn_residency_mode_name(best_mode)
+                  << " | selected-ms=" << best_ms
+                  << std::defaultfloat << '\n';
         return;
     }
 
