@@ -245,6 +245,16 @@ int main(int argc, char** argv)
 
     try {
         auto config = yerbas::load_config(argc, argv);
+
+        // Do not spend several minutes benchmarking a machine that cannot mine
+        // yet. Pool credentials are required before first-run tuning starts.
+        if (config.pool.url.empty() || config.pool.user.empty()) {
+            std::cerr << "Pool configuration is incomplete.\n"
+                      << "Edit " << config.config_path
+                      << " and set pool.url and pool.user before starting the miner.\n";
+            return 2;
+        }
+
         yerbas::first_run::apply(config);
 
         const bool terminal_capable =
