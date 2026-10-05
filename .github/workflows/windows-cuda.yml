@@ -34,7 +34,7 @@ jobs:
 
       - name: Install CUDA Toolkit 12.8.1
         id: cuda-toolkit
-        timeout-minutes: 20
+        timeout-minutes: 40
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.8.1'
