@@ -204,10 +204,13 @@ __global__ void cryptonight_loop_stage_ttable4_coalesced(std::size_t count,
 
         const std::uint32_t own = reinterpret_cast<const std::uint32_t*>(slot)[lane];
         std::uint32_t cw = 0U;
-        if constexpr (VariantIndex == 2) {
-            // CN-Fast benefits from issuing all four local shared-table reads
-            // before the ShiftRows exchange. Other variants keep the established
-            // source-word shuffle ordering unless a separate candidate changes it.
+        if constexpr (VariantIndex == 2 || VariantIndex == 3) {
+            // CN-Fast and CN-Lite are the two dominant long-loop variants on
+            // the validated production logs. Issue all four local shared-table
+            // reads before the ShiftRows exchange so shared-memory latency can
+            // overlap before the subgroup dependency chain. The AES transform
+            // is unchanged; only the ordering of equivalent reads/shuffles moves.
+            // Other variants keep the established source-word shuffle ordering.
             const std::uint32_t q0 = t0[static_cast<std::uint8_t>(own)];
             const std::uint32_t q1_local = t1[static_cast<std::uint8_t>(own >> 8U)];
             const std::uint32_t q2_local = t2[static_cast<std::uint8_t>(own >> 16U)];
