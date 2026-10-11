@@ -7,10 +7,10 @@
 // single-stream execution must still clear the original 3% production gate before
 // a rev9 cache is written. No GPU model or architecture rules are used.
 //
-// Production remains cache-first. With YERBAS_CUDA_OVERLAP unset or "auto", a
-// previously proven rev9 cache is used automatically, but a missing cache never
-// pauses mining to benchmark. Explicit overlap tuning is required to create a
-// new cache.
+// Production rollback policy: stagger/overlap is opt-in only.
+// With YERBAS_CUDA_OVERLAP unset, cached stagger policies are ignored and the
+// established single-stream production path remains active. Explicit overlap
+// tuning/forcing can still be requested for regression testing.
 
 namespace {
 
@@ -37,7 +37,11 @@ static std::array<std::array<bool, 6>, kCnPhaseProfileMaxDevices> g_cn_stagger_r
 inline bool cn_stagger_disabled()
 {
     const char* value = std::getenv("YERBAS_CUDA_OVERLAP");
-    if (!value || !*value) return false;
+    // Regression rollback: ordinary production must not auto-load a cached
+    // stagger policy. Keep the scheduler available only when explicitly
+    // requested so existing cache files can remain on disk without affecting
+    // the restored single-stream baseline.
+    if (!value || !*value) return true;
     const std::string v(value);
     return v == "0" || v == "off" || v == "false" || v == "no";
 }
