@@ -1,4 +1,5 @@
 #include "miner.h"
+#include "stratum/fast_lite_growth.h"
 
 #include <atomic>
 #include <chrono>

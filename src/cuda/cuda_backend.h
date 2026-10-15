@@ -62,6 +62,8 @@ public:
     std::vector<Candidate> scan_profiled(std::uint32_t start_nonce, BatchProfile& profile);
 
     void set_active_batch_size(std::size_t batch_size);
+    // Called between scans only; clamps to the current job's allocated budget.
+    std::size_t try_grow_fast_lite_batch(std::size_t baseline_batch);
     void set_stale_batch_cap(std::size_t batch_size,
                              std::size_t minimum_tuned_batch = 0);
     int device_id() const noexcept;
