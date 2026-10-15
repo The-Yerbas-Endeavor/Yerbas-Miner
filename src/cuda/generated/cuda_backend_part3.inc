@@ -14,6 +14,7 @@ struct BatchEngine::Impl {
     bool variant_batch_from_cache{false};
     unsigned int fallback_threads{1};
     cudaStream_t stream{};
+    cudaEvent_t scan_complete{};
     DeviceJob* d_job{nullptr};
     std::uint32_t* d_nonces{nullptr};
     std::uint8_t* d_states{nullptr};
@@ -40,6 +41,8 @@ struct BatchEngine::Impl {
     std::size_t stale_batch_cap_min_tuned{0};
     bool stale_batch_cap_explicit{false};
     bool job_loaded{false};
+    bool fast_lite_grown_job{false};
+    std::array<bool, kGpuVariantBatchCount> job_variants{};
 
     Impl(int id, std::size_t requested_size, unsigned int requested_fallback_threads)
         : device_id(id),
@@ -54,6 +57,13 @@ struct BatchEngine::Impl {
         benchmark_stage_local =
             stage_local_env != nullptr && *stage_local_env != '\0' &&
             std::string(stage_local_env) != "0";
+
+        // Opt-in whole-miner experiment: preserve the default wait policy until
+        // sustained CPU + GPU throughput validates blocking completion waits.
+        const char* blocking_wait_env = std::getenv("YERBAS_CUDA_BLOCKING_WAIT");
+        const bool blocking_scan_wait = blocking_wait_env &&
+            std::string(blocking_wait_env) == "1" &&
+            !benchmark_raw_batch && !benchmark_stage_local;
 
         benchmark_requested_batch = requested_size;
         benchmark_cn_chunk = requested_size;
@@ -170,6 +180,13 @@ struct BatchEngine::Impl {
 
         host_states.resize(batch_capacity * kStateBytes);
         check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed");
+        if (blocking_scan_wait) {
+            check_cuda(cudaEventCreateWithFlags(&scan_complete,
+                                                cudaEventBlockingSync | cudaEventDisableTiming),
+                       "cudaEventCreate blocking scan completion failed");
+        }
+        std::cout << "[GPU " << device_id << "] scan completion wait | mode="
+                  << (blocking_scan_wait ? "blocking-event" : "stream-default") << '\n';
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_job), sizeof(DeviceJob)), "cudaMalloc job failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_nonces), batch_capacity * sizeof(std::uint32_t)), "cudaMalloc nonce batch failed");
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&d_states), batch_capacity * kStateBytes), "cudaMalloc 512-bit state batch failed");
@@ -277,6 +294,7 @@ struct BatchEngine::Impl {
         if (d_states) cudaFree(d_states);
         if (d_nonces) cudaFree(d_nonces);
         if (d_job) cudaFree(d_job);
+        if (scan_complete) cudaEventDestroy(scan_complete);
         if (stream) cudaStreamDestroy(stream);
     }
 };
@@ -290,6 +308,7 @@ BatchEngine& BatchEngine::operator=(BatchEngine&&) noexcept = default;
 void BatchEngine::upload_job(const JobDescriptor& job)
 {
     impl_->host_job = job;
+    impl_->fast_lite_grown_job = false;
 
     std::size_t max_page_size = 0;
     std::array<bool, kGpuVariantBatchCount> used_variants{};
@@ -301,6 +320,7 @@ void BatchEngine::upload_job(const JobDescriptor& job)
         max_page_size = std::max<std::size_t>(max_page_size,
                                               cryptonight::kVariantConfigs[variant].page_size);
     }
+    impl_->job_variants = used_variants;
     if (max_page_size == 0) max_page_size = kCnScratchpadStride;
 
     const std::size_t class_index = gpu_batch_class_index(max_page_size);
@@ -452,6 +472,13 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
         bound_device = impl_->device_id;
     }
 
+    if (impl_->fast_lite_grown_job) {
+        // Transition shaping may temporarily dispatch fewer hashes. Keep the
+        // batch-keyed runtime state correct for every scan of a grown job.
+        gpu_variant_activate_runtime_batch(
+            impl_->device_id, impl_->batch_size, impl_->job_variants);
+    }
+
     check_cuda(cudaMemsetAsync(impl_->d_candidate_count, 0, sizeof(unsigned int), impl_->stream), "cudaMemsetAsync candidate counter failed");
     constexpr int utility_threads = 256;
     const int utility_blocks = static_cast<int>((impl_->batch_size + utility_threads - 1) / utility_threads);
@@ -506,7 +533,17 @@ std::vector<Candidate> BatchEngine::scan(std::uint32_t start_nonce)
                                kMaxCandidates * sizeof(DeviceCandidate),
                                cudaMemcpyDeviceToHost, impl_->stream),
                "cudaMemcpyAsync candidate buffer failed");
-    check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize scan failed");
+    if (impl_->scan_complete) {
+        // Record after both readbacks so candidate buffers are ready before use.
+        // BlockingSync sleeps the host worker while this stream finishes; event
+        // reuse is safe because scan() waits before submitting the next batch.
+        check_cuda(cudaEventRecord(impl_->scan_complete, impl_->stream),
+                   "cudaEventRecord scan completion failed");
+        check_cuda(cudaEventSynchronize(impl_->scan_complete),
+                   "cudaEventSynchronize scan completion failed");
+    } else {
+        check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize scan failed");
+    }
 
     if (profile_this_scan) {
         ++impl_->stage_profile_samples;

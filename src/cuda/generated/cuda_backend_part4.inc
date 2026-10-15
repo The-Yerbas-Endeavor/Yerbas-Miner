@@ -91,6 +91,43 @@ void BatchEngine::set_active_batch_size(std::size_t batch_size)
     impl_->batch_size = batch_size;
 }
 
+std::size_t BatchEngine::try_grow_fast_lite_batch(std::size_t baseline_batch)
+{
+    if (!impl_->job_loaded || impl_->benchmark_raw_batch ||
+        impl_->benchmark_stage_local || impl_->batch_size != baseline_batch)
+        return impl_->batch_size;
+
+    std::array<bool, kGpuVariantBatchCount> variants{};
+    std::size_t max_page = 0U;
+    for (const auto encoded : impl_->host_job.stages) {
+        if ((encoded & ghostrider::kCryptoNightStageFlag) == 0U) continue;
+        const auto variant = static_cast<std::size_t>(encoded & 0x7fU);
+        if (variant >= variants.size()) return impl_->batch_size;
+        variants[variant] = true;
+        max_page = std::max(max_page,
+            static_cast<std::size_t>(cryptonight::kVariantConfigs[variant].page_size));
+    }
+    if (!variants[2] || !variants[3] || max_page == 0U) return impl_->batch_size;
+
+    const std::size_t safe_limit = std::min(impl_->batch_capacity,
+        impl_->scratchpad_budget_bytes / max_page);
+    std::size_t target = stratum::fast_lite_growth_target(baseline_batch, safe_limit);
+    if (impl_->stale_batch_cap > 0U &&
+        (impl_->stale_batch_cap_min_tuned == 0U ||
+         target >= impl_->stale_batch_cap_min_tuned)) {
+        target = stratum::fast_lite_growth_target(baseline_batch,
+            std::min(safe_limit, impl_->stale_batch_cap));
+    }
+    if (target <= baseline_batch) return impl_->batch_size;
+
+    // Switch batch-keyed selector/geometry state before the next launch.
+    // This retains existing cache entries and does not persist a new preference.
+    gpu_variant_activate_runtime_batch(impl_->device_id, target, variants);
+    impl_->batch_size = target;
+    impl_->fast_lite_grown_job = true;
+    return target;
+}
+
 void BatchEngine::set_stale_batch_cap(std::size_t batch_size,
                                       std::size_t minimum_tuned_batch)
 {
