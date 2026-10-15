@@ -52,7 +52,7 @@ struct LoggingConfig {
     std::string console_mode{"auto"};
 
     // Dashboard glyph rendering:
-    //   auto    = Braille on capable terminals, safe blocks on classic Windows
+    //   auto    = full-detail Braille artwork/graphs on every platform
     //   braille = force full-detail Braille artwork/graphs
     //   block   = force broad-coverage block glyphs (no quadrant characters)
     //   ascii   = emergency plain-ASCII compatibility mode

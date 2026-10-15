@@ -115,22 +115,10 @@ inline GlyphMode resolve_glyph_mode(const std::string& requested)
     if (requested == "block") return GlyphMode::Block;
     if (requested == "ascii") return GlyphMode::Ascii;
 
-#ifdef _WIN32
-    const char* wt_session = std::getenv("WT_SESSION");
-    const char* term_program = std::getenv("TERM_PROGRAM");
-    const bool modern_terminal =
-        (wt_session != nullptr && *wt_session != '\0') ||
-        (term_program != nullptr &&
-         std::string(term_program).find("Windows_Terminal") !=
-             std::string::npos);
-
-    // Windows Terminal normally has reliable Braille coverage. Classic
-    // Console Host varies by active font, so prefer the deliberately limited
-    // broad-coverage block renderer there.
-    return modern_terminal ? GlyphMode::Braille : GlyphMode::Block;
-#else
+    // Keep the full-detail garden and graphs identical on every platform.
+    // Console host names do not indicate font coverage; compatibility renderers
+    // remain available through an explicit --glyphs block/ascii selection.
     return GlyphMode::Braille;
-#endif
 }
 
 #ifdef _WIN32
@@ -142,7 +130,7 @@ struct WindowsConsoleStatus {
     std::size_t columns{0U};
     std::size_t rows{0U};
     bool block_garden_side_by_side{false};
-    GlyphMode glyph_mode{GlyphMode::Block};
+    GlyphMode glyph_mode{GlyphMode::Braille};
 };
 
 inline WindowsConsoleStatus windows_console_status(
