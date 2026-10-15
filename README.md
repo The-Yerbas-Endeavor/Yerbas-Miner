@@ -77,6 +77,13 @@ plain  traditional scrolling console
 The default session log is written under `logs/`. Use `--console plain` for redirected output, troubleshooting, or the traditional scrolling view. `--log-level debug` keeps the plain diagnostic console behavior when console mode is `auto`.
 
 
+The dashboard uses the same full-detail Braille garden artwork on Linux and
+Windows, including Windows Console Host. Windows startup enables UTF-8 and VT
+output. Use a terminal font with Braille coverage; if the selected font displays
+missing-glyph boxes, choose a suitable font or explicitly use `--glyphs block`
+(or `--glyphs ascii`) for compatibility. `--glyphs braille` explicitly selects
+the default artwork. Narrow windows stack the garden below the graph.
+
 ### CPU tuning modes
 
 CPU tuning is optional. The default example config uses `"cpu_tune": "default"`; set it to `"off"` when immediate startup with the configured/default CPU thread count and batch size is preferred.
