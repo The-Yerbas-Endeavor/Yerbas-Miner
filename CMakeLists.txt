@@ -311,13 +311,11 @@ if(YERBAS_ENABLE_CUDA)
         endif()
     endif()
 
-    if(DEFINED ENV{CI} AND NOT "$ENV{CI}" STREQUAL "" AND NOT "$ENV{CI}" STREQUAL "false")
-        set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "52;60;61;70;75;80;86;89;90")
-    else()
-        set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "native")
-    endif()
+    # Portable by default on developer hosts, headless builders, and CI alike.
+    # Existing cached settings can be overridden explicitly at configure time.
+    set(YERBAS_CUDA_ARCHITECTURES_DEFAULT "52-virtual;61-real;75-real;86-real;89-real;90-real")
     set(YERBAS_CUDA_ARCHITECTURES "${YERBAS_CUDA_ARCHITECTURES_DEFAULT}" CACHE STRING
-        "CUDA compute capabilities built into Yerbas-Miner (native locally; broad set in CI)")
+        "CUDA compute capabilities built into Yerbas-Miner (portable PTX and cubins by default)")
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
@@ -427,6 +425,10 @@ if(YERBAS_ENABLE_CUDA)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(fast-lite-growth-test tests/fast_lite_growth.cpp)
+    target_include_directories(fast-lite-growth-test PRIVATE src)
+    add_test(NAME fast-lite-growth COMMAND fast-lite-growth-test)
+
     add_executable(ghostrider-smoke tests/ghostrider_smoke.cpp)
     target_include_directories(ghostrider-smoke PRIVATE src)
     target_link_libraries(ghostrider-smoke PRIVATE yerbas-ghostrider-reference)

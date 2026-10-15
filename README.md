@@ -2,7 +2,9 @@
 
 Yerbas-Miner is the GPU-miner development repository for the Yerbas network.
 
-The current `main` branch contains a C++/CUDA miner scaffold plus a CPU GhostRider reference path wired directly to the implementation used by Yerbas Core.
+The current `main` branch contains a native CPU/CUDA GhostRider miner, with its CPU reference path pinned to the implementation used by Yerbas Core.
+
+Version **1.0.0.6** documents opt-in blocking CUDA completion waits and experimental stable-job Fast/Lite batch growth. See [release notes](docs/development/RELEASE_1.0.0.6.md) for measured results, limitations, and the recommended production command.
 
 ## GhostRider reference
 
@@ -194,12 +196,12 @@ Yerbas-Miner uses the existing four-part release format:
 1.0.0.N
 ```
 
-The repository-level `VERSION` file is the source of truth for the next release number. Release tags use the exact same value with **no `v` prefix** (for example, `1.0.0.4`).
+The repository-level `VERSION` file is the source of truth for the next release number. Release tags use the exact same value with **no `v` prefix** (for example, `1.0.0.6`).
 
 Every configured binary embeds three identifiers and prints them at startup:
 
 ```text
-Yerbas Miner 1.0.0.4 | commit <git-sha> | scheduler <scheduler-revision>
+Yerbas Miner 1.0.0.6 | commit <git-sha> | scheduler <scheduler-revision>
 ```
 
 A tag matching `VERSION` triggers the dedicated **Publish CUDA Release** workflow. It builds Linux CUDA x86_64 and Windows CUDA x86_64 independently. The GitHub Release is created or updated only after **both** builds succeed, and it publishes:
@@ -223,7 +225,7 @@ bash scripts/configure-dev.sh
 This creates `build-dev/yerbas-miner` with:
 
 - `YERBAS_NATIVE_CPU=OFF`, so CPU code remains generic and is not compiled with `-march=native` / `-mtune=native`.
-- CUDA architecture `native` by default, so only the GPU architecture present on the development machine is compiled instead of every supported release architecture.
+- CUDA architectures `52-virtual;61-real;75-real;86-real;89-real;90-real` by default, matching the portable release target set.
 - The same runtime CPU dispatch, CPU/GPU tuning, mining logic, and validation paths used by the release build.
 - A separate `build-dev` directory, so incremental development rebuilds do not disturb the full release build tree.
 
@@ -248,7 +250,7 @@ To override the development CUDA target manually:
 YERBAS_DEV_CUDA_ARCHITECTURES=61 bash scripts/configure-dev.sh
 ```
 
-Use this only when you intentionally want a specific development GPU architecture instead of automatic native detection.
+Use this only when you intentionally want a specific development GPU architecture instead of the broad portable defaults.
 
 ### Full generic release build
 
@@ -261,7 +263,7 @@ bash scripts/configure-release.sh
 This creates `build-release/yerbas-miner` with:
 
 - `YERBAS_NATIVE_CPU=OFF`, keeping CPU code portable.
-- A CUDA fat binary for compute capabilities `52;60;61;70;75;80;86;89;90`.
+- A CUDA fat binary for compute capabilities `52-virtual;61-real;75-real;86-real;89-real;90-real`.
 - The same runtime CPU/GPU autotuning and production code used by the development build.
 
 Run it with:
@@ -270,7 +272,7 @@ Run it with:
 ./build-release/yerbas-miner
 ```
 
-The full release build is intentionally slower because CUDA code is generated and linked for every supported architecture. Do not use it as the normal edit/test loop.
+Both default configurations build portable CUDA code for the supported architecture set. An explicitly chosen narrower architecture set can shorten a local edit/test loop; keep the portable defaults for distributed binaries.
 
 ### Optional: native CPU benchmark build
 
@@ -298,7 +300,7 @@ cmake -S . -B build-release -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DYERBAS_ENABLE_CUDA=ON \
   -DYERBAS_NATIVE_CPU=OFF \
-  -DYERBAS_CUDA_ARCHITECTURES="52;60;61;70;75;80;86;89;90"
+  -DYERBAS_CUDA_ARCHITECTURES="52-virtual;61-real;75-real;86-real;89-real;90-real"
 cmake --build build-release --parallel
 ctest --test-dir build-release --output-on-failure
 ./build-release/yerbas-miner
@@ -311,7 +313,7 @@ cmake -S . -B build-release -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DYERBAS_ENABLE_CUDA=ON \
   -DYERBAS_NATIVE_CPU=OFF \
-  -DYERBAS_CUDA_ARCHITECTURES="52;60;61;70;75;80;86;89;90" \
+  -DYERBAS_CUDA_ARCHITECTURES="52-virtual;61-real;75-real;86-real;89-real;90-real" \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
 ```
