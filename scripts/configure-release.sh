@@ -54,7 +54,7 @@ cmake -S . -B "${BUILD_DIR}" -G Ninja \
   -DCMAKE_CUDA_HOST_COMPILER="${CXX_BIN}" \
   -DYERBAS_ENABLE_CUDA=ON \
   -DYERBAS_NATIVE_CPU=OFF \
-  -DYERBAS_CUDA_ARCHITECTURES="52;60;61;70;75;80;86;89;90"
+  -DYERBAS_CUDA_ARCHITECTURES="52-virtual;61-real;75-real;86-real;89-real;90-real"
 
 cmake --build "${BUILD_DIR}" \
   --target yerbas-miner \
@@ -63,5 +63,5 @@ cmake --build "${BUILD_DIR}" \
 echo
 echo "Generic portable Yerbas Miner built in ${BUILD_DIR}."
 echo "CPU code is not compiled with -march=native/-mtune=native."
-echo "CUDA fat binary includes supported NVIDIA architectures: 52,60,61,70,75,80,86,89,90."
+echo "CUDA fat binary includes compute_52 PTX and sm_61/sm_75/sm_86/sm_89/sm_90 cubins."
 echo "Runtime CPU/GPU autotuning will select production settings on the target machine."

@@ -2,11 +2,10 @@
 set -euo pipefail
 
 BUILD_DIR="${1:-build-dev}"
-CUDA_ARCHS="${YERBAS_DEV_CUDA_ARCHITECTURES:-native}"
+CUDA_ARCHS="${YERBAS_DEV_CUDA_ARCHITECTURES:-52-virtual;61-real;75-real;86-real;89-real;90-real}"
 
-# Keep the development build portable on the CPU. Only the CUDA target is
-# narrowed to the GPU(s) present on the development machine so iterative
-# builds do not rebuild every release architecture.
+# Keep CPU and CUDA builds portable by default. A narrower CUDA target is
+# available only through an explicit development override.
 CC_BIN="${YERBAS_CC:-}"
 CXX_BIN="${YERBAS_CXX:-}"
 
@@ -70,4 +69,4 @@ echo
 echo "Development Yerbas Miner built in ${BUILD_DIR}."
 echo "CPU remains generic/portable (no -march=native or -mtune=native)."
 echo "CUDA targets only: ${CUDA_ARCHS}."
-echo "Use scripts/configure-release.sh only for the full distributable fat binary."
+echo "Release and development defaults share the portable CUDA target set."
