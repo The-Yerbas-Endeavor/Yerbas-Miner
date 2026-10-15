@@ -391,6 +391,15 @@ bool production_latency_telemetry_enabled()
     return enabled;
 }
 
+bool fast_lite_growth_requested()
+{
+    static const bool enabled = []() {
+        const char* value = std::getenv("YERBAS_FAST_LITE_GROWTH");
+        return value && std::string(value) == "1";
+    }();
+    return enabled;
+}
+
 double gpu_latency_target_ms()
 {
     static const double target = []() {
@@ -1411,6 +1420,29 @@ void Client::adapt_gpu_batch_after_scan(GpuWorker& worker,
                                          bool stale)
 {
     const double target_ms = gpu_latency_target_ms();
+    // Keep this experiment separate from the optional latency/probe learner.
+    if (fast_lite_growth_requested() && target_ms <= 0.0) {
+        constexpr std::uint32_t fast_lite_mask = (1U << 2U) | (1U << 3U);
+        const std::size_t base = worker.latency_base_batch;
+        const bool eligible = base > 0U &&
+            (result.cn_mask & fast_lite_mask) == fast_lite_mask &&
+            result.cn_mask == gpu_active_cn_mask_ &&
+            worker.engine->batch_size() == base;
+        const bool clean_full_scan = !stale && !result.transition_shaped &&
+            result.scan_ms > 0.0 && result.hash_count == base;
+        const double age_seconds = active_job_received_at_.time_since_epoch().count() == 0
+            ? 0.0 : std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - active_job_received_at_).count();
+        if (worker.fast_lite_growth.ready(eligible, clean_full_scan, age_seconds)) {
+            const std::size_t grown = worker.engine->try_grow_fast_lite_batch(base);
+            std::cout << "[Fast/Lite growth] GPU " << worker.device_id
+                      << " | batch=" << base << " -> " << grown
+                      << " | job_age_s=" << age_seconds
+                      << " | clean_scans=" << worker.fast_lite_growth.clean_scans
+                      << " | status=" << (grown > base ? "grown" : "no-headroom")
+                      << " | preference-cache-write=off\n";
+        }
+    }
     if (target_ms <= 0.0 || stale || result.transition_shaped ||
         result.scan_ms <= 0.0 || result.hash_count == 0U)
         return;
@@ -2250,6 +2282,11 @@ void Client::initialize_gpu_engines()
         try {
             for (auto& worker : gpu_workers_) start_gpu_worker(worker);
             std::cout << "[GPU] persistent host scan workers initialized | count=" << gpu_workers_.size() << '\n';
+            if (fast_lite_growth_requested()) {
+                std::cout << "[Fast/Lite growth] experiment | mode="
+                          << (gpu_latency_target_ms() <= 0.0 ? "enabled" : "disabled-latency-controller")
+                          << " | clean-scans=3 | min-job-age=30s | max-growth=25%\n";
+            }
         } catch (...) {
             stop_gpu_workers();
             throw;
@@ -2321,6 +2358,7 @@ void Client::upload_gpu_job()
                 i == crossover_slot ? crossover_min_tuned : 0U);
         worker.engine->upload_job(descriptor);
         worker.latency_base_batch = worker.engine->batch_size();
+        worker.fast_lite_growth = {};
         worker.latency_scan_ms_ewma = 0.0;
         worker.latency_samples = 0U;
         worker.transition_shape_zone = 0U;

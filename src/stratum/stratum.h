@@ -1,5 +1,7 @@
 #pragma once
 
+#include "stratum/fast_lite_growth.h"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -313,6 +315,7 @@ private:
         // short-lived jobs a chance to complete useful GPU work without
         // globally shrinking the validated sustained-production batches.
         bool opening_scan_shape_pending{false};
+        FastLiteGrowthState fast_lite_growth{};
 
         // Opt-in production-latency accounting. Updated only by the Stratum
         // scheduling thread so no atomics are needed.
