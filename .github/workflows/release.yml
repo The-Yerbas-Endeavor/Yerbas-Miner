@@ -13,7 +13,7 @@ on:
       source_ref:
         description: 'Branch/ref to release'
         required: true
-        default: 'feature/console-ui-hashrate'
+        default: 'main'
         type: string
 
 permissions:
@@ -227,7 +227,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cmake --build build-arm64 --target yerbas-miner --parallel
+          cmake --build build-arm64 --target yerbas-miner fast-lite-growth-test ghostrider-smoke ghostrider-equivalence --parallel
           ctest --test-dir build-arm64 --output-on-failure
 
       - name: Package ARM64 release
