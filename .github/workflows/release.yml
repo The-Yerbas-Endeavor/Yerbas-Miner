@@ -375,7 +375,9 @@ jobs:
           set -euxo pipefail
           tag="$RELEASE_VERSION"
 
-          existing_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)"
+          if ! existing_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null)"; then
+            existing_sha=''
+          fi
           if [ -n "$existing_sha" ] && [ "$existing_sha" != "$RELEASE_SHA" ]; then
             echo "ERROR: tag $tag already points to $existing_sha, not $RELEASE_SHA" >&2
             exit 1
