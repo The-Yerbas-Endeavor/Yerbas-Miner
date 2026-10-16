@@ -92,7 +92,7 @@ static inline void yerbas_cn_lane_loop_phase2(uint8_t a[AES_BLOCK_SIZE],
     uint64_t* dst = (uint64_t*)&long_state[j * AES_BLOCK_SIZE];
     const uint64_t t0 = dst[0], t1 = dst[1];
     uint64_t hi;
-    const uint64_t lo = mul128(((const uint64_t*)c)[0], t0, &hi);
+    const uint64_t lo = yerbas_cn_mul128(((const uint64_t*)c)[0], t0, &hi);
     ((uint64_t*)a)[0] += hi;
     ((uint64_t*)a)[1] += lo;
     dst[0] = ((uint64_t*)a)[0];
@@ -154,7 +154,7 @@ static inline void yerbas_cn_lane_loop_phase2_xmm(__m128i* a,
     uint64_t* dst = (uint64_t*)(long_state + off);
     const uint64_t t0 = dst[0], t1 = dst[1];
     uint64_t hi;
-    const uint64_t lo = mul128(yerbas_xmm_lo64(c), t0, &hi);
+    const uint64_t lo = yerbas_cn_mul128(yerbas_xmm_lo64(c), t0, &hi);
     uint64_t a0 = yerbas_xmm_lo64(*a) + hi;
     uint64_t a1 = yerbas_xmm_hi64(*a) + lo;
     dst[0] = a0;
@@ -193,8 +193,8 @@ static void yerbas_cn_fast_pair_loop(__m128i* ax0p, __m128i* bx0p,
             const uint64_t t00 = d0[0], t01 = d0[1];
             const uint64_t t10 = d1[0], t11 = d1[1];
             uint64_t hi0, hi1;
-            const uint64_t lo0 = mul128(yerbas_xmm_lo64(cx0), t00, &hi0);
-            const uint64_t lo1 = mul128(yerbas_xmm_lo64(cx1), t10, &hi1);
+            const uint64_t lo0 = yerbas_cn_mul128(yerbas_xmm_lo64(cx0), t00, &hi0);
+            const uint64_t lo1 = yerbas_cn_mul128(yerbas_xmm_lo64(cx1), t10, &hi1);
             uint64_t a00 = yerbas_xmm_lo64(ax0) + hi0;
             uint64_t a01 = yerbas_xmm_hi64(ax0) + lo0;
             uint64_t a10 = yerbas_xmm_lo64(ax1) + hi1;

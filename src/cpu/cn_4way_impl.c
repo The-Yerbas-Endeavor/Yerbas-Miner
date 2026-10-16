@@ -54,10 +54,10 @@ static void yerbas_cn_fast_quad_loop(__m128i* ax0p, __m128i* bx0p,
             const uint64_t t00=d0[0],t01=d0[1],t10=d1[0],t11=d1[1];
             const uint64_t t20=d2[0],t21=d2[1],t30=d3[0],t31=d3[1];
             uint64_t hi0,hi1,hi2,hi3;
-            const uint64_t lo0=mul128(yerbas_xmm_lo64(cx0),t00,&hi0);
-            const uint64_t lo1=mul128(yerbas_xmm_lo64(cx1),t10,&hi1);
-            const uint64_t lo2=mul128(yerbas_xmm_lo64(cx2),t20,&hi2);
-            const uint64_t lo3=mul128(yerbas_xmm_lo64(cx3),t30,&hi3);
+            const uint64_t lo0=yerbas_cn_mul128(yerbas_xmm_lo64(cx0),t00,&hi0);
+            const uint64_t lo1=yerbas_cn_mul128(yerbas_xmm_lo64(cx1),t10,&hi1);
+            const uint64_t lo2=yerbas_cn_mul128(yerbas_xmm_lo64(cx2),t20,&hi2);
+            const uint64_t lo3=yerbas_cn_mul128(yerbas_xmm_lo64(cx3),t30,&hi3);
             uint64_t a00=yerbas_xmm_lo64(ax0)+hi0,a01=yerbas_xmm_hi64(ax0)+lo0;
             uint64_t a10=yerbas_xmm_lo64(ax1)+hi1,a11=yerbas_xmm_hi64(ax1)+lo1;
             uint64_t a20=yerbas_xmm_lo64(ax2)+hi2,a21=yerbas_xmm_hi64(ax2)+lo2;

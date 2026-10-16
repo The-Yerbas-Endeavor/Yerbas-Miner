@@ -9,6 +9,7 @@
 
 #include "slow-hash.h"
 #include "oaes_lib.h"
+#include "cn_multiply.h"
 
 void aesb_single_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
@@ -266,7 +267,7 @@ static void NAME(const char* input, char* output, uint32_t len) \
                 const uint64_t t0 = dst[0]; \
                 const uint64_t t1 = dst[1]; \
                 uint64_t hi; \
-                const uint64_t lo = mul128((uint64_t)_mm_cvtsi128_si64(cx), t0, &hi); \
+                const uint64_t lo = yerbas_cn_mul128((uint64_t)_mm_cvtsi128_si64(cx), t0, &hi); \
                 uint64_t a0 = (uint64_t)_mm_cvtsi128_si64(ax) + hi; \
                 uint64_t a1 = (uint64_t)_mm_cvtsi128_si64(_mm_srli_si128(ax, 8)) + lo; \
                 dst[0] = a0; \
@@ -316,7 +317,7 @@ void yerbas_cn_slow_hash_reuse(const char* input, char* output, uint32_t len, in
 {
     if (!g_yerbas_cn_backend_reported) {
         if (g_yerbas_cn_scratchpad == NULL) g_yerbas_cn_scratchpad = yerbas_cn_alloc_scratchpad();
-        printf("CPU CryptoNight backend: %s | pages=%s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes | register-tweak=yes\n",
+        printf("CPU CryptoNight backend: %s | pages=%s | runtime-dispatch=yes | fixed-v1-kernels=yes | xmm-hotloop=yes | aes8-pipeline=yes | register-tweak=yes | mul128=" YERBAS_CN_MULTIPLY_BACKEND "\n",
                yerbas_cn_reuse_backend(), yerbas_cn_page_mode());
         g_yerbas_cn_backend_reported = 1;
     }
