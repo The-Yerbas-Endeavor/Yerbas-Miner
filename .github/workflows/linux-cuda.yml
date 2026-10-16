@@ -71,7 +71,10 @@ jobs:
           old = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)'
           new = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=2)'
           if old not in text:
-              raise SystemExit('Could not locate YERBAS_NVCC_PARALLEL_FLAGS in CMakeLists.txt')
+              old = 'set(YERBAS_NVCC_THREADS "1" CACHE STRING'
+              new = 'set(YERBAS_NVCC_THREADS "2" CACHE STRING'
+          if old not in text:
+              raise SystemExit('Could not locate NVCC parallelism setting in CMakeLists.txt')
           p.write_text(text.replace(old, new, 1))
           PY
 

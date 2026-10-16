@@ -66,7 +66,11 @@ jobs:
           $cmake = Get-Content CMakeLists.txt -Raw
           $old = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)'
           $new = 'set(YERBAS_NVCC_PARALLEL_FLAGS --threads=2)'
-          if (-not $cmake.Contains($old)) { throw 'Could not locate YERBAS_NVCC_PARALLEL_FLAGS in CMakeLists.txt' }
+          if (-not $cmake.Contains($old)) {
+            $old = 'set(YERBAS_NVCC_THREADS "1" CACHE STRING'
+            $new = 'set(YERBAS_NVCC_THREADS "2" CACHE STRING'
+          }
+          if (-not $cmake.Contains($old)) { throw 'Could not locate NVCC parallelism setting in CMakeLists.txt' }
           $cmake.Replace($old, $new) | Set-Content CMakeLists.txt -NoNewline
           Write-Host 'Windows CUDA CI: nvcc internal parallelism set to two workers.'
 
