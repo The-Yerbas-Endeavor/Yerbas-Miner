@@ -378,3 +378,7 @@ CUDA compilation defaults to one NVCC architecture worker per translation unit
 to avoid nested all-core compilation when several targets build concurrently.
 `-DYERBAS_NVCC_THREADS=N` explicitly overrides that build-time limit (`0` uses all
 host CPUs). The portable CUDA target set and runtime dispatch are unchanged.
+
+For a full-GhostRider CPU worker/width screen across 20 CN combinations, build
+`cpu-plan-benchmark` explicitly. See the [1.0.0.7 development record](docs/development/DEVELOPMENT_1.0.0.7.md)
+for the measured rejections, parity/count checks, and reproducible commands.

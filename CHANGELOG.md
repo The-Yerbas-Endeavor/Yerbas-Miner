@@ -2,6 +2,8 @@
 
 ## 1.0.0.7 — in development
 
+- Add an offline full-GhostRider worker/width benchmark across all 20 CN combinations with grouped reference parity and nonce-coverage checks; document rejected scalar-state, fewer-worker and wider-policy screens. Production defaults remain unchanged.
+
 - Preserve 1.0.0.6 (`30a1d5a06b9c`) as the stable performance baseline.
 - Add an explicit offline, single-worker CPU CN benchmark with reference parity checks for all six variants; no pool connection or cache writes.
 - Limit nested NVCC architecture compilation to one worker by default, with an explicit `YERBAS_NVCC_THREADS` override. This changes build resource usage, not mining code or hardware portability.

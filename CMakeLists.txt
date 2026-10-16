@@ -498,3 +498,9 @@ endif()
 add_executable(cpu-cn-benchmark EXCLUDE_FROM_ALL tests/cpu_cn_benchmark.cpp)
 target_include_directories(cpu-cn-benchmark PRIVATE src)
 target_link_libraries(cpu-cn-benchmark PRIVATE yerbas-ghostrider-reference)
+
+find_package(Threads REQUIRED)
+add_executable(cpu-plan-benchmark EXCLUDE_FROM_ALL
+    tests/cpu_plan_benchmark.cpp src/cpu/cpu_worker_pool.cpp)
+target_include_directories(cpu-plan-benchmark PRIVATE src)
+target_link_libraries(cpu-plan-benchmark PRIVATE yerbas-ghostrider-reference Threads::Threads)
