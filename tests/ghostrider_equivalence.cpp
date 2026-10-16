@@ -1,4 +1,6 @@
 #include "ghostrider/ghostrider.h"
+#include "cpu/cn_multiply.h"
+#include "cryptonote/int-util.h"
 
 #include "hash_selection.h"
 #include "uint256.h"
@@ -141,6 +143,41 @@ std::string hex_hash(const Hash256& hash)
 
 int main()
 {
+    // Check native multiplication and the non-native fallback against the
+    // pinned consensus implementation, including cross-limb carry edges.
+    const auto multiply_matches = [](std::uint64_t a, std::uint64_t b) {
+        std::uint64_t reference_hi, native_hi, portable_hi;
+        const auto reference_lo = mul128(a, b, &reference_hi);
+        const auto native_lo = yerbas_cn_mul128(a, b, &native_hi);
+        const auto portable_lo = yerbas_cn_mul128_portable(a, b, &portable_hi);
+        return reference_lo == native_lo && reference_hi == native_hi &&
+               reference_lo == portable_lo && reference_hi == portable_hi;
+    };
+    constexpr std::array<std::uint64_t, 10> edges{{
+        0, 1, 2, 0xffffffffULL, 0x100000000ULL, 0x100000001ULL,
+        0x7fffffffffffffffULL, 0x8000000000000000ULL,
+        0xfffffffffffffffeULL, 0xffffffffffffffffULL}};
+    for (auto a : edges) for (auto b : edges) {
+        if (!multiply_matches(a, b)) {
+            std::cerr << "CN multiply edge regression\n";
+            return 4;
+        }
+    }
+    std::uint64_t random = 0x9e3779b97f4a7c15ULL;
+    const auto next = [&random]() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        return random;
+    };
+    for (unsigned int i = 0; i < 1000000; ++i) {
+        const auto a = next(), b = next();
+        if (!multiply_matches(a, b)) {
+            std::cerr << "CN multiply random regression at " << i << '\n';
+            return 4;
+        }
+    }
+
     constexpr std::size_t kCorpusSize = 96;
     std::size_t distinct_schedules = 0;
     std::vector<StageSchedule> seen_schedules;
@@ -176,6 +213,10 @@ int main()
                       << "expected: " << hex_hash(expected_hash) << '\n'
                       << "actual:   " << hex_hash(actual_hash) << '\n';
             return 2;
+        }
+        if (yerbas::ghostrider::hash_optimized(work) != expected_hash) {
+            std::cerr << "Optimized GhostRider regression at corpus index " << i << '\n';
+            return 5;
         }
     }
 
