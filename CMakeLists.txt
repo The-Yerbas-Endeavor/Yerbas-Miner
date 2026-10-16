@@ -319,7 +319,12 @@ if(YERBAS_ENABLE_CUDA)
     message(STATUS "Yerbas CUDA backend enabled with compiler: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "Yerbas CUDA architectures: ${YERBAS_CUDA_ARCHITECTURES}")
 
-    set(YERBAS_NVCC_PARALLEL_FLAGS --threads=0)
+    set(YERBAS_NVCC_THREADS "1" CACHE STRING
+        "NVCC threads per CUDA compilation (0 uses every host CPU)")
+    if(NOT YERBAS_NVCC_THREADS MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "YERBAS_NVCC_THREADS must be a non-negative integer")
+    endif()
+    set(YERBAS_NVCC_PARALLEL_FLAGS --threads=${YERBAS_NVCC_THREADS})
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(YERBAS_CUDA_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_cuda")
@@ -489,3 +494,7 @@ if(BUILD_TESTING)
         )
     endif()
 endif()
+# Explicit offline measurement target; never initializes CUDA or connects to a pool.
+add_executable(cpu-cn-benchmark EXCLUDE_FROM_ALL tests/cpu_cn_benchmark.cpp)
+target_include_directories(cpu-cn-benchmark PRIVATE src)
+target_link_libraries(cpu-cn-benchmark PRIVATE yerbas-ghostrider-reference)

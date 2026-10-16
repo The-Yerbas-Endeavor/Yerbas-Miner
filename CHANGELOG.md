@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0.7 — in development
+
+- Preserve 1.0.0.6 (`30a1d5a06b9c`) as the stable performance baseline.
+- Add an explicit offline, single-worker CPU CN benchmark with reference parity checks for all six variants; no pool connection or cache writes.
+- Limit nested NVCC architecture compilation to one worker by default, with an explicit `YERBAS_NVCC_THREADS` override. This changes build resource usage, not mining code or hardware portability.
+- Screen early CPU scratchpad prefetch in A/B/B/A order; reject it because most variants regress. No sustained hash-rate improvement is promoted yet.
+
 ## 1.0.0.6
 
 - Render the same full-detail Braille garden by default on Windows and Linux; retain explicit block/ASCII font compatibility modes.

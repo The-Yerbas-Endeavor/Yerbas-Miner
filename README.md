@@ -4,6 +4,8 @@ Yerbas-Miner is the GPU-miner development repository for the Yerbas network.
 
 The current `main` branch contains a native CPU/CUDA GhostRider miner, with its CPU reference path pinned to the implementation used by Yerbas Core.
 
+Current stable release: **1.0.0.6** (`30a1d5a06b9c`). Development builds on `main` are **1.0.0.7**; no further hash-rate gain is claimed yet.
+
 Version **1.0.0.6** documents opt-in blocking CUDA completion waits and experimental stable-job Fast/Lite batch growth. See [release notes](docs/development/RELEASE_1.0.0.6.md) for measured results, limitations, and the recommended production command.
 
 ## GhostRider reference
@@ -354,3 +356,25 @@ Restart Yerbas-Miner after changing the permission. Once package power is readab
 The exact powercap path can vary by CPU, kernel, and Linux distribution. Yerbas-Miner discovers supported telemetry interfaces at runtime; the path above is the common Intel `package-0` RAPL location. Do not run Yerbas-Miner as root solely for telemetry. Systems that do not expose a readable CPU package-power interface will continue mining normally and display `n/a` for unavailable power and efficiency values.
 
 Note that permissions under `/sys` may be reset after reboot. If persistent CPU power telemetry is desired, configure the appropriate system permission/udev policy for the machine rather than running the miner as root.
+
+### Offline CPU CryptoNight performance screen
+
+For 1.0.0.7 performance development, use the existing build directory:
+
+```bash
+cmake --build build-release --target cpu-cn-benchmark --parallel 2
+./build-release/cpu-cn-benchmark 3
+```
+
+This checks four deterministic inputs per CryptoNight variant against the pinned
+reference, then measures one CPU worker with a fixed input sequence. It never
+connects to a pool, initializes CUDA, or changes tuning caches. These rates are
+individual CryptoNight stage H/s, not whole GhostRider or hybrid mining H/s.
+Compare candidate and baseline in A/B/B/A order on the same idle machine before
+attempting a longer production comparison. Timing duration is 0.1–60 seconds per
+variant (default 2).
+
+CUDA compilation defaults to one NVCC architecture worker per translation unit
+to avoid nested all-core compilation when several targets build concurrently.
+`-DYERBAS_NVCC_THREADS=N` explicitly overrides that build-time limit (`0` uses all
+host CPUs). The portable CUDA target set and runtime dispatch are unchanged.
