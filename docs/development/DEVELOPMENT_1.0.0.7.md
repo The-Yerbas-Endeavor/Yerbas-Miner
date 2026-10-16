@@ -176,3 +176,17 @@ growth/overlap/latency controller off, and GPU tuning auto. Verify startup shows
 both GPUs and CPU, and no invalid shares. Preserve tuning caches. Compare
 matched rotations and ultimately overnight accepted-difficulty work before
 promoting a release. GPU kernels and the 1.0.0.6 release remain unchanged.
+
+## Release qualification — 2026-10-16
+
+The reviewed overnight snapshot covers 509 completed rotations / 17.65 sampled
+hours, 10,344 accepted shares and three stale rejects, with no reported invalid
+hashes or CUDA failures. Raw total/CPU/GPU means are 1949.84/521.04/1428.80 H/s.
+Using candidate duration weights by all 20 unordered CN combinations and excluding
+rotations shorter than 30 seconds, the earlier 1.0.0.6 control reweights to
+1817.16/414.35/1402.81 H/s; candidate means are 1953.43/517.53/1435.91 H/s.
+CPU averages improve in every combination. Separate jobs/core orders and the
+unmodified GPU's +2.4% difference limit causal attribution; this is not a
+pool-effective accepted-difficulty measurement. The user authorized promoting
+1.0.0.7 as Latest. The release pins the exact overnight/CI source `19abf4fcfaff`.
+See RELEASE_1.0.0.7.md for full provenance and limitations.
