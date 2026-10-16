@@ -65,3 +65,63 @@ Before another CPU kernel candidate, establish a low-noise fixed-work baseline
 on the mining host, then profile the slow Fast/Lite dependency chains. Earlier
 split-multiply, interleave, shuffle-first, table-order, larger-batch and GPU
 contention experiments remain rejected. No 1.0.0.7 hash-rate gain is claimed.
+
+## Follow-up CPU screens
+
+The mining host's three 10-second single-worker passes established medians:
+Dark 382.02, DarkLite 567.28, Fast 146.90, Lite 165.48, Turtle 1136.06 and
+TurtleLite 1177.41 stage H/s. Max-minus-min relative to the median was 1.16–2.21%.
+These are stage rates, not full GhostRider mining rates.
+
+A temporary scalar-accumulator Fast/Lite kernel passed the initial parity screen
+but showed only roughly 1–2% in the short local A/B/B/A. It was not promoted;
+production kernel source was restored. No accumulator environment switch ships.
+
+Inspection found the autotuner chooses workers on scalar execution and then
+qualifies wider CN paths at that fixed worker count. To test that search gap,
+`cpu-plan-benchmark` measures the actual production WorkerPool across a stable
+corpus containing all 20 unordered CN combinations. It checks grouped complete
+GhostRider hashes against the reference before timing and verifies that worker
+nonce coverage matches the reported hash count. Measurement mode disables live
+learning/profile cache writes. No pool or CUDA initialization is performed.
+
+The nonce-coverage probe uses a separate header/job key because production pins
+the target to that key. Timed runs use an impossible target. Six workers with
+batch 32 and three workers with batch 64 both cover the same 192 nonces per batch.
+
+Local diagnostic outcomes (synthetic equal-rotation mean):
+
+- 6 workers × 1-way A/B/B/A control: 569.58 / 560.51 H/s.
+- 3 workers × 2-way candidate: 447.92 / 427.52 H/s. Reject (~22.5% lower).
+- 6 workers × uniform 2-way screen: 594.46 H/s, but every Fast-containing row
+  regressed (roughly 16–33% against the prior controls). Reject the global policy.
+- Fresh A/B/B/A, six workers, mixed widths `2,2,1,1,2,2`: control 541.95 / 516.57,
+  mixed 596.71 / 616.84 H/s. The equal-combination score improves ~14.6%, but nine
+  of ten Fast-containing combinations are lower. Reject a global default change.
+
+The mixed-policy wins concentrate in easy non-Fast combinations, reproducing the
+historical combo-policy pattern rather than establishing a new whole-miner
+breakthrough. An equal-combination average is not production-time weighting.
+One header per combination also does not establish performance for every core
+schedule/order. No production cache, tuner threshold or default width changes.
+
+To reproduce a full-plan screen with the miner stopped:
+
+```bash
+cmake -S . -B build-release -DYERBAS_NATIVE_CPU=OFF
+cmake --build build-release --target cpu-plan-benchmark --parallel 2
+for policy in 1 2,2,1,1,2,2 2,2,1,1,2,2 1; do
+  env -u YERBAS_CPU_COMBO_POLICY_FILE ./build-release/cpu-plan-benchmark 6 "$policy" 1
+done
+```
+
+Widths are in Dark/DarkLite/Fast/Lite/Turtle/TurtleLite order. A single width
+applies to all six. The tool accepts widths 1/2/4; each chosen grouped path must
+pass reference parity before its measurements run. It is excluded from ordinary
+builds. Existing caches are preserved.
+
+Next action: obtain a bounded production GPU phase profile using the existing
+`YERBAS_CUDA_PROFILE=1` switch with blocking waits, growth/overlap disabled and
+cache-first GPU tuning. The diagnostic build must not be treated as a throughput
+comparison because event instrumentation adds overhead. No additional CPU
+baseline repetition or speculative GPU kernel promotion is justified yet.
