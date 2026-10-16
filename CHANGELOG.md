@@ -2,6 +2,8 @@
 
 ## 1.0.0.7 — in development
 
+- Use exact native-width CPU CN multiplication where supported, with a portable fallback and unchanged runtime AES dispatch. Add carry/overflow checks and optimized full-GhostRider equivalence coverage. CPU-only screens show a candidate gain; sustained hybrid/pool performance remains to be validated.
+
 - Add an offline full-GhostRider worker/width benchmark across all 20 CN combinations with grouped reference parity and nonce-coverage checks; document rejected scalar-state, fewer-worker and wider-policy screens. Production defaults remain unchanged.
 
 - Preserve 1.0.0.6 (`30a1d5a06b9c`) as the stable performance baseline.

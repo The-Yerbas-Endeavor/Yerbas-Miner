@@ -4,7 +4,7 @@ Yerbas-Miner is the GPU-miner development repository for the Yerbas network.
 
 The current `main` branch contains a native CPU/CUDA GhostRider miner, with its CPU reference path pinned to the implementation used by Yerbas Core.
 
-Current stable release: **1.0.0.6** (`30a1d5a06b9c`). Development builds on `main` are **1.0.0.7**; no further hash-rate gain is claimed yet.
+Current stable release: **1.0.0.6** (`30a1d5a06b9c`). Development builds on `main` are **1.0.0.7**, with a native-width CPU CN multiply candidate that improves offline CPU screens. Sustained hybrid/pool gains remain to be validated; see the [development record](docs/development/DEVELOPMENT_1.0.0.7.md).
 
 Version **1.0.0.6** documents opt-in blocking CUDA completion waits and experimental stable-job Fast/Lite batch growth. See [release notes](docs/development/RELEASE_1.0.0.6.md) for measured results, limitations, and the recommended production command.
 
