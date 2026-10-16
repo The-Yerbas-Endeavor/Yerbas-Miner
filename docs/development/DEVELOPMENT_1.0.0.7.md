@@ -120,8 +120,59 @@ applies to all six. The tool accepts widths 1/2/4; each chosen grouped path must
 pass reference parity before its measurements run. It is excluded from ordinary
 builds. Existing caches are preserved.
 
-Next action: obtain a bounded production GPU phase profile using the existing
-`YERBAS_CUDA_PROFILE=1` switch with blocking waits, growth/overlap disabled and
-cache-first GPU tuning. The diagnostic build must not be treated as a throughput
-comparison because event instrumentation adds overhead. No additional CPU
-baseline repetition or speculative GPU kernel promotion is justified yet.
+## Production GPU profile — 2026-10-15 19:16
+
+The bounded 1.0.0.6 control run captured all six CN variants on both GPUs:
+292 accepted shares, zero rejected, no CUDA errors, clean shutdown. Across
+588.98 seconds of completed rotations, the duration-weighted rate was
+1971.22 H/s total (1481.74 GPU, 489.48 CPU). This short instrumented workload,
+including a developer-fee pool switch, is not comparable to the overnight mean.
+
+Summed sampled GPU stage times put 99.965% inside CryptoNight. At batch 3584,
+Fast took 2524.189/2465.829 ms on GPUs 0/1 (86.74/87.01% loop), and Lite took
+2376.516/2306.807 ms (92.89/92.98% loop). Setup/final are secondary; accelerating
+the other 15 hashes cannot deliver a useful overall gain on this profile.
+
+## Native-width CPU multiply candidate
+
+Disassembly of the portable CPU AES hot loop showed the pinned `mul128` helper
+expanding into four smaller multiplies plus carry handling. The CPU reuse paths
+now use an exact unsigned native-wide product when available: `__uint128_t` on
+supporting GCC/Clang targets, `_umul128` on MSVC x64, and a portable limb fallback
+elsewhere. The existing AES runtime dispatch is preserved; no native CPU build
+flags or CUDA architecture changes are required. The pinned reference is
+unchanged. All custom 1/2/4-way CN paths use the helper. Startup identifies the
+multiply backend separately from AES features.
+
+Correctness gates include both native and fallback products against the pinned
+helper for 100 carry/overflow edge pairs and one million deterministic pairs,
+plus optimized full GhostRider versus the legacy/reference 96-header corpus.
+The existing three CTests pass. Explicit 2-way and 4-way full-plan runs also
+pass grouped parity and worker coverage across all 20 combinations.
+Full-plan measurement also checks grouped
+reference parity across all 20 CN combinations and worker nonce coverage.
+
+Exploratory timing: the serial 3-second-per-stage A/B/B/A showed Fast +4.13%,
+Lite +6.87%, Turtle +5.71%, TurtleLite +4.57%; Dark/DarkLite were noisy
+(+1.79%/-0.15%). The first six-worker 1-second-per-header A/B/B/A equal-rotation
+means were control 515.99/578.97 and candidate 598.61/604.59 H/s (+9.89% mean).
+These are CPU-only synthetic scores, not a claimed hybrid/pool improvement.
+An earlier overlapping pair of test jobs was excluded from performance evidence.
+The compact AES-round and byte-extraction screens were not retained.
+
+The longer repository-build A/B/B/A (six workers, width 1, three seconds per
+header, same 192-nonce batches) gave controls 492.46/515.47 and candidates
+578.94/581.44 H/s. Their equal-rotation means are 503.965 versus 580.190 H/s:
++15.125%. All 20 combinations have positive paired mean changes, from +1.63%
+to +46.60%, though individual rows remain noisy and this is not a statistical
+confidence interval. Together with the shorter +9.89% screen, this qualifies the
+candidate for live hybrid testing, not a 15% whole-miner claim. No >=100 H/s
+sustained whole-miner or accepted-work improvement has been established.
+
+Next gate: rebuild the generic 1.0.0.7 miner and run a bounded uninstrumented
+hybrid comparison with the same cached six-worker policy, blocking CUDA waits,
+growth/overlap/latency controller off, and GPU tuning auto. Verify startup shows
+`mul128=native-wide` (or the appropriate compiler backend), accepted shares from
+both GPUs and CPU, and no invalid shares. Preserve tuning caches. Compare
+matched rotations and ultimately overnight accepted-difficulty work before
+promoting a release. GPU kernels and the 1.0.0.6 release remain unchanged.
