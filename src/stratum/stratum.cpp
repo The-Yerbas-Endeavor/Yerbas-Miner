@@ -3629,22 +3629,28 @@ void Client::report_stats(bool force)
                     << fit(label, 8)
                     << reset
                     << dim << "NOW " << reset
-                    << fit(format_rate(now_value), 10)
+                    << fit(format_rate(now_value), 10) << ' '
                     << dim << "10M AVG " << reset
-                    << fit(format_rate(stats.avg), 10);
+                    << fit(format_rate(stats.avg), 10) << ' ';
 
                 if (session_average >= 0.0) {
                     header
                         << dim << "SESSION " << reset
-                        << fit(format_rate(session_average), 10);
+                        << fit(format_rate(session_average), 10) << ' ';
                 }
 
-                header
-                    << dim << "LOW " << reset
-                    << fit(format_rate(stats.low), 10)
-                    << dim << "HIGH " << reset
-                    << fit(format_rate(stats.high), 10);
-                hashrate_rows.push_back(header.str());
+                std::ostringstream range;
+                range << dim << "LOW " << reset
+                      << fit(format_rate(stats.low), 10) << ' '
+                      << dim << "HIGH " << reset
+                      << fit(format_rate(stats.high), 10);
+                if (display_width(header.str()) + display_width(range.str()) >
+                    hashrate_panel_width - 2U) {
+                    hashrate_rows.push_back(header.str());
+                    hashrate_rows.push_back(std::string(8U, ' ') + range.str());
+                } else {
+                    hashrate_rows.push_back(header.str() + range.str());
+                }
 
                 // Layer the same filled silhouette with three visual
                 // intensities. The crest is brightest, the middle is normal,

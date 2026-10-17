@@ -115,9 +115,17 @@ inline GlyphMode resolve_glyph_mode(const std::string& requested)
     if (requested == "block") return GlyphMode::Block;
     if (requested == "ascii") return GlyphMode::Ascii;
 
-    // Keep the full-detail garden and graphs identical on every platform.
-    // Console host names do not indicate font coverage; compatibility renderers
-    // remain available through an explicit --glyphs block/ascii selection.
+    // Classic Console Host fonts commonly lack Braille and fractional blocks.
+    // UTF-8 mode cannot supply missing font glyphs. Keep the detailed renderer
+    // in Windows Terminal; explicit selections above always take precedence.
+#ifdef _WIN32
+    const char* wt = std::getenv("WT_SESSION");
+    const char* program = std::getenv("TERM_PROGRAM");
+    if ((wt == nullptr || *wt == '\0') &&
+        (program == nullptr ||
+         std::string(program).find("Windows_Terminal") == std::string::npos))
+        return GlyphMode::Block;
+#endif
     return GlyphMode::Braille;
 }
 
