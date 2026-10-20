@@ -173,25 +173,20 @@ bool load_gpu_variant_batch_cache(
 
         if (magic != "YERBAS_GPU_VARIANT_BATCH" ||
             revision != kGpuVariantBatchRevision ||
-            cached_capacity == 0U || cached_budget == 0U ||
-            cached_classes != class_batches)
+            cached_capacity == 0U || cached_budget == 0U)
             continue;
 
-        bool safe = true;
-        for (std::size_t variant = 0; variant < cached_variants.size(); ++variant) {
-            const auto& cfg = cryptonight::kVariantConfigs[variant];
-            const std::size_t safe_max = gpu_align_batch(
-                std::min(capacity,
-                         scratchpad_budget_bytes / std::max<std::size_t>(1U, cfg.page_size)),
-                capacity, quantum);
-            const std::size_t value = cached_variants[variant];
-            if (value == 0U || value > safe_max || value > capacity ||
-                (value >= quantum && (value % quantum) != 0U)) {
-                safe = false;
-                break;
-            }
-        }
-        if (!safe) continue;
+        if (cached_capacity != gpu_variant_batch_cache_capacity_hint(path)) continue;
+        if (!yerbas::gpu_cache::adapt_batches(cached_classes, kGpuBatchClassPageBytes,
+                cached_capacity, cached_budget, capacity, scratchpad_budget_bytes, quantum) ||
+            cached_classes != class_batches) continue;
+        std::array<std::size_t, kGpuVariantBatchCount> pages{};
+        for (std::size_t i = 0; i < pages.size(); ++i)
+            pages[i] = cryptonight::kVariantConfigs[i].page_size;
+        const auto saved_variants = cached_variants;
+        if (!yerbas::gpu_cache::adapt_batches(cached_variants, pages,
+                cached_capacity, cached_budget, capacity, scratchpad_budget_bytes, quantum))
+            continue;
 
         policy.batches = cached_variants;
         policy.specialized = true;
@@ -202,6 +197,8 @@ bool load_gpu_variant_batch_cache(
             if (variant) std::cout << '/';
             std::cout << cryptonight::kVariantConfigs[variant].name << ':' << policy.batches[variant];
         }
+        if (saved_variants != cached_variants)
+            std::cout << " | capacity-adjusted=yes";
         if (cached_capacity != capacity || cached_budget != scratchpad_budget_bytes)
             std::cout << " | capacity-reuse=" << cached_capacity << "->" << capacity;
         std::cout << " | startup-benchmark=off\n";

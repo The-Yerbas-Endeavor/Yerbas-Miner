@@ -1,3 +1,4 @@
+#include "cuda/gpu_cache_limits.h"
 #include "miner.h"
 #include "stratum/fast_lite_growth.h"
 

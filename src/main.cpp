@@ -317,6 +317,13 @@ int main(int argc, char** argv)
             dashboard = std::make_unique<yerbas::console::DashboardScreen>();
 
         const int result = miner.run();
+        // Leave the alternate screen and re-enable normal output before the
+        // final status; messages emitted inside run() are dashboard-only.
+        dashboard.reset();
+        if (result == 0 || result == 130)
+            std::cout << "Miner stopped.\n" << std::flush;
+        else
+            std::cerr << "Miner stopped with error (exit code " << result << ").\n" << std::flush;
         write_startup_log("Yerbas Miner exited with code " + std::to_string(result));
         return result;
     } catch (const std::exception& e) {

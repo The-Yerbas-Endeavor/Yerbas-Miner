@@ -2,6 +2,7 @@ name: Publish CUDA Release
 
 on:
   push:
+    branches: [main]
     tags:
       - '1.*'
   workflow_dispatch:
@@ -26,6 +27,7 @@ concurrency:
 jobs:
   validate-version:
     name: Validate release version
+    if: github.event_name != 'push' || github.ref_type == 'tag' || startsWith(github.event.head_commit.message, 'Release Yerbas Miner ')
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -47,6 +49,8 @@ jobs:
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             requested_version="$MANUAL_VERSION"
+          elif [ "$GITHUB_REF_TYPE" = "branch" ]; then
+            requested_version="$(tr -d '\r\n' < VERSION)"
           else
             requested_version="$GITHUB_REF_NAME"
           fi
@@ -81,6 +85,22 @@ jobs:
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "Release version: $requested_version"
           echo "Release commit: $release_sha"
+
+  portable-checks:
+    name: Portable CPU correctness
+    needs: validate-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.release_sha }}
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build git libboost-dev
+      - name: Build and test
+        run: |
+          cmake -S . -B build-check -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=OFF -DYERBAS_NATIVE_CPU=OFF -DBUILD_TESTING=ON
+          cmake --build build-check --parallel 2
+          ctest --test-dir build-check --output-on-failure
 
   linux-cuda:
     name: Linux CUDA x86_64
@@ -170,7 +190,7 @@ jobs:
         run: |
           set -euxo pipefail
           architectures='52-virtual;61-real;75-real;86-real;89-real;90-real'
-          cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=ON -DBUILD_TESTING=OFF "-DYERBAS_CUDA_ARCHITECTURES=$architectures" -DCMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc" -DCUDAToolkit_ROOT="$CUDA_PATH"
+          cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DYERBAS_ENABLE_CUDA=ON -DYERBAS_NATIVE_CPU=OFF -DBUILD_TESTING=OFF "-DYERBAS_CUDA_ARCHITECTURES=$architectures" -DCMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc" -DCUDAToolkit_ROOT="$CUDA_PATH"
       - name: Build release
         run: cmake --build build-cuda --target yerbas-miner --parallel 2
       - name: Package Linux release
@@ -180,7 +200,8 @@ jobs:
           out='dist/yerbas-miner-linux-cuda-x86_64'
           mkdir -p "$out"
           cp build-cuda/yerbas-miner "$out/yerbas-miner"
-          cp README.md config.example.json VERSION "$out/"
+          cp README.md config.example.json VERSION CHANGELOG.md "$out/"
+          cp "docs/development/RELEASE_${RELEASE_VERSION}.md" "$out/RELEASE-NOTES.md"
           scheduler_revision="$(sed -n 's/^set(YERBAS_SCHEDULER_REVISION "\([^"]*\)")/\1/p' CMakeLists.txt | head -1)"
           test -n "$scheduler_revision"
           {
@@ -230,7 +251,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cmake --build build-arm64 --target yerbas-miner fast-lite-growth-test ghostrider-smoke ghostrider-equivalence --parallel
+          cmake --build build-arm64 --parallel 2
           ctest --test-dir build-arm64 --output-on-failure
 
       - name: Package ARM64 release
@@ -240,7 +261,8 @@ jobs:
           out='dist/yerbas-miner-linux-arm64'
           mkdir -p "$out"
           cp build-arm64/yerbas-miner "$out/yerbas-miner"
-          cp README.md config.example.json VERSION "$out/"
+          cp README.md config.example.json VERSION CHANGELOG.md "$out/"
+          cp "docs/development/RELEASE_${RELEASE_VERSION}.md" "$out/RELEASE-NOTES.md"
           scheduler_revision="$(sed -n 's/^set(YERBAS_SCHEDULER_REVISION "\([^"]*\)")/\1/p' CMakeLists.txt | head -1)"
           test -n "$scheduler_revision"
           {
@@ -276,8 +298,9 @@ jobs:
       - name: Windows host compiler preflight
         shell: pwsh
         run: |
-          cmake -S . -B build-preflight -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=OFF -DBUILD_TESTING=OFF
-          cmake --build build-preflight --config Release --target yerbas-miner --parallel 2
+          cmake -S . -B build-preflight -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=OFF -DYERBAS_NATIVE_CPU=OFF -DBUILD_TESTING=ON
+          cmake --build build-preflight --config Release --parallel 2
+          ctest --test-dir build-preflight -C Release --output-on-failure
       - name: Install CUDA Toolkit 12.8.1
         id: cuda-toolkit
         timeout-minutes: 20
@@ -317,7 +340,7 @@ jobs:
         run: |
           $nvcc = Join-Path $env:CUDA_PATH 'bin\nvcc.exe'
           $architectures = '52-virtual;61-real;75-real;86-real;89-real;90-real'
-          cmake -S . -B build-cuda -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=ON -DBUILD_TESTING=OFF "-DYERBAS_CUDA_ARCHITECTURES=$architectures" -DCMAKE_CUDA_COMPILER="$nvcc" -DCUDAToolkit_ROOT="$env:CUDA_PATH"
+          cmake -S . -B build-cuda -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=ON -DYERBAS_NATIVE_CPU=OFF -DBUILD_TESTING=OFF "-DYERBAS_CUDA_ARCHITECTURES=$architectures" -DCMAKE_CUDA_COMPILER="$nvcc" -DCUDAToolkit_ROOT="$env:CUDA_PATH"
       - name: Build release
         shell: pwsh
         run: cmake --build build-cuda --config Release --target yerbas-miner --parallel 1
@@ -332,6 +355,8 @@ jobs:
           Copy-Item README.md "$out/README.md"
           Copy-Item config.example.json "$out/config.example.json"
           Copy-Item VERSION "$out/VERSION"
+          Copy-Item CHANGELOG.md "$out/CHANGELOG.md"
+          Copy-Item "docs/development/RELEASE_$env:RELEASE_VERSION.md" "$out/RELEASE-NOTES.md"
           $cmake = Get-Content CMakeLists.txt -Raw
           if ($cmake -notmatch 'set\(YERBAS_SCHEDULER_REVISION "([^"]+)"\)') { throw 'Could not resolve scheduler revision' }
           $schedulerRevision = $Matches[1]
@@ -347,9 +372,13 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [validate-version, linux-cuda, windows-cuda, linux-arm64]
+    needs: [validate-version, portable-checks, linux-cuda, windows-cuda, linux-arm64]
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout release documentation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.release_sha }}
       - name: Download successful release builds
         uses: actions/download-artifact@v4
         with:
@@ -374,6 +403,8 @@ jobs:
         run: |
           set -euxo pipefail
           tag="$RELEASE_VERSION"
+          notes="docs/development/RELEASE_${tag}.md"
+          test -f "$notes"
 
           if ! existing_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null)"; then
             existing_sha=''
@@ -389,6 +420,7 @@ jobs:
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/SHA256SUMS.txt               --clobber
+            gh release edit "$tag" --title "$tag" --notes-file "$notes" --draft=false --prerelease=false --latest
           else
-            gh release create "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/SHA256SUMS.txt               --title "$tag"               --generate-notes
+            gh release create "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/SHA256SUMS.txt               --title "$tag" --notes-file "$notes" --latest
           fi

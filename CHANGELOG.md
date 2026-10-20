@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.0.8 — 2026-10-19
+
+- Service GPU completions during CPU batches and share CPU batch work across active workers.
+- Preserve actual completed-hash accounting through cancellation and shutdown.
+- Adapt compatible GPU tuning-cache entries to current memory budgets and improve Linux scratchpad alignment.
+- Consolidate hash-rate charts, add configurable worker colors, rolling averages and component power-efficiency estimates.
+- Improve console compatibility and show a visible stopped message.
+- Retain generic CPU/CUDA builds and publish checked platform archives with checksums.
+
+See [1.0.0.8 release notes](docs/development/RELEASE_1.0.0.8.md).
+
 ## 1.0.0.7 — 2026-10-16
 
 - Use exact native-width CPU CN multiplication where supported, with a portable fallback and unchanged runtime AES dispatch. Add carry/overflow checks and optimized full-GhostRider equivalence coverage. Offline screens and the reviewed 17.65-hour hybrid run support a sustained CPU gain. See the release notes for workload-adjusted results and attribution limits.

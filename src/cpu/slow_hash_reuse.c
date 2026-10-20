@@ -10,6 +10,7 @@
 #include "slow-hash.h"
 #include "oaes_lib.h"
 #include "cn_multiply.h"
+#include "cn_scratchpad_memory.h"
 
 void aesb_single_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
@@ -26,7 +27,7 @@ void aesb_pseudo_round(const uint8_t* in, uint8_t* out, uint8_t* expanded_key);
 static YERBAS_TLS uint8_t* g_yerbas_cn_scratchpad = NULL;
 static YERBAS_TLS OAES_CTX* g_yerbas_cn_oaes = NULL;
 static YERBAS_TLS int g_yerbas_aes_avx2_runtime = -1;
-static int g_yerbas_cn_hugepage_mode = 0;
+static YERBAS_TLS int g_yerbas_cn_hugepage_mode = 0;
 
 static uint8_t* yerbas_cn_alloc_scratchpad(void)
 {
@@ -40,8 +41,13 @@ static uint8_t* yerbas_cn_alloc_scratchpad(void)
         return (uint8_t*)p;
     }
 #endif
-    p = mmap(NULL, YERBAS_CN_MAX_PAGE_SIZE, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const char* alignment = getenv("YERBAS_CPU_ALIGN_SCRATCHPAD");
+    p = MAP_FAILED;
+    if (alignment == NULL || strcmp(alignment, "0") != 0)
+        p = yerbas_cn_map_aligned_scratchpad(YERBAS_CN_MAX_PAGE_SIZE);
+    if (p == MAP_FAILED)
+        p = mmap(NULL, YERBAS_CN_MAX_PAGE_SIZE, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p != MAP_FAILED) {
 #if defined(MADV_HUGEPAGE)
         if (madvise(p, YERBAS_CN_MAX_PAGE_SIZE, MADV_HUGEPAGE) == 0)
@@ -56,7 +62,7 @@ static uint8_t* yerbas_cn_alloc_scratchpad(void)
 static const char* yerbas_cn_page_mode(void)
 {
     if (g_yerbas_cn_hugepage_mode == 2) return "explicit-2MiB";
-    if (g_yerbas_cn_hugepage_mode == 1) return "transparent-hugepage";
+    if (g_yerbas_cn_hugepage_mode == 1) return "transparent-hugepage-advised";
     return "normal-pages";
 }
 

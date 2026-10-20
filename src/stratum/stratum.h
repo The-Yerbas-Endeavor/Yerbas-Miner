@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -184,7 +185,7 @@ private:
                       std::string& extranonce2_hex,
                       std::uint32_t nonce) const;
     bool mine_one(std::intptr_t socket_value);
-    bool mine_cpu_batch(std::intptr_t socket_value);
+    bool mine_cpu_batch(std::intptr_t socket_value, const std::function<bool()>& service = {});
 #ifdef YERBAS_HAS_CUDA
     bool mine_gpu_batch(std::intptr_t socket_value);
     bool mine_hybrid_round(std::intptr_t socket_value);
@@ -291,6 +292,7 @@ private:
         double queue_ms{0.0};
         double scan_ms{0.0};
         double wall_ms{0.0};
+        double consume_delay_ms{0.0};
     };
 
     struct GpuWorker {

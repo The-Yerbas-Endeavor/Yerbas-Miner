@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   windows-cuda-x86_64:
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release Yerbas Miner ')
     name: Windows CUDA x86_64
     runs-on: windows-2022
     timeout-minutes: 300

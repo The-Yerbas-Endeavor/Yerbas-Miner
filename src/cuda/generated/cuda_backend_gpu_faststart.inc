@@ -299,25 +299,20 @@ bool load_gpu_calibration_cache(int device_id,
 
         if (magic != "YERBAS_GPU_CALIBRATION" ||
             revision != kGpuCalibrationRevision ||
-            shape.batch == 0 || shape.batch > capacity ||
-            shape.batch > scratchpad_budget_bytes / kGpuBatchClassPageBytes[0] ||
+            shape.batch == 0 || shape.batch != candidate.class_batches[0] ||
             shape.core_threads < warp || shape.core_threads > kernel_max ||
             shape.core_threads > props.maxThreadsPerBlock || (shape.core_threads % warp) != 0 ||
             shape.cn_threads < warp || shape.cn_threads > props.maxThreadsPerBlock ||
             (shape.cn_threads % warp) != 0)
             continue;
 
-        bool safe = true;
-        for (std::size_t cls = 0; cls < candidate.class_batches.size(); ++cls) {
-            const std::size_t batch = candidate.class_batches[cls];
-            const std::size_t page = kGpuBatchClassPageBytes[cls];
-            if (batch == 0U || batch > capacity ||
-                batch > scratchpad_budget_bytes / std::max<std::size_t>(1U, page)) {
-                safe = false;
-                break;
-            }
-        }
-        if (!safe) continue;
+        const auto saved_classes = candidate.class_batches;
+        const std::size_t cached_capacity = gpu_calibration_cache_capacity_hint(path);
+        const std::size_t quantum = static_cast<std::size_t>(warp) *
+            static_cast<std::size_t>(std::max(1, props.multiProcessorCount));
+        if (!yerbas::gpu_cache::adapt_batches(candidate.class_batches,
+                kGpuBatchClassPageBytes, cached_capacity, 0U, capacity,
+                scratchpad_budget_bytes, quantum)) continue;
 
         apply_calibration_shape(candidate, shape);
         candidate.batch_size = candidate.class_batches[0];
@@ -325,14 +320,14 @@ bool load_gpu_calibration_cache(int device_id,
         candidate.from_cache = true;
         policy = candidate;
 
-        const std::size_t cached_capacity =
-            gpu_calibration_cache_capacity_hint(path);
         std::cout << "[GPU " << device_id << "] GPU calibration cache loaded"
                   << " | batches=" << policy.class_batches[0] << '/' << policy.class_batches[1]
                   << '/' << policy.class_batches[2] << '/' << policy.class_batches[3]
                   << " | classes=2MiB/1MiB/512KiB/256KiB"
                   << " | core=" << shape.core_threads
                   << " | CN=" << shape.cn_threads << '/' << shape.cn_threads << '/' << shape.cn_threads;
+        if (saved_classes != candidate.class_batches)
+            std::cout << " | capacity-adjusted=yes";
         if (cached_capacity != 0U && cached_capacity != capacity)
             std::cout << " | capacity-reuse=" << cached_capacity << "->" << capacity;
         std::cout << " | startup-benchmark=off\n";

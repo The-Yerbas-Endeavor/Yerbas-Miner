@@ -1,0 +1,9 @@
+# Hybrid completion service
+
+The coordinator can consume completed GPU scans, submit candidates and launch the next scan while CPU workers continue their existing batch. The CPU worker pool waits on its completion condition variable and periodically invokes a caller-thread callback without holding the pool mutex. The requested service interval is 10 milliseconds; actual scheduling latency depends on the operating system and load.
+
+The existing blocking pool overload is retained for CPU-only operation and tuning. The serviced overload drains all active workers before rethrowing a callback exception, so input and cancellation state remain valid. The Stratum wrapper makes cancellation sticky after a socket failure, and cancels CPU work when the job changes or shutdown is requested. Completed-work accounting remains based on hashes actually computed. Existing generation/job checks suppress stale GPU and CPU candidates and prevent restarting scans after stopping.
+
+Hybrid service is enabled by default. `YERBAS_HYBRID_SERVICE=0` restores waiting for CPU batches before servicing GPU results. The session log records the mode. Optional `YERBAS_PRODUCTION_LATENCY_TELEMETRY=1` adds `consume_delay_ms` to per-scan diagnostics, measuring the interval between scan completion and coordinator consumption separately from device scan duration. CPU batch diagnostics also record actual completed hashes, elapsed time, cancellation and stale status. Work completed on an old job remains in total compute counters; a cancelled partial batch can be absent from an already-closed rotation record.
+
+The change has no CPU-model rules, native compile flags, GPU architecture restrictions or hash-function changes. A timed-completion simulation validates the scheduling mechanism, not physical GPU throughput. Live matched-rotation and share results are needed before making a hash-rate improvement claim.

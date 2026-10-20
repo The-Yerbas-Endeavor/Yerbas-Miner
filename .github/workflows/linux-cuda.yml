@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   linux-cuda-x86_64:
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release Yerbas Miner ')
     name: Linux CUDA x86_64
     runs-on: ubuntu-24.04
     timeout-minutes: 300

@@ -504,3 +504,31 @@ add_executable(cpu-plan-benchmark EXCLUDE_FROM_ALL
     tests/cpu_plan_benchmark.cpp src/cpu/cpu_worker_pool.cpp)
 target_include_directories(cpu-plan-benchmark PRIVATE src)
 target_link_libraries(cpu-plan-benchmark PRIVATE yerbas-ghostrider-reference Threads::Threads)
+
+if(BUILD_TESTING)
+    add_executable(gpu-cache-limits-test tests/gpu_cache_limits.cpp)
+    target_include_directories(gpu-cache-limits-test PRIVATE src)
+    add_test(NAME gpu-cache-limits COMMAND gpu-cache-limits-test)
+endif()
+
+if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(cn-scratchpad-memory-test tests/cn_scratchpad_memory.cpp)
+    target_include_directories(cn-scratchpad-memory-test PRIVATE src)
+    add_test(NAME cn-scratchpad-memory COMMAND cn-scratchpad-memory-test)
+    add_test(NAME ghostrider-equivalence-original-pages
+        COMMAND ${CMAKE_COMMAND} -E env YERBAS_CPU_ALIGN_SCRATCHPAD=0
+            $<TARGET_FILE:ghostrider-equivalence>)
+endif()
+
+if(BUILD_TESTING)
+    foreach(check dashboard_palette dashboard_rate_history dashboard_efficiency)
+        add_executable(${check}-test tests/${check}.cpp)
+        target_include_directories(${check}-test PRIVATE src)
+        add_test(NAME ${check} COMMAND ${check}-test)
+    endforeach()
+    add_executable(cpu-worker-service-test tests/cpu_worker_service.cpp src/cpu/cpu_worker_pool.cpp)
+    target_include_directories(cpu-worker-service-test PRIVATE src)
+    target_link_libraries(cpu-worker-service-test PRIVATE yerbas-ghostrider-reference Threads::Threads)
+    add_test(NAME cpu-worker-service COMMAND cpu-worker-service-test)
+    set_tests_properties(cpu-worker-service PROPERTIES TIMEOUT 600)
+endif()

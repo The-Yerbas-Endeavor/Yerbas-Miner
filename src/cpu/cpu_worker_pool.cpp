@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <exception>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -405,6 +406,7 @@ struct WorkerPool::Impl {
           active_widths(base_cn_widths),
           locked_widths(base_cn_widths),
           results(threads),
+          completed_hash_counts(threads),
           assigned_starts(threads),
           assigned_counts(threads)
     {
@@ -429,6 +431,16 @@ struct WorkerPool::Impl {
             flush_stage_profiles();
         }
     }
+
+    // Refill small chunks so a delayed worker cannot hold an entire batch open.
+    // Tiny batches and single-worker runs keep their original direct path.
+    const bool share_work = [] {
+        const char* value = std::getenv("YERBAS_CPU_WORKSHARE");
+        return value == nullptr || std::strcmp(value, "0") != 0;
+    }();
+    alignas(64) std::atomic<std::uint64_t> next_work{0};
+    std::uint64_t work_limit{0};
+    bool share_batch{false};
 
     void worker_loop(unsigned int index)
     {
@@ -459,44 +471,59 @@ struct WorkerPool::Impl {
             found.reserve(2);
             const auto widths = runtime_cn_widths();
 
-            for (unsigned int i = 0; i < count;) {
-                if (stop != nullptr && stop->load(std::memory_order_relaxed)) break;
-                const unsigned int group = std::min(lanes, count - i);
-                if (group == 1U || lanes == 1U) {
-                    const std::uint32_t nonce = start + i;
-                    auto lane_header = header;
-                    write_nonce(lane_header, nonce);
-                    const ghostrider::Work work{lane_header.data(), lane_header.size()};
-                    const auto hash = ghostrider::hash_optimized(work);
-                    if (hash_meets_target(hash, target)) found.push_back({nonce});
-                    ++i;
-                    continue;
+            std::uint64_t hashes_completed = 0;
+            const bool participating = share_batch && count != 0U;
+            do {
+                if (participating) {
+                    if (stop != nullptr && stop->load(std::memory_order_relaxed)) break;
+                    const unsigned int chunk = std::max(4U, lanes);
+                    const std::uint64_t offset = next_work.fetch_add(chunk, std::memory_order_relaxed);
+                    if (offset >= work_limit) break;
+                    start = static_cast<std::uint32_t>(static_cast<std::uint64_t>(batch_start) + offset);
+                    count = static_cast<unsigned int>(std::min<std::uint64_t>(chunk, work_limit - offset));
                 }
+                for (unsigned int i = 0; i < count;) {
+                    if (stop != nullptr && stop->load(std::memory_order_relaxed)) break;
+                    const unsigned int group = std::min(lanes, count - i);
+                    if (group == 1U || lanes == 1U) {
+                        const std::uint32_t nonce = start + i;
+                        auto lane_header = header;
+                        write_nonce(lane_header, nonce);
+                        const ghostrider::Work work{lane_header.data(), lane_header.size()};
+                        const auto hash = ghostrider::hash_optimized(work);
+                        if (hash_meets_target(hash, target)) found.push_back({nonce});
+                        ++i;
+                        ++hashes_completed;
+                        continue;
+                    }
 
-                std::array<std::array<std::uint8_t,80>,4> lane_headers{};
-                std::array<ghostrider::Work,4> works{};
-                std::array<ghostrider::Hash256,4> hashes{};
-                std::array<std::uint32_t,4> nonces{};
-                for (unsigned int lane = 0; lane < group; ++lane) {
-                    lane_headers[lane] = header;
-                    nonces[lane] = start + i + lane;
-                    write_nonce(lane_headers[lane], nonces[lane]);
-                    works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
-                }
+                    std::array<std::array<std::uint8_t,80>,4> lane_headers{};
+                    std::array<ghostrider::Work,4> works{};
+                    std::array<ghostrider::Hash256,4> hashes{};
+                    std::array<std::uint32_t,4> nonces{};
+                    for (unsigned int lane = 0; lane < group; ++lane) {
+                        lane_headers[lane] = header;
+                        nonces[lane] = start + i + lane;
+                        write_nonce(lane_headers[lane], nonces[lane]);
+                        works[lane] = {lane_headers[lane].data(), lane_headers[lane].size()};
+                    }
 
-                if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), group, widths)) {
-                    for (unsigned int lane = 0; lane < group; ++lane)
-                        hashes[lane] = ghostrider::hash_optimized(works[lane]);
+                    if (!ghostrider::hash_optimized_batch(works.data(), hashes.data(), group, widths)) {
+                        for (unsigned int lane = 0; lane < group; ++lane)
+                            hashes[lane] = ghostrider::hash_optimized(works[lane]);
+                    }
+                    for (unsigned int lane = 0; lane < group; ++lane) {
+                        if (hash_meets_target(hashes[lane], target)) found.push_back({nonces[lane]});
+                    }
+                    i += group;
+                    hashes_completed += group;
                 }
-                for (unsigned int lane = 0; lane < group; ++lane) {
-                    if (hash_meets_target(hashes[lane], target)) found.push_back({nonces[lane]});
-                }
-                i += group;
-            }
+            } while (participating);
 
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 results[index] = std::move(found);
+                completed_hash_counts[index] = hashes_completed;
                 ++completed;
                 if (completed == threads) all_done.notify_one();
             }
@@ -507,7 +534,8 @@ struct WorkerPool::Impl {
                                const std::array<std::uint8_t, 32>& target,
                                std::uint32_t start,
                                unsigned int count,
-                               const std::atomic_bool* stop)
+                               const std::atomic_bool* stop,
+                               const std::function<void()>& service)
     {
         const auto perf_start = std::chrono::steady_clock::now();
         RotationWorkerChoice worker_choice{threads, false, 0.0, 0.0};
@@ -607,6 +635,7 @@ struct WorkerPool::Impl {
             const std::uint64_t total_hashes = static_cast<std::uint64_t>(threads) * count;
             const std::uint64_t base = total_hashes / active_workers;
             const std::uint64_t remainder = total_hashes % active_workers;
+            share_batch = share_work && active_workers > 1U && base >= 8U;
             std::uint64_t offset = 0;
             for (unsigned int index = 0; index < threads; ++index) {
                 if (index < active_workers) {
@@ -620,23 +649,40 @@ struct WorkerPool::Impl {
                 }
             }
 
+            work_limit = total_hashes;
+            next_work.store(0, std::memory_order_relaxed);
             batch_start = start;
             per_thread = count;
             stop_flag = stop;
             completed = 0;
             for (auto& result : results) result.clear();
+            std::fill(completed_hash_counts.begin(),completed_hash_counts.end(),0);
             ++generation;
         }
         work_ready.notify_all();
 
+        std::exception_ptr service_error;
         std::unique_lock<std::mutex> lock(mutex);
-        all_done.wait(lock, [&] { return completed == threads; });
+        while (completed != threads) {
+            if (!service || service_error) {
+                all_done.wait(lock, [&] { return completed == threads; });
+            } else if (!all_done.wait_for(lock, std::chrono::milliseconds(10),
+                                         [&] { return completed == threads; })) {
+                lock.unlock();
+                try { service(); }
+                catch (...) { service_error = std::current_exception(); }
+                lock.lock();
+            }
+        }
         lock.unlock();
 
         const auto perf_end = std::chrono::steady_clock::now();
         ++run_count;
         const double elapsed_ms = std::chrono::duration<double, std::milli>(perf_end - perf_start).count();
-        const std::uint64_t hashes = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(threads);
+        std::uint64_t hashes = 0;
+        for (const auto count : completed_hash_counts) hashes += count;
+        last_completed_hashes.store(hashes,std::memory_order_relaxed);
+        if (service_error) std::rethrow_exception(service_error);
         const double hps = elapsed_ms > 0.0 ? static_cast<double>(hashes) * 1000.0 / elapsed_ms : 0.0;
 
         if (!tuning_measurement_mode() && runtime_learning_enabled() &&
@@ -730,6 +776,8 @@ struct WorkerPool::Impl {
     unsigned int per_thread{0};
     const std::atomic_bool* stop_flag{nullptr};
     std::vector<std::vector<Candidate>> results;
+    std::vector<std::uint64_t> completed_hash_counts;
+    std::atomic<std::uint64_t> last_completed_hashes{0};
     std::vector<std::uint32_t> assigned_starts;
     std::vector<unsigned int> assigned_counts;
     unsigned int active_workers{1U};
@@ -759,6 +807,11 @@ WorkerPool::WorkerPool(unsigned int threads, unsigned int lanes, AffinityPolicy 
     : impl_(std::make_unique<Impl>(threads, lanes, affinity)) {}
 
 WorkerPool::~WorkerPool() = default;
+
+std::uint64_t WorkerPool::last_hashes_done() const noexcept
+{
+    return impl_->last_completed_hashes.load(std::memory_order_relaxed);
+}
 WorkerPool::WorkerPool(WorkerPool&&) noexcept = default;
 WorkerPool& WorkerPool::operator=(WorkerPool&&) noexcept = default;
 
@@ -768,7 +821,17 @@ std::vector<Candidate> WorkerPool::run(const std::array<std::uint8_t, 80>& base_
                                        unsigned int per_thread,
                                        const std::atomic_bool* stop_flag)
 {
-    return impl_->run(base_header, target_le, batch_start, per_thread, stop_flag);
+    return impl_->run(base_header, target_le, batch_start, per_thread, stop_flag, {});
+}
+
+std::vector<Candidate> WorkerPool::run(const std::array<std::uint8_t, 80>& base_header,
+                                       const std::array<std::uint8_t, 32>& target_le,
+                                       std::uint32_t batch_start,
+                                       unsigned int per_thread,
+                                       const std::atomic_bool* stop_flag,
+                                       const std::function<void()>& service)
+{
+    return impl_->run(base_header, target_le, batch_start, per_thread, stop_flag, service);
 }
 
 } // namespace yerbas::cpu

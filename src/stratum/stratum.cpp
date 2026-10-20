@@ -1,3 +1,7 @@
+#include "dashboard_chart.h"
+#include "dashboard_efficiency.h"
+#include "dashboard_palette.h"
+#include "dashboard_rate_history.h"
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1167,9 +1171,9 @@ bool Client::mine_one(std::intptr_t socket_value)
     return true;
 }
 
-bool Client::mine_cpu_batch(std::intptr_t socket_value)
+bool Client::mine_cpu_batch(std::intptr_t socket_value, const std::function<bool()>& service)
 {
-    if (!config_.miner.cpu_enabled) return true;
+    if (!config_.miner.cpu_enabled || yerbas::stop_requested()) return true;
     const std::uint64_t work_generation = MiningJob::generation();
     const std::string work_job_id = job_.job_id;
     const unsigned int threads = config_.miner.threads == 0 ? std::max(1u, std::thread::hardware_concurrency()) : std::max(1u, config_.miner.threads);
@@ -1199,15 +1203,41 @@ bool Client::mine_cpu_batch(std::intptr_t socket_value)
     const std::uint32_t batch_start = nonce_;
     nonce_ = static_cast<std::uint32_t>(static_cast<std::uint64_t>(nonce_) + total);
 
-    const auto candidates = worker_pool->run(base_header, target_le_, batch_start, per_thread);
-    cpu_hashes_done_ += total;
-    hashes_done_ += total;
+    std::atomic_bool cancel{yerbas::stop_requested()};
+    bool service_ok = true;
+    auto progress = [&] {
+        if (!service_ok) return;
+        try { service_ok = service(); }
+        catch (...) { cancel.store(true, std::memory_order_relaxed); throw; }
+        if (!service_ok || yerbas::stop_requested() ||
+            MiningJob::generation() != work_generation || job_.job_id != work_job_id)
+            cancel.store(true, std::memory_order_relaxed);
+    };
+    const auto cpu_begin = std::chrono::steady_clock::now();
+    const auto candidates = service
+        ? worker_pool->run(base_header, target_le_, batch_start, per_thread, &cancel, progress)
+        : worker_pool->run(base_header, target_le_, batch_start, per_thread);
+    const std::uint64_t completed_hashes = worker_pool->last_hashes_done();
+    cpu_hashes_done_ += completed_hashes;
+    hashes_done_ += completed_hashes;
+    if (production_latency_telemetry_enabled()) {
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cpu_begin).count();
+        std::cout << "[latency cpu] generation=" << work_generation
+                  << " hashes=" << completed_hashes
+                  << " wall_ms=" << std::fixed << std::setprecision(3) << elapsed_ms
+                  << " service=" << (service ? "on" : "off")
+                  << " cancelled=" << (cancel.load(std::memory_order_relaxed) ? "yes" : "no")
+                  << " stale=" << ((MiningJob::generation() != work_generation || job_.job_id != work_job_id) ? "yes" : "no")
+                  << '\n';
+    }
+    if (!service_ok) return false;
     if (MiningJob::generation() != work_generation || job_.job_id != work_job_id) {
         if (!candidates.empty()) std::cout << timestamp() << "[CPU] discarded " << candidates.size() << " stale candidate(s) from job=" << work_job_id << '\n';
         return true;
     }
-    rotation_cpu_hashes_done_ += total;
-    rotation_hashes_done_ += total;
+    rotation_cpu_hashes_done_ += completed_hashes;
+    rotation_hashes_done_ += completed_hashes;
 
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         if (!pump_socket_messages(socket_value, 0)) return false;
@@ -1359,6 +1389,10 @@ Client::GpuScanResult Client::take_gpu_scan_result(GpuWorker& worker)
             state.finished_at - state.dispatched_at).count();
     }
 
+    if (state.finished_at.time_since_epoch().count() != 0)
+        result.consume_delay_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - state.finished_at).count();
+
     const std::exception_ptr error = state.error;
     state.error = nullptr;
     state.result_ready = false;
@@ -1408,6 +1442,7 @@ void Client::record_gpu_scan_telemetry(GpuWorker& worker,
          << " queue_ms=" << std::fixed << std::setprecision(3) << result.queue_ms
          << " scan_ms=" << result.scan_ms
          << " wall_ms=" << result.wall_ms
+         << " consume_delay_ms=" << result.consume_delay_ms
          << " stale=" << (stale ? "yes" : "no")
          << " transition_shaped="
          << (result.transition_shaped ? "yes" : "no")
@@ -2218,6 +2253,9 @@ void Client::drain_gpu_scans() noexcept
                     abandoned.wall_ms = std::chrono::duration<double, std::milli>(
                         state.finished_at - state.dispatched_at).count();
                 }
+                if (state.finished_at.time_since_epoch().count() != 0)
+                    abandoned.consume_delay_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - state.finished_at).count();
                 had_result = true;
             }
 
@@ -2499,6 +2537,7 @@ std::size_t Client::transition_batch_for_worker(
 
 bool Client::mine_gpu_batch(std::intptr_t socket_value)
 {
+    if (yerbas::stop_requested()) return true;
     if (!gpu_pipeline_ready_) return true;
     const std::uint64_t work_generation = MiningJob::generation();
     const std::string work_job_id = job_.job_id;
@@ -2608,7 +2647,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
             task.worker->rotation_hashes_done += task.count;
             rotation_hashes_done_ += task.count;
 
-            if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
+            if (!yerbas::stop_requested() && MiningJob::generation() == work_generation && job_.job_id == work_job_id)
                 (void)launch_next_scan(*task.worker);
             else
                 stale = true;
@@ -2639,6 +2678,7 @@ bool Client::mine_gpu_batch(std::intptr_t socket_value)
 
 bool Client::mine_hybrid_round(std::intptr_t socket_value)
 {
+    if (yerbas::stop_requested()) return true;
     if (!gpu_pipeline_ready_) return mine_cpu_batch(socket_value);
     const std::uint64_t work_generation = MiningJob::generation();
     const std::string work_job_id = job_.job_id;
@@ -2713,11 +2753,8 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
     bool stale = false;
     std::size_t stale_candidates = 0;
 
-    while (remaining != 0U) {
-        if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
-        stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
-
-        bool consumed_result = false;
+    bool consumed_result = false;
+    auto consume_ready = [&]() -> bool {
         for (auto& task : pending) {
             if (task.completed || !gpu_scan_ready(*task.worker)) continue;
 
@@ -2748,14 +2785,14 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
             task.worker->rotation_hashes_done += task.count;
             rotation_hashes_done_ += task.count;
 
-            if (MiningJob::generation() == work_generation && job_.job_id == work_job_id)
+            if (!yerbas::stop_requested() && MiningJob::generation() == work_generation && job_.job_id == work_job_id)
                 (void)launch_next_scan(*task.worker);
             else
                 stale = true;
 
             const std::string source = "GPU " + std::to_string(task.worker->device_id);
             for (std::size_t index = 0; index < candidates.size(); ++index) {
-                if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+                if (!pump_socket_messages(socket_value, 0)) return false;
                 stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
                 if (stale) {
                     stale_candidates += candidates.size() - index;
@@ -2764,17 +2801,41 @@ bool Client::mine_hybrid_round(std::intptr_t socket_value)
                 const auto& candidate = candidates[index];
                 if (config_.logging.level == "debug")
                     std::cout << timestamp() << gpu_color(task.worker->device_id) << "[GPU " << task.worker->device_id << "] candidate | job=" << work_job_id << " nonce=" << nonce_hex(candidate.nonce) << kColorReset << '\n';
-                if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) { drain_gpu_scans(); return false; }
+                if (!submit_share(socket_value, extranonce2, candidate.nonce, source)) return false;
             }
         }
+        return true;
+    };
+    static const bool service_enabled = [] {
+        const char* value = std::getenv("YERBAS_HYBRID_SERVICE");
+        const bool enabled = value == nullptr || std::strcmp(value, "0") != 0;
+        std::cout << "[hybrid] GPU completion service during CPU batches | mode="
+                  << (enabled ? "on" : "off") << " | interval=10ms\n";
+        return enabled;
+    }();
+    auto service = [&]() -> bool {
+        if (!pump_socket_messages(socket_value, 0)) return false;
+        stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+        return consume_ready();
+    };
 
-        if (remaining != 0U && !stale) {
-            if (!mine_cpu_batch(socket_value)) { drain_gpu_scans(); return false; }
+    while (remaining != 0U) {
+        if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
+        stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
+
+        consumed_result = false;
+        if (!consume_ready()) { drain_gpu_scans(); return false; }
+
+        if (remaining != 0U && !stale && !yerbas::stop_requested()) {
+            const bool cpu_ok = service_enabled
+                ? mine_cpu_batch(socket_value, service)
+                : mine_cpu_batch(socket_value);
+            if (!cpu_ok) { drain_gpu_scans(); return false; }
             if (!pump_socket_messages(socket_value, 0)) { drain_gpu_scans(); return false; }
             stale = stale || MiningJob::generation() != work_generation || job_.job_id != work_job_id;
         }
 
-        if (remaining != 0U && stale && !consumed_result)
+        if (remaining != 0U && (stale || yerbas::stop_requested()) && !consumed_result)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -2863,6 +2924,8 @@ void Client::report_stats(bool force)
         static std::chrono::steady_clock::time_point telemetry_updated{};
         static std::vector<double> total_history;
         static std::vector<double> cpu_history;
+        static yerbas::console::RateHistory total_rates,cpu_rates;
+        static std::unordered_map<int,yerbas::console::RateHistory> gpu_rates;
         static std::unordered_map<int, std::vector<double>> gpu_history;
 
         enum class MiningVisualState {
@@ -3287,7 +3350,13 @@ void Client::report_stats(bool force)
         }
 #endif
 
-        push_history(total_history, total_hps);
+        // Use the same report window as the visible worker rates.
+        double dashboard_total_hps = cpu_hps;
+        for (const auto& gpu : gpu_views) dashboard_total_hps += gpu.hps;
+        total_rates.append(uptime,since_report,dashboard_total_hps);
+        cpu_rates.append(uptime,since_report,cpu_hps);
+        for(const auto& gpu:gpu_views)gpu_rates[gpu.id].append(uptime,since_report,gpu.hps);
+        push_history(total_history, dashboard_total_hps);
         push_history(cpu_history, cpu_hps);
         for (const auto& gpu : gpu_views)
             push_history(
@@ -3564,177 +3633,62 @@ void Client::report_stats(bool force)
             }
 
             std::vector<std::string> hashrate_rows;
-
-            double worker_scale_low =
-                std::numeric_limits<double>::infinity();
-            double worker_scale_high = 0.0;
-
-            const auto include_worker_scale = [&](
-                const std::vector<double>& history) {
-                const auto stats = history_stats(history, 600U);
-                if (stats.high <= 0.0 && stats.low <= 0.0)
-                    return;
-                worker_scale_low =
-                    std::min(worker_scale_low, stats.low);
-                worker_scale_high =
-                    std::max(worker_scale_high, stats.high);
-            };
-
-            include_worker_scale(cpu_history);
-            for (const auto& gpu : gpu_views)
-                include_worker_scale(gpu_history[gpu.id]);
-
-            if (std::isfinite(worker_scale_low) &&
-                worker_scale_high > worker_scale_low) {
-                const double spread =
-                    std::max(
-                        1.0,
-                        worker_scale_high - worker_scale_low);
-                const double pad =
-                    std::max(1.0, spread * 0.08);
-                worker_scale_low =
-                    std::max(0.0, worker_scale_low - pad);
-                worker_scale_high += pad;
-            } else {
-                worker_scale_low = -1.0;
-                worker_scale_high = -1.0;
+            static const auto chart_palette=yerbas::console::chart::WorkerPalette::from_environment();
+            const auto cpu_color=chart_palette.cpu();
+            const std::string chart_cpu=cpu_color.foreground;
+            const auto total_stats = history_stats(total_history,600U);
+            const double chart_high = std::max(1.0,total_stats.high*1.05);
+            const std::size_t graph_width = hashrate_panel_width > 16U ? hashrate_panel_width-14U : 32U;
+            // Reserve room for the share summary and recent Activity before
+            // allowing the single chart to consume extra terminal rows.
+            const int chart_height=std::clamp(static_cast<int>(yerbas::console::detail::terminal_rows())-34,6,12);
+            std::vector<yerbas::console::chart::Series> sources{{&cpu_history,cpu_color.foreground,cpu_color.background}};
+            for(const auto& gpu:gpu_views){
+                const auto color=chart_palette.gpu(gpu.id);
+                sources.push_back({&gpu_history[gpu.id],color.foreground,color.background});
             }
-
-            const auto append_source_trend = [&](
-                const std::string& label,
-                const std::string& color,
-                const std::vector<double>& history,
-                double now_value,
-                std::size_t sample_limit,
-                double session_average = -1.0,
-                double graph_scale_low = -1.0,
-                double graph_scale_high = -1.0) {
-                const auto stats =
-                    history_stats(history, sample_limit);
-                const std::size_t graph_width =
-                    total_graph_width > 28U
-                        ? total_graph_width - 28U
-                        : 32U;
-                const auto graph =
-                    compact_graph(
-                        history,
-                        graph_width,
-                        sample_limit,
-                        graph_scale_low,
-                        graph_scale_high);
-
-                std::ostringstream header;
-                header
-                    << color << bold
-                    << fit(label, 8)
-                    << reset
-                    << dim << "NOW " << reset
-                    << fit(format_rate(now_value), 10) << ' '
-                    << dim << "10M AVG " << reset
-                    << fit(format_rate(stats.avg), 10) << ' ';
-
-                if (session_average >= 0.0) {
-                    header
-                        << dim << "SESSION " << reset
-                        << fit(format_rate(session_average), 10) << ' ';
-                }
-
-                std::ostringstream range;
-                range << dim << "LOW " << reset
-                      << fit(format_rate(stats.low), 10) << ' '
-                      << dim << "HIGH " << reset
-                      << fit(format_rate(stats.high), 10);
-                if (display_width(header.str()) + display_width(range.str()) >
-                    hashrate_panel_width - 2U) {
-                    hashrate_rows.push_back(header.str());
-                    hashrate_rows.push_back(std::string(8U, ' ') + range.str());
-                } else {
-                    hashrate_rows.push_back(header.str() + range.str());
-                }
-
-                // Layer the same filled silhouette with three visual
-                // intensities. The crest is brightest, the middle is normal,
-                // and the base is subdued so the graph reads as one coherent
-                // shape instead of three equally-heavy terminal rows.
-                std::ostringstream graph_top;
-                graph_top
-                    << std::string(8U, ' ')
-                    << dim << "╷ " << reset
-                    << bold << color
-                    << graph[0]
-                    << reset;
-                hashrate_rows.push_back(graph_top.str());
-
-                std::ostringstream graph_mid;
-                graph_mid
-                    << std::string(8U, ' ')
-                    << dim << "│ " << reset
-                    << color
-                    << graph[1]
-                    << reset;
-                hashrate_rows.push_back(graph_mid.str());
-
-                std::ostringstream graph_bottom;
-                graph_bottom
-                    << std::string(8U, ' ')
-                    << dim << "╰ " << reset
-                    << dim << color
-                    << graph[2]
-                    << reset
-                    << ' '
-                    << bold << color
-                    << (tui_glyph_mode ==
-                                yerbas::console::detail::GlyphMode::Braille
-                            ? "◆"
-                            : (tui_glyph_mode ==
-                                       yerbas::console::detail::GlyphMode::Block
-                                   ? "█"
-                                   : "*"))
-                    << reset;
-                hashrate_rows.push_back(graph_bottom.str());
-            };
-
-            append_source_trend(
-                "TOTAL",
-                green,
-                total_history,
-                total_hps,
-                600U,
-                average_hps);
-
-            hashrate_rows.push_back(
-                dim + repeat(
-                    "─",
-                    total_graph_width > 18U
-                        ? total_graph_width - 18U
-                        : 24U) + reset);
-            hashrate_rows.push_back(
-                dim + std::string("WORKER DETAIL") + reset);
-
-            append_source_trend(
-                "CPU",
-                yellow,
-                cpu_history,
-                cpu_hps,
-                600U,
-                -1.0,
-                worker_scale_low,
-                worker_scale_high);
-
-            for (std::size_t i = 0U;
-                 i < gpu_views.size();
-                 ++i) {
-                const auto& gpu = gpu_views[i];
-                append_source_trend(
-                    "GPU " + std::to_string(gpu.id),
-                    i == 0U ? cyan : magenta,
-                    gpu_history[gpu.id],
-                    gpu.hps,
-                    600U,
-                    -1.0,
-                    worker_scale_low,
-                    worker_scale_high);
+            std::ostringstream summary;
+            summary<<green<<bold<<"TOTAL "<<reset<<dim<<"NOW "<<reset<<format_rate(dashboard_total_hps)
+                   <<dim<<"  10M AVG "<<reset<<format_rate(total_rates.average(600.0,false).value_or(0.0))
+                   <<dim<<"  SESSION "<<reset<<format_rate(average_hps);
+            hashrate_rows.push_back(summary.str());
+            std::ostringstream range;
+            range<<dim<<"LOW "<<reset<<format_rate(total_stats.low)<<dim<<"  HIGH "<<reset<<format_rate(total_stats.high);
+            if(display_width(summary.str())+display_width(range.str())+2U<=hashrate_panel_width-2U)
+                hashrate_rows.back()+="  "+range.str();
+            else hashrate_rows.push_back(range.str());
+            const auto graph=yerbas::console::chart::render(sources,graph_width,600U,chart_high,-1,
+                tui_glyph_mode==yerbas::console::detail::GlyphMode::Ascii?8:
+                (tui_glyph_mode==yerbas::console::detail::GlyphMode::Block?4:1),chart_height);
+            for(std::size_t row=0;row<graph.size();++row){
+                std::string tick;
+                if(row==0)tick=format_rate(chart_high);
+                else if(row==graph.size()/2)tick=format_rate(chart_high/2);
+                else if(row+1==graph.size())tick="0 H/s";
+                hashrate_rows.push_back(dim+fit(tick,10)+ (row+1==graph.size()?"└ ":"│ ")+reset+graph[row]);
             }
+            const std::string left=format_duration(std::min(600.0,uptime))+" ago",right="now";
+            hashrate_rows.push_back(std::string(12,' ')+dim+left+
+                std::string(graph_width>left.size()+right.size()?graph_width-left.size()-right.size():1,' ')+right+reset);
+            const bool show_range=hashrate_panel_width>=116U;
+            std::string columns=fit("WORKER",10)+fit("NOW",12)+fit("SHARE",8);
+            for(const auto* title:{"10M AVG","30M AVG","1HR AVG","6HR AVG","1DAY AVG"})columns+=fit(title,12);
+            if(show_range)columns+=fit("LOW",12)+"HIGH";
+            hashrate_rows.push_back(dim+columns+reset);
+            const auto key_row=[&](const std::string& name,const std::string& color,double current,const std::vector<double>& history,const yerbas::console::RateHistory& rates){
+                const auto stats=history_stats(history,600U);
+                std::ostringstream share;share<<std::fixed<<std::setprecision(1)<<(dashboard_total_hps>0?current*100/dashboard_total_hps:0)<<'%';
+                std::string row=color+bold+fit(name,10)+reset+fit(format_rate(current),12)+fit(share.str(),8);
+                for(double window:{600.0,1800.0,3600.0,21600.0,86400.0}){
+                    const auto value=rates.average(window,window>600.0);
+                    row+=fit(value?format_rate(*value):"--",12);
+                }
+                if(show_range)row+=fit(format_rate(stats.low),12)+format_rate(stats.high);
+                hashrate_rows.push_back(row);
+            };
+            key_row("CPU",chart_cpu,cpu_hps,cpu_history,cpu_rates);
+            for(std::size_t i=0;i<gpu_views.size();++i)
+                key_row("GPU "+std::to_string(gpu_views[i].id),chart_palette.gpu(gpu_views[i].id).foreground,gpu_views[i].hps,gpu_history[gpu_views[i].id],gpu_rates[gpu_views[i].id]);
 
             const auto make_panel = [&](const std::string& title,
                                         const std::vector<std::string>& body,
@@ -3775,7 +3729,7 @@ void Client::report_stats(bool force)
             };
 
             auto hashrate_box =
-                make_panel("HASHRATE / 10 MIN",
+                make_panel("HASHRATE / 10 MIN | RUN TIME " + format_duration(uptime),
                            hashrate_rows,
                            hashrate_panel_width);
 
@@ -4473,6 +4427,7 @@ void Client::report_stats(bool force)
             frame << line(work.str());
         }
 
+        yerbas::console::power::Summary total_power;
         {
             if (config_.miner.cpu_enabled) {
                 std::ostringstream cpu_line;
@@ -4487,6 +4442,9 @@ void Client::report_stats(bool force)
                            yerbas::console::detail::
                                format_power(cpu_telemetry),
                            12);
+                total_power.add(cpu_hps,cpu_telemetry.watts,cpu_telemetry.power_available);
+                cpu_line << fit("EFF "+yerbas::console::power::efficiency_text(cpu_hps,cpu_telemetry.watts,cpu_telemetry.power_available),24)
+                         << "ENERGY " << yerbas::console::power::energy_text(cpu_hps,cpu_telemetry.watts,cpu_telemetry.power_available);
                 frame << line(cpu_line.str());
             }
 
@@ -4516,6 +4474,11 @@ void Client::report_stats(bool force)
                         << fit("n/a", 12);
                 }
 
+                const bool has_power=telemetry_it!=gpu_telemetry.devices.end()&&telemetry_it->second.power_available;
+                const double watts=has_power?telemetry_it->second.watts:0.0;
+                total_power.add(gpu.hps,watts,has_power);
+                gpu_line << fit("EFF "+yerbas::console::power::efficiency_text(gpu.hps,watts,has_power),24)
+                         << "ENERGY " << yerbas::console::power::energy_text(gpu.hps,watts,has_power);
                 frame << line(gpu_line.str());
             }
         }
@@ -4549,8 +4512,11 @@ void Client::report_stats(bool force)
             current
                 << fit("CURRENT HASHRATE", 18)
                 << green << bold
-                << format_rate(total_hps)
-                << reset;
+                << format_rate(dashboard_total_hps)
+                << reset
+                << "  CPU+GPU POWER " << total_power.power_text()
+                << "  EFF " << total_power.efficiency_text()
+                << "  ENERGY " << total_power.energy_text();
             frame << line(current.str());
         }
 
@@ -4569,28 +4535,20 @@ void Client::report_stats(bool force)
         const bool activity_dev_fee_active =
             dev_fee_active(mining_started_);
 
-        // Keep the top of the dashboard visible on shorter terminals. The full
-        // layout uses ten activity rows when height allows; on smaller Windows
-        // viewports the activity feed contracts before the YERBAS MINER banner
-        // can be pushed off-screen.
+        // Budget from the actual rows already rendered, including worker count
+        // and legends, instead of assuming a fixed 35-row dashboard body.
         const std::size_t terminal_height =
             yerbas::console::detail::terminal_rows();
-        const std::size_t activity_total_rows =
-            terminal_height >= 45U
-                ? 10U
-                : std::max<std::size_t>(
-                      1U,
-                      terminal_height > 35U
-                          ? terminal_height - 35U
-                          : 1U);
-        const std::size_t activity_event_rows =
-            activity_dev_fee_active
-                ? (activity_total_rows > 1U
-                       ? activity_total_rows - 1U
-                       : 1U)
-                : activity_total_rows;
+        const std::string rendered_body = frame.str();
+        const std::size_t body_rows = static_cast<std::size_t>(
+            std::count(rendered_body.begin(), rendered_body.end(), '\n'));
+        constexpr std::size_t footer_rows = 2U;
+        const std::size_t activity_total_rows = terminal_height > body_rows + footer_rows
+            ? std::min<std::size_t>(10U, terminal_height - body_rows - footer_rows) : 0U;
+        const bool show_fee_row = activity_dev_fee_active && activity_total_rows > 0U;
+        const std::size_t activity_event_rows = activity_total_rows - (show_fee_row ? 1U : 0U);
 
-        if (activity_dev_fee_active) {
+        if (show_fee_row) {
             frame << line(
                 yellow + bold +
                 std::string("DEV FEE MINING ACTIVE") +
@@ -4599,44 +4557,47 @@ void Client::report_stats(bool force)
                 reset);
         }
 
-        if (g_recent_activity.empty()) {
-            frame << line(
-                dim +
-                std::string(
-                    "waiting for mining activity...") +
-                reset);
-            for (std::size_t i = 1U;
-                 i < activity_event_rows;
-                 ++i)
-                frame << line("");
-        } else {
-            std::size_t shown = 0U;
-            for (const auto& event :
-                 g_recent_activity) {
-                std::string color = reset;
-
-                if (event.find("BLOCK FOUND") !=
-                    std::string::npos)
-                    color = yellow;
-                else if (event.find("rejected") !=
-                         std::string::npos)
-                    color = red;
-                else if (event.find("accepted") !=
-                         std::string::npos)
-                    color = green;
-                else if (event.find("new job") !=
-                         std::string::npos)
-                    color = magenta;
-
+        if (activity_event_rows > 0U) {
+            if (g_recent_activity.empty()) {
                 frame << line(
-                    color + event + reset);
+                    dim +
+                    std::string(
+                        "waiting for mining activity...") +
+                    reset);
+                for (std::size_t i = 1U;
+                     i < activity_event_rows;
+                     ++i)
+                    frame << line("");
+            } else {
+                std::size_t shown = 0U;
+                for (const auto& event :
+                     g_recent_activity) {
+                    std::string color = reset;
 
-                if (++shown == activity_event_rows)
-                    break;
+                    if (event.find("BLOCK FOUND") !=
+                        std::string::npos)
+                        color = yellow;
+                    else if (event.find("rejected") !=
+                             std::string::npos)
+                        color = red;
+                    else if (event.find("accepted") !=
+                             std::string::npos)
+                        color = green;
+                    else if (event.find("new job") !=
+                             std::string::npos)
+                        color = magenta;
+
+                    frame << line(
+                        color + event + reset);
+
+                    if (++shown == activity_event_rows)
+                        break;
+                }
+
+                while (shown++ < activity_event_rows)
+                    frame << line("");
             }
 
-            while (shown++ < activity_event_rows)
-                frame << line("");
         }
 
         frame << green

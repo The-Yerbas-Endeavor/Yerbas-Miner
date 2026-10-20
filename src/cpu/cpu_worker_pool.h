@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <vector>
 
 namespace yerbas::cpu {
@@ -43,6 +44,8 @@ public:
     WorkerPool(WorkerPool&&) noexcept;
     WorkerPool& operator=(WorkerPool&&) noexcept;
 
+    // Completed hashes from the last run, including a partially cancelled batch.
+    std::uint64_t last_hashes_done() const noexcept;
     unsigned int thread_count() const noexcept;
     unsigned int lane_width() const noexcept;
     AffinityPolicy affinity_policy() const noexcept;
@@ -54,6 +57,16 @@ public:
                                std::uint32_t batch_start,
                                unsigned int per_thread,
                                const std::atomic_bool* stop = &yerbas::g_stop_requested);
+
+    // Run a non-reentrant coordinator callback while waiting for workers. The
+    // callback runs on the caller thread without the pool mutex. Exceptions are
+    // rethrown only after workers finish, keeping their input/stop state alive.
+    std::vector<Candidate> run(const std::array<std::uint8_t, 80>& base_header,
+                               const std::array<std::uint8_t, 32>& target_le,
+                               std::uint32_t batch_start,
+                               unsigned int per_thread,
+                               const std::atomic_bool* stop,
+                               const std::function<void()>& service);
 
 private:
     struct Impl;
