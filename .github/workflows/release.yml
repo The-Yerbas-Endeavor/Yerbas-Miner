@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version to create (e.g. 1.0.0.5)'
+        description: 'Release version to create (e.g. 1.0.0.9)'
         required: true
         type: string
       source_ref:
@@ -393,7 +393,7 @@ jobs:
           test -f dist/yerbas-miner-windows-cuda-x86_64.zip
           test -f dist/yerbas-miner-linux-arm64.zip
           test "$(find dist -maxdepth 1 -type f -name 'yerbas-miner-*.zip' | wc -l)" -eq 3
-          sha256sum dist/*.zip | tee dist/SHA256SUMS.txt
+          (cd dist && sha256sum *.zip) | tee dist/SHA256SUMS.txt
       - name: Create tag and publish release after all builds succeed
         env:
           GH_TOKEN: ${{ github.token }}

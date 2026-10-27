@@ -4,7 +4,7 @@ Yerbas-Miner is the GPU-miner development repository for the Yerbas network.
 
 The current `main` branch contains a native CPU/CUDA GhostRider miner, with its CPU reference path pinned to the implementation used by Yerbas Core.
 
-Current stable release: **[1.0.0.8](https://github.com/The-Yerbas-Endeavor/Yerbas-Miner/releases/tag/1.0.0.8)**. This release improves hybrid CPU/GPU scheduling, shutdown accounting and the console dashboard while retaining generic builds and runtime dispatch. See [release notes](docs/development/RELEASE_1.0.0.8.md) for changes, downloads and upgrade information. Previous releases remain available.
+Current stable release: **[1.0.0.9](https://github.com/The-Yerbas-Endeavor/Yerbas-Miner/releases/tag/1.0.0.9)**. This release refines shared CPU work distribution while retaining per-system autotuning, portable builds and runtime dispatch. See [release notes](docs/development/RELEASE_1.0.0.9.md) for changes, downloads and upgrade information. Previous releases remain available.
 
 
 ## GhostRider reference

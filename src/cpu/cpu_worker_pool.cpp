@@ -476,7 +476,7 @@ struct WorkerPool::Impl {
             do {
                 if (participating) {
                     if (stop != nullptr && stop->load(std::memory_order_relaxed)) break;
-                    const unsigned int chunk = std::max(4U, lanes);
+                    const unsigned int chunk = std::max(1U, lanes);
                     const std::uint64_t offset = next_work.fetch_add(chunk, std::memory_order_relaxed);
                     if (offset >= work_limit) break;
                     start = static_cast<std::uint32_t>(static_cast<std::uint64_t>(batch_start) + offset);

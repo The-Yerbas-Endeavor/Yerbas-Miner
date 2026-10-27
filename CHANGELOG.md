@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0.9 — 2026-10-26
+
+- Refill shared CPU work at lane-sized granularity to reduce batch tail latency.
+- Preserve generic builds, runtime dispatch, per-system tuning and existing GPU scheduling.
+- Add full-reference worker parity and odd-tail coverage for all CryptoNight combinations.
+- Publish fresh Windows CUDA, Linux CUDA and Linux ARM64 CI archives with checksums.
+
+See [1.0.0.9 release notes](docs/development/RELEASE_1.0.0.9.md).
+
 ## 1.0.0.8 — 2026-10-19
 
 - Service GPU completions during CPU batches and share CPU batch work across active workers.
