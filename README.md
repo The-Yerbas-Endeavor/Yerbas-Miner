@@ -214,6 +214,8 @@ Yerbas Miner 1.0.0.6 | commit <git-sha> | scheduler <scheduler-revision>
 
 A tag matching `VERSION` triggers the dedicated **Publish CUDA Release** workflow. It builds Linux CUDA x86_64 and Windows CUDA x86_64 independently. The GitHub Release is created or updated only after **both** builds succeed, and it publishes:
 
+- `yerbas-miner-linux-cpu-x86_64.zip` (CPU-only)
+- `yerbas-miner-windows-cpu-x86_64.zip` (CPU-only)
 - `yerbas-miner-linux-cuda-x86_64.zip`
 - `yerbas-miner-windows-cuda-x86_64.zip`
 - `SHA256SUMS.txt`

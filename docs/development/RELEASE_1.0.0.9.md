@@ -8,6 +8,8 @@
 
 ## Downloads
 
+- `yerbas-miner-windows-cpu-x86_64.zip`: Windows x86_64, CPU-only; no CUDA required.
+- `yerbas-miner-linux-cpu-x86_64.zip`: Linux x86_64, CPU-only; no CUDA required.
 - `yerbas-miner-windows-cuda-x86_64.zip`: Windows x86_64 with CUDA support.
 - `yerbas-miner-linux-cuda-x86_64.zip`: Linux x86_64 with CUDA support.
 - `yerbas-miner-linux-arm64.zip`: Linux ARM64, CPU-only.

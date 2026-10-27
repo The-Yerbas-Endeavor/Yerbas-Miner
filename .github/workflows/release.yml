@@ -14,10 +14,14 @@ on:
         required: true
         type: string
       source_ref:
-        description: 'Branch/ref to release'
+        description: 'Branch/ref to release, or an existing tag for CPU asset backfill'
         required: true
         default: 'main'
         type: string
+      cpu_only:
+        description: 'Add CPU-only assets to an existing release without rebuilding CUDA'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +40,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_sha: ${{ steps.version.outputs.release_sha }}
+      cpu_only: ${{ steps.version.outputs.cpu_only }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@v4
@@ -48,6 +53,8 @@ jobs:
         env:
           MANUAL_VERSION: ${{ inputs.version }}
           MANUAL_SOURCE_REF: ${{ inputs.source_ref }}
+          CPU_ONLY: ${{ inputs.cpu_only }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
 
@@ -67,10 +74,17 @@ jobs:
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             test -n "$MANUAL_SOURCE_REF"
-            if git show-ref --verify --quiet "refs/tags/$MANUAL_SOURCE_REF"; then
+            if [ "$CPU_ONLY" != 'true' ] && git show-ref --verify --quiet "refs/tags/$MANUAL_SOURCE_REF"; then
               echo "ERROR: manual source_ref must be a branch, not a tag: $MANUAL_SOURCE_REF" >&2
               exit 1
             fi
+          fi
+
+          if [ "$CPU_ONLY" = 'true' ]; then
+            test "$source_version" = "$requested_version"
+            tag_sha="$(git rev-parse "refs/tags/$requested_version^{commit}")"
+            test "$tag_sha" = "$release_sha"
+            test "$(gh release view "$requested_version" --json isDraft --jq '.isDraft')" = false
           fi
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$source_version" != "$requested_version" ]; then
@@ -85,6 +99,7 @@ jobs:
             test "$source_version" = "$requested_version"
           fi
 
+          echo "cpu_only=${CPU_ONLY:-false}" >> "$GITHUB_OUTPUT"
           echo "version=$requested_version" >> "$GITHUB_OUTPUT"
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "Release version: $requested_version"
@@ -107,9 +122,76 @@ jobs:
           cmake --build build-check --parallel 2
           ctest --test-dir build-check --output-on-failure
 
+      - name: Package Linux CPU release
+        if: needs.validate-version.result == 'success'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+          RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
+        run: |
+          set -euxo pipefail
+          out='dist/yerbas-miner-linux-cpu-x86_64'
+          mkdir -p "$out"
+          cp build-check/yerbas-miner "$out/yerbas-miner"
+          cp README.md config.example.json VERSION CHANGELOG.md "$out/"
+          cp "docs/development/RELEASE_${RELEASE_VERSION}.md" "$out/RELEASE-NOTES.md"
+          printf 'Yerbas Miner %s\nCommit: %s\nPlatform: Linux x86_64\nGPU backend: CPU-only build\nCPU: portable with runtime dispatch\n' "$RELEASE_VERSION" "$RELEASE_SHA" > "$out/BUILD-INFO.txt"
+          (cd "$out" && cmake -E tar cf ../yerbas-miner-linux-cpu-x86_64.zip --format=zip .)
+      - name: Upload Linux CPU release candidate
+        if: needs.validate-version.result == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-cpu
+          path: dist/yerbas-miner-linux-cpu-x86_64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-cpu:
+    name: Windows CPU x86_64
+    needs: validate-version
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.release_sha }}
+      - name: Build and test portable CPU release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build-cpu -G "Visual Studio 17 2022" -A x64 -DYERBAS_ENABLE_CUDA=OFF -DYERBAS_NATIVE_CPU=OFF -DBUILD_TESTING=ON
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build-cpu --config Release --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir build-cpu -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package Windows CPU release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = 'dist/yerbas-miner-windows-cpu-x86_64'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item build-cpu/Release/yerbas-miner.exe "$out/yerbas-miner.exe"
+          Copy-Item README.md,config.example.json,VERSION,CHANGELOG.md "$out/"
+          Copy-Item "docs/development/RELEASE_$env:RELEASE_VERSION.md" "$out/RELEASE-NOTES.md"
+          @("Yerbas Miner $env:RELEASE_VERSION","Commit: $env:RELEASE_SHA","Platform: Windows x86_64","GPU backend: CPU-only build","CPU: portable with runtime dispatch") | Set-Content "$out/BUILD-INFO.txt"
+          Compress-Archive -Path "$out/*" -DestinationPath 'dist/yerbas-miner-windows-cpu-x86_64.zip'
+      - name: Upload Windows CPU release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-cpu
+          path: dist/yerbas-miner-windows-cpu-x86_64.zip
+          if-no-files-found: error
+          retention-days: 30
+
   linux-cuda:
     name: Linux CUDA x86_64
     needs: validate-version
+    if: needs.validate-version.outputs.cpu_only != 'true'
     runs-on: ubuntu-24.04
     env:
       RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
@@ -228,6 +310,7 @@ jobs:
   linux-arm64:
     name: Linux ARM64
     needs: validate-version
+    if: needs.validate-version.outputs.cpu_only != 'true'
     runs-on: ubuntu-24.04-arm
     env:
       RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
@@ -290,6 +373,7 @@ jobs:
   windows-cuda:
     name: Windows CUDA x86_64
     needs: validate-version
+    if: needs.validate-version.outputs.cpu_only != 'true'
     runs-on: windows-2022
     env:
       RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
@@ -379,7 +463,8 @@ jobs:
     name: Publish GitHub Release
     permissions:
       contents: write
-    needs: [validate-version, portable-checks, linux-cuda, windows-cuda, linux-arm64]
+    if: needs.validate-version.outputs.cpu_only != 'true'
+    needs: [validate-version, portable-checks, windows-cpu, linux-cuda, windows-cuda, linux-arm64]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release documentation
@@ -399,7 +484,9 @@ jobs:
           test -f dist/yerbas-miner-linux-cuda-x86_64.zip
           test -f dist/yerbas-miner-windows-cuda-x86_64.zip
           test -f dist/yerbas-miner-linux-arm64.zip
-          test "$(find dist -maxdepth 1 -type f -name 'yerbas-miner-*.zip' | wc -l)" -eq 3
+          test -f dist/yerbas-miner-linux-cpu-x86_64.zip
+          test -f dist/yerbas-miner-windows-cpu-x86_64.zip
+          test "$(find dist -maxdepth 1 -type f -name 'yerbas-miner-*.zip' | wc -l)" -eq 5
           (cd dist && sha256sum *.zip) | tee dist/SHA256SUMS.txt
       - name: Create tag and publish release after all builds succeed
         env:
@@ -426,8 +513,50 @@ jobs:
           fi
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/SHA256SUMS.txt               --clobber
+            gh release upload "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/yerbas-miner-linux-cpu-x86_64.zip               dist/yerbas-miner-windows-cpu-x86_64.zip               dist/SHA256SUMS.txt               --clobber
             gh release edit "$tag" --title "$tag" --notes-file "$notes" --draft=false --prerelease=false --latest
           else
-            gh release create "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/SHA256SUMS.txt               --title "$tag" --notes-file "$notes" --latest
+            gh release create "$tag"               dist/yerbas-miner-linux-cuda-x86_64.zip               dist/yerbas-miner-windows-cuda-x86_64.zip               dist/yerbas-miner-linux-arm64.zip               dist/yerbas-miner-linux-cpu-x86_64.zip               dist/yerbas-miner-windows-cpu-x86_64.zip               dist/SHA256SUMS.txt               --title "$tag" --notes-file "$notes" --latest
           fi
+
+  publish-cpu-assets:
+    name: Add CPU assets to existing release
+    if: needs.validate-version.outputs.cpu_only == 'true'
+    needs: [validate-version, portable-checks, windows-cpu]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.validate-version.outputs.release_sha }}
+    steps:
+      - name: Download tested CPU builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-cpu
+          path: dist
+          merge-multiple: true
+      - name: Verify existing release and prepare combined checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_VERSION" --jq '.object.sha')" = "$RELEASE_SHA"
+          test -f dist/yerbas-miner-linux-cpu-x86_64.zip
+          test -f dist/yerbas-miner-windows-cpu-x86_64.zip
+          mkdir existing
+          gh release download "$RELEASE_VERSION" --dir existing --pattern 'yerbas-miner-*.zip' --pattern SHA256SUMS.txt
+          (cd existing && sha256sum --check SHA256SUMS.txt)
+          archive_count="$(find existing -maxdepth 1 -name '*.zip' | wc -l)"
+          test "$archive_count" -eq 3 || test "$archive_count" -eq 5
+          cp existing/yerbas-miner-linux-cuda-x86_64.zip existing/yerbas-miner-windows-cuda-x86_64.zip existing/yerbas-miner-linux-arm64.zip dist/
+          test "$(find dist -maxdepth 1 -name '*.zip' | wc -l)" -eq 5
+          (cd dist && sha256sum *.zip) > dist/SHA256SUMS.txt
+      - name: Attach CPU binaries and combined checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gh release upload "$RELEASE_VERSION" dist/yerbas-miner-linux-cpu-x86_64.zip dist/yerbas-miner-windows-cpu-x86_64.zip --clobber
+          gh release upload "$RELEASE_VERSION" dist/SHA256SUMS.txt --clobber
